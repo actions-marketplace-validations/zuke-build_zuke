@@ -1,3 +1,6 @@
+// Copyright (c) 2026 the Zuke contributors
+// SPDX-License-Identifier: MIT
+
 /**
  * Zuke's own build, authored with Zuke — the project builds itself.
  *
@@ -19,6 +22,7 @@ import {
   type AbsolutePath,
   appendJobSummary,
   Build,
+  discoverTargets,
   FileTasks,
   glob,
   isCI,
@@ -34,6 +38,7 @@ import { consoleRenderer, ConsoleTasks } from "@zuke/console";
 import {
   aiFixer,
   aiReviewWorkflow,
+  budget,
   genericReviewer,
   securityReviewer,
   suppressions,
@@ -84,6 +89,11 @@ import {
 } from "./build/gitleaks_report.ts";
 import { checkSnippets, formatSnippetFailures } from "./build/snippets.ts";
 import { checkHclWrappers, generateHclWrappers } from "./build/hcl_gen.ts";
+import {
+  checkGraphDoc,
+  GRAPH_DOC_PATH,
+  writeGraphDoc,
+} from "./build/graph_doc.ts";
 import { lintPrBody } from "./build/pr_body_lint.ts";
 import { assertLockUnchanged } from "./build/lock_check.ts";
 import { checkCoreFloors, formatFloorFailures } from "./build/core_floor.ts";
@@ -91,10 +101,15 @@ import {
   checkPluginSkillsSync,
   syncPluginSkills,
 } from "./build/plugin_sync.ts";
+import { checkSkillTree } from "./build/skill_check.ts";
 import {
-  bumpFailure,
+  buildGeminiArchive,
+  GEMINI_ASSET_NAMES,
+} from "./build/gemini_archive.ts";
+import {
   checkPluginVersionBump,
   defaultGitHistory,
+  reportFor,
   resolveBaseRef,
 } from "./build/plugin_version_check.ts";
 import { actionPin } from "./build/action_pins.ts";
@@ -107,6 +122,19 @@ import { githubWorkflows } from "./build/workflows.ts";
  * because a local `./zuke security` writes it too.
  */
 const GITLEAKS_REPORT = "gitleaks-report.json";
+
+/**
+ * The files the `check` target type-checks: the globs of the root `check` task
+ * in `deno.json`, which stays the entry point for a plain `deno task check`.
+ */
+const CHECK_GLOBS = [
+  "zuke.ts",
+  "build/*.ts",
+  "tests/**/*.ts",
+  "packages/*/mod.ts",
+  "packages/*/src/**/*.ts",
+  "packages/*/tests/**/*.ts",
+];
 
 class ZukeBuild extends Build {
   clean = target()
@@ -141,22 +169,41 @@ class ZukeBuild extends Build {
     .secret()
     .env("OPENAI_API_KEY");
 
+  // One budget shared by everything that spends that key in a run: the lint
+  // fixer below and both reviewers further down. It is a runaway guard, not a
+  // throttle — 500k tokens is far above what a normal run costs (a review is a
+  // capped 20k-token diff plus file context, verify, and adjudication), so it
+  // only bites when something loops. Whatever trips it is skipped, not failed:
+  // the reviewer reports the skip on the console and in the summary, and the
+  // fixer leaves the underlying lint failure standing. Declared here because a
+  // field can only be referenced by fields declared below it.
+  aiBudget = budget((b) => b.maxTokens(500_000));
+
   lint = target()
     .description("Lint the workspace (deno lint)")
     // Self-heal lint failures with @zuke/ai, dogfooding the full loop: on a
     // failing `deno lint` the fixer applies the fix, commits and pushes it to
     // the PR branch, re-runs lint to verify, and — because it auto-fixed —
     // posts an overview comment of what it changed (with the code) plus the job
-    // summary. A missing key (e.g. local runs, or fork PRs where the secret is
-    // withheld) is skipped cleanly and the lint failure still stands. The CI
-    // workflow grants this job `contents: write` so the push can land.
+    // summary. The CI workflow grants this job `contents: write` so the push
+    // can land.
+    //
+    // `.runOnly("ci")` is what keeps that loop off a contributor's machine. It
+    // used to be `.allowCI()`, which permits both hosts, and the
+    // local safety was assumed to come from the key being absent outside CI —
+    // which is false wherever OPENAI_API_KEY is exported, as it is in agent
+    // environments. A local `zuke lint` on a red tree therefore rewrote,
+    // committed and pushed it. Off CI the fixer now returns before the model
+    // call and the lint failure stands, which is the right outcome locally: the
+    // person running it is already looking at the error.
     .recoverWith(
       aiFixer((f) =>
         f
           .provider("openai")
           .apiKey(this.openaiKey)
+          .budget(this.aiBudget)
           .autoApply()
-          .allowCI()
+          .runOnly("ci")
           .commitFixes()
           .allowPaths("packages/**", "tests/**", "zuke.ts")
           // Fetch the PR base branch itself (auto-detected from the CI env) for
@@ -185,7 +232,11 @@ class ZukeBuild extends Build {
     .description("Type-check the whole workspace")
     .dependsOn(this.restore)
     .executes(async () => {
-      await DenoTasks.task((s) => s.name("check"));
+      // The same files the root `check` task names, run through the wrapper
+      // rather than `deno task` so the row can say `// Errors: 0`: the task
+      // runner's shell would expand the globs, so they are expanded here.
+      const files = (await Promise.all(CHECK_GLOBS.map((g) => glob(g)))).flat();
+      await DenoTasks.check((s) => s.frozen().paths(...files));
     });
 
   test = target()
@@ -452,6 +503,50 @@ class ZukeBuild extends Build {
       ConsoleTasks.info("plugins/zuke/skills/ is in sync with skills/.");
     });
 
+  skillsCheck = target()
+    .description(
+      "Validate skills/ against the Agent Skills spec (frontmatter, names)",
+    )
+    .executes(async () => {
+      const problems = await checkSkillTree();
+      if (problems.length > 0) {
+        throw new Error(
+          `skills/ violates the Agent Skills spec:\n  ${
+            problems.join("\n  ")
+          }\n` +
+            "Codex and Gemini CLI load these folders directly, so a " +
+            "non-conforming skill silently fails to load there.",
+        );
+      }
+      ConsoleTasks.info("skills/ conforms to the Agent Skills spec.");
+    });
+
+  graphDoc = target()
+    .description(
+      "Regenerate docs/graph.md — this build's graph as a Mermaid page",
+    )
+    .executes(async () => {
+      const changed = await writeGraphDoc(discoverTargets(this));
+      ConsoleTasks.info(
+        changed
+          ? `Regenerated ${GRAPH_DOC_PATH}.`
+          : `${GRAPH_DOC_PATH} already up to date.`,
+      );
+    });
+
+  graphDocCheck = target()
+    .description("Verify docs/graph.md matches the current build graph")
+    .executes(async () => {
+      const stale = await checkGraphDoc(discoverTargets(this));
+      if (stale.length > 0) {
+        throw new Error(
+          `The build-graph page is out of date:\n  ${stale.join("\n  ")}\n` +
+            "Run `./zuke graphDoc` and commit the result.",
+        );
+      }
+      ConsoleTasks.info(`${GRAPH_DOC_PATH} matches the build graph.`);
+    });
+
   pluginVersionCheck = target()
     .description("Verify a skills change also bumped the plugin version")
     .executes(async () => {
@@ -462,35 +557,22 @@ class ZukeBuild extends Build {
         (path) => Deno.readTextFile(path).catch(() => null),
       );
       // Unlike the rest of the gate this needs history, so it can genuinely be
-      // unable to run. Say so rather than reporting success — a check that
-      // cannot fail is worse than no check, because it looks like one.
-      if (!verdict.checked) {
-        ConsoleTasks.info(
-          `Plugin version check skipped — ${verdict.reason}. ` +
-            "Set ZUKE_PLUGIN_BASE_REF to compare against a ref you do have.",
-        );
-        return;
-      }
-      if (verdict.headVersion === undefined) {
-        throw new Error(`Plugin version check failed — ${verdict.reason}.`);
-      }
-      if (verdict.changed.length === 0) {
-        ConsoleTasks.info(
-          `No published skill changed against ${base}; nothing to bump.`,
-        );
-        return;
-      }
-      if (!verdict.bumped) throw new Error(bumpFailure(verdict));
-      ConsoleTasks.info(
-        `Skills changed against ${base} and the plugin version moved ` +
-          `${verdict.baseVersion} → ${verdict.headVersion}.`,
-      );
+      // unable to run — and on CI that inability is itself the failure. The
+      // decision, including which outcome a skip gets, lives in the module so
+      // every branch of it is tested; this stays the dispatch.
+      const report = reportFor(verdict, base, isCI());
+      if (report.level === "error") throw new Error(report.message);
+      ConsoleTasks.info(report.message);
     });
 
   // Only meaningful on a `pull_request`-triggered run (the workflow passes it
   // via env from `github.event.pull_request.body` — never interpolated into
   // a shell line, so an adversarial PR body can't inject a command). Unset
   // locally and empty on a `push` run, where `prBodyLint` is then a no-op.
+  // The body is frozen into the run's event payload: re-running a failed job
+  // lints the body as it was when the event fired, so after editing a flagged
+  // PR description, push a commit (a `synchronize` event) rather than
+  // re-running — the re-run would report the old text forever.
   prBody = parameter(
     "Pull request body to lint for code fragments that break release-please's parser",
   )
@@ -696,6 +778,8 @@ class ZukeBuild extends Build {
       this.snippetsCheck,
       this.hclSyncCheck,
       this.pluginSyncCheck,
+      this.skillsCheck,
+      this.graphDocCheck,
       this.pluginVersionCheck,
       this.prBodyLint,
       this.actionPinCheck,
@@ -728,22 +812,65 @@ class ZukeBuild extends Build {
       ConsoleTasks.success(`Uploaded ${report} to code scanning (${url}).`);
     });
 
-  // Dogfood @zuke/ai: two reviewers on different providers gate the `review`
-  // target — an OpenAI security scan and a Gemini code-quality review. The keys
-  // are org secrets (OPENAI_API_KEY / GEMINI_API_KEY) available in Actions;
-  // `skipIfKeyMissing()` skips a review (announcing it on the console and in the
-  // summary) when its key is absent, e.g. on local runs. `onError("warn")` keeps
-  // an API hiccup from breaking the build, and each assessment lands in the job
-  // summary and as a PR comment. The `openaiKey` parameter is declared above,
-  // beside the `lint` target that shares it.
+  // CodeQL is the SAST lane: GitHub's hosted static analysis over the
+  // TypeScript sources and the workflow files (the `actions` language), run on
+  // every pull request so each commit lands with a code-scanning check — which
+  // is also what the OpenSSF Scorecard SAST check measures. The analysis
+  // itself is the marketplace init/analyze pair in the generated `codeql.yml`
+  // (declared in `build/workflows.ts`), which replaces this target's step
+  // entirely — so this body runs only on a *local* invocation, where there is
+  // no CodeQL CLI in the toolchain to run. It fails rather than reports,
+  // because a target that printed a note and exited 0 would look like a scan
+  // that ran and passed.
+  codeql = target()
+    .description("CodeQL static analysis (runs in CI via codeql.yml)")
+    .executes(() => {
+      throw new Error(
+        "CodeQL cannot run locally: there is no CodeQL CLI in the " +
+          "toolchain. The scan runs in CI — the generated " +
+          ".github/workflows/codeql.yml analyzes the TypeScript sources and " +
+          "the GitHub Actions workflows on every pull request, push to " +
+          "master, and weekly schedule. Findings land on the repository's " +
+          "Security tab (code scanning).",
+      );
+    });
+
+  // Dogfood @zuke/ai: two reviewers gate the `review` target — an OpenAI
+  // security scan and an OpenAI code-quality review. The key is an org secret
+  // (OPENAI_API_KEY) available in Actions; `skipIfKeyMissing()` skips a review
+  // (announcing it on the console and in the summary) when its key is absent,
+  // e.g. on local runs. `onError("warn")` keeps an API hiccup from breaking
+  // the build, and each assessment lands in the job summary and as a PR
+  // comment. The `openaiKey` parameter is declared above, beside the `lint`
+  // target that shares it.
   securityReview = securityReviewer((r) =>
     r
       .provider("openai")
       .apiKey(this.openaiKey)
+      .budget(this.aiBudget)
       .skipIfKeyMissing()
-      .comment() // upsert the assessment onto the PR (uses GITHUB_TOKEN)
+      // A fresh PR comment per run (uses GITHUB_TOKEN): earlier assessments —
+      // and their finding ids — stay on the thread as history instead of being
+      // overwritten in place.
+      .comment("append")
       .diff((d) => d.base(Deno.env.get("ZUKE_REVIEW_BASE") ?? "origin/master"))
       .maxDiffTokens(20000)
+      // Deeper review: judge against this file's documented conventions (read
+      // from the diff base, so a PR can't rewrite the rules it's judged by),
+      // see the changed files whole rather than as bare hunks, and
+      // adversarially verify each candidate finding before reporting it.
+      .conventionsFile("AGENTS.md")
+      .fileContext()
+      .verify()
+      // Engage with the PR thread: a maintainer contests a finding by replying
+      // with its id quoted; a sound rebuttal dismisses it durably instead of it
+      // resurfacing (reworded) every push. Only comments whose author GitHub
+      // itself attributes as OWNER/MEMBER/COLLABORATOR are ever read — a
+      // drive-by comment never reaches the model.
+      // Threads: each finding is anchored to its line, and a maintainer
+      // contests it by replying there. This repo reviewing its own PRs is the
+      // only real-world exercise this feature gets.
+      .discussion((d) => d.threads())
       // Dismissed false positives, kept auditable under "Suppressed": a build's
       // own readiness probe / tcpReachable run build-author code that connects
       // to an address the author typed — no more capability than any other line
@@ -793,8 +920,26 @@ class ZukeBuild extends Build {
       // job new ability — false about the diff: `permissions:` and every
       // `permission-*` input are byte-identical; only comments and a step name
       // changed.
+      // `7p24ls729f3e` and `3u5kom8amw7hi` are two phrasings of one finding on
+      // `NodeTasks.evaluate`: that it "executes arbitrary/attacker-controlled
+      // module code from a path argument". The first was answered on the PR and
+      // the reviewer dismissed it; the second restates it against the same
+      // code, so the hard override belongs here. The task runs a module the
+      // *build author* names, in a Node process with the build's own
+      // permissions — no more capability than any other line in a build file,
+      // and the same trust level as `NodeTasks.run`, `CmdTasks.exec`, or `$`,
+      // exactly as for the readiness-probe finding at the top of this list.
+      // "Attacker-controlled" is the premise that fails: no untrusted input
+      // reaches the path, and one that did would be the calling build's bug,
+      // not this API's. Call arguments cannot inject into the generated driver
+      // — every embedded value is a JSON literal, with a test that feeds a
+      // quote-and-`process.exit` payload through both. A path validation was
+      // considered and rejected: nothing about a path distinguishes a trusted
+      // build-authored one from an untrusted one, so the check would be a
+      // boundary in appearance only (guideline 10). The trust boundary is now
+      // stated in the task's JSDoc instead.
       // cspell:ignore myee fmcx ownw eav zbigfl oldslqkyj vnfjvb bja rj xp dtit
-      // cspell:ignore uhzbksic lk fag hqxu trsbgqqlurzb ilv
+      // cspell:ignore uhzbksic lk fag hqxu trsbgqqlurzb ilv ls kom amw
       .suppress(
         suppressions((s) =>
           s.add(
@@ -814,36 +959,93 @@ class ZukeBuild extends Build {
             "3lk27fag8hqxu",
             "trsbgqqlurzb",
             "3u2ilv23j9jb2",
+            "7p24ls729f3e",
+            "3u5kom8amw7hi",
           )
         ),
       )
-      .failWhen((g) => g.scoreAbove(8))
+      .failWhen((g) => g.scoreAbove(5))
       .onError("warn")
   );
 
-  // A second reviewer on a different provider (Gemini), to showcase two AI
-  // providers gating the same target. This one is a general code-quality review
-  // with explicit criteria rather than a security scan.
-  geminiKey = parameter("Gemini API key for the AI code-quality review")
-    .secret()
-    .env("GEMINI_API_KEY");
-
+  // A second reviewer gating the same target: a general code-quality review
+  // with explicit criteria rather than a security scan. It runs on OpenAI like
+  // the security review (Gemini proved flaky here — frequent 503s), sharing
+  // the same `openaiKey`.
   generalReview = genericReviewer((r) =>
     r
-      .provider("gemini")
-      .apiKey(this.geminiKey)
+      .provider("openai")
+      .apiKey(this.openaiKey)
+      .budget(this.aiBudget)
       .skipIfKeyMissing()
-      .comment() // a separate PR comment, keyed by the reviewer name
+      // Separate comments from the security review (keyed by reviewer name),
+      // appended per run for the same history-keeping reasons.
+      .comment("append")
       // The built-in rubric already covers clarity, cohesion, tests, and docs;
       // `.criteria(...)` adds just the project-specific conventions on top.
       .criteria(
         "This is a strict, dependency-free TypeScript codebase on Deno: no " +
           "`any`, no `as` or non-null assertions, and the public API is shaped " +
-          "as namespaced `*Tasks` objects rather than loose exported functions.",
+          "as namespaced `*Tasks` objects rather than loose exported functions. " +
+          "Flag duplicated logic: a helper retyped instead of imported, or a " +
+          "near-copy differing only by a constant, a flag name, or a message. " +
+          "Treat a second copy of a guard, an escape, or a credential " +
+          "resolution as a defect — those are what drift apart. Prefer an " +
+          "unexported module in the same package as the shared home; do not " +
+          "propose unifying two wrappers that mirror two different real CLIs, " +
+          "and do not propose an abstraction larger than the duplication it " +
+          "removes. Flag SOLID breaches in their concrete form here: a file " +
+          "fusing unrelated domains, a flag that switches a function between " +
+          "two behaviours instead of a settings-lambda extension, a whole " +
+          "settings object passed where a narrow type would do, and a direct " +
+          "`Deno.*` or global-`fetch` dependency where an injectable seam " +
+          "(`StateHost`, `EnvReader`, an injected `fetch`) exists.",
       )
       .diff((d) => d.base(Deno.env.get("ZUKE_REVIEW_BASE") ?? "origin/master"))
       .maxDiffTokens(20000)
-      .failWhen((g) => g.scoreAbove(8))
+      // Same conventions document and discussion loop as the security review —
+      // refuted quality findings stay dismissed instead of looping, too. The
+      // verify pass proved itself on the v2 PR: the security reviewer (which
+      // had it) refuted speculative findings by citing the actual code, while
+      // this reviewer (which lacked it) kept re-asserting a fixed finding and
+      // a reworded false positive — so it verifies now as well.
+      .conventionsFile("AGENTS.md")
+      .discussion((d) => d.threads())
+      .verify()
+      // Dismissed false positives from the v2 PR, kept auditable under
+      // "Suppressed": `31ce99tz9w4ef` claims the comment upsert trusts any
+      // bot comment carrying the marker — fixed in that same PR (the marker
+      // must OPEN the body; findOwnComment requires bot/self authorship), with
+      // regression tests. `nal6fieqlp45` claims the system prompt's marker
+      // names don't match the emitted fences — disproven by
+      // prompt_markers_test.ts, which pins the full announced-marker inventory
+      // against the actual prompts (its earlier wordings were q4wvfi90ig3c
+      // and 3mcvjgd95cj96).
+      // `23ldpwpbdzryb` claims `defaultRegistryRunner` drops the child's
+      // inherited actor metadata when only a kind/roles are supplied. It does
+      // the opposite: the whole three-variable write sits inside the
+      // `options.actor` guard, so with no actor nothing is written and the
+      // inherited triple reaches the child untouched — pinned by the test
+      // "kind and roles without an actor change nothing", which spawns a real
+      // child under a different caller's claim. Honouring the supplied values
+      // there is the unsafe option, since it would pair one caller's actor with
+      // another's entitlements. Its round-2 rewording (`3e30ptl9ksk1y`,
+      // "inherited actor metadata can still be dropped") inverts the behaviour
+      // rather than describing it, and escalated 4/10 to 5/10 against a JSDoc
+      // and a regression test, so it is pinned here.
+      // cspell:ignore tz9w4ef nal6fieqlp q4wvfi90ig mcvjgd95cj mzsyzzio
+      // cspell:ignore ldpwpbdzryb ptl9ksk1y
+      .suppress(
+        suppressions((s) =>
+          s.add(
+            "31ce99tz9w4ef",
+            "nal6fieqlp45",
+            "23ldpwpbdzryb",
+            "3e30ptl9ksk1y",
+          )
+        ),
+      )
+      .failWhen((g) => g.scoreAbove(5))
       .onError("warn")
   );
 
@@ -946,6 +1148,86 @@ class ZukeBuild extends Build {
         apply(s);
         return s;
       });
+
+      // Keep the repository's "Latest release" pointer on the Marketplace
+      // action's own release. GitHub surfaces that pointer well beyond the
+      // releases page — the Marketplace listing advertises it as the action's
+      // current version, and `gemini extensions install` resolves it — and
+      // release-please drags it onto whichever package released last, so each
+      // run pins it back. The committed pin is the source of truth for which
+      // release that is; in the window between actionRelease cutting a new
+      // tag and its chore PR landing the pin update, this re-marks the
+      // previous action release, and the PR's merge corrects it. Best-effort
+      // like the asset step below: the releases exist either way, and a throw
+      // here would redden the job after they do — skipping the JSR publish
+      // that `needs` this job.
+      let actionReleaseExists = true;
+      try {
+        const latest = await GhTasks.markReleaseLatest((s) =>
+          s.tag(ACTION_PIN.version).repo(repo).token(token)
+        );
+        actionReleaseExists = latest.state !== "no-release";
+        ConsoleTasks.info(
+          actionReleaseExists
+            ? `Latest release pointer: ${ACTION_PIN.version} ` +
+              `(${latest.state}).`
+            : `${ACTION_PIN.version} is tagged but has no GitHub release ` +
+              `yet — actionRelease's browser step creates it. The Latest ` +
+              `pointer is unchanged.`,
+        );
+      } catch (error) {
+        ConsoleTasks.warn(
+          "Re-marking the action release as Latest failed — the releases " +
+            "themselves are unaffected and the next release run retries: " +
+            `${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+      if (!actionReleaseExists) {
+        // Nothing to attach the archive to either: the uploads below are
+        // pinned to the same release, and skipping beats three 404 warnings.
+        ConsoleTasks.info("Skipping the Gemini archive until it exists.");
+        return;
+      }
+
+      // Attach the Gemini CLI extension archive to the action's release —
+      // named by its tag, never resolved through "latest": the pointer can be
+      // elsewhere when the re-mark above failed or lost a race, and a
+      // `.refresh()` pointed at whatever release happens to be latest would
+      // churn assets on a package release. `.refresh()` replaces an attached
+      // archive whose bytes have changed, so the extension `gemini extensions
+      // install` resolves tracks the current skills instead of freezing at
+      // whatever the long-lived release was first given. Best-effort: the
+      // archive is a nice-to-have for Gemini installs, not part of the
+      // release contract, and a throw here would redden the job after the
+      // releases already exist — skipping the JSR publish that `needs` this
+      // job. A warning plus the next run's top-up is the right trade.
+      const scratch = await Deno.makeTempDir();
+      try {
+        const archive = `${scratch}/zuke.tar.gz`;
+        const packed = await buildGeminiArchive(archive);
+        ConsoleTasks.info(
+          `Built the Gemini extension archive (${packed.length} file(s)).`,
+        );
+        for (const name of GEMINI_ASSET_NAMES) {
+          const result = await GhTasks.uploadReleaseAsset((s) =>
+            s.file(archive).name(name).tag(ACTION_PIN.version).repo(repo)
+              .token(token).refresh()
+          );
+          ConsoleTasks.info(
+            `${name} on ${result.releaseTag}: ${result.state}.`,
+          );
+        }
+      } catch (error) {
+        ConsoleTasks.warn(
+          "Attaching the Gemini extension archive failed — the releases " +
+            "themselves are unaffected and the next release run tops the " +
+            `assets up: ${
+              error instanceof Error ? error.message : String(error)
+            }`,
+        );
+      } finally {
+        await Deno.remove(scratch, { recursive: true });
+      }
     });
 
   actionRelease = target()

@@ -1,10 +1,16 @@
+// Copyright (c) 2026 the Zuke contributors
+// SPDX-License-Identifier: MIT
+
 import {
   assertEquals,
   assertRejects,
   assertThrows,
 } from "../../core/tests/_assert.ts";
 import { ToolNotFoundError } from "@zuke/core/tooling";
-import { missingTool } from "@zuke/core/tooling/conformance";
+import {
+  assertWrapperConformance,
+  missingTool,
+} from "@zuke/core/tooling/conformance";
 import { NpxSettings, NpxTasks } from "../src/npx.ts";
 
 Deno.test("the default binary is npx", () => {
@@ -63,5 +69,15 @@ Deno.test("NpxTasks.npx reaches execution", async () => {
   await assertRejects(
     () => NpxTasks.npx((s) => missingTool(s).command("x")),
     ToolNotFoundError,
+  );
+});
+
+Deno.test("npx: conforms to the wrapper contract", async () => {
+  await assertWrapperConformance(
+    () => new NpxSettings().command("tsc"),
+    "npx",
+    {
+      resolution: "path",
+    },
   );
 });

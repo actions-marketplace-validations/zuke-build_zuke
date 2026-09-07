@@ -215,6 +215,17 @@
         }
       ]
     },
+    "packages/shellcheck": {
+      "component": "shellcheck",
+      "changelog-path": "CHANGELOG.md",
+      "extra-files": [
+        {
+          "type": "json",
+          "path": "deno.json",
+          "jsonpath": "$.version"
+        }
+      ]
+    },
     "packages/jest": {
       "component": "jest",
       "changelog-path": "CHANGELOG.md",
@@ -294,6 +305,39 @@
     },
     "packages/vite": {
       "component": "vite",
+      "changelog-path": "CHANGELOG.md",
+      "extra-files": [
+        {
+          "type": "json",
+          "path": "deno.json",
+          "jsonpath": "$.version"
+        }
+      ]
+    },
+    "packages/storybook": {
+      "component": "storybook",
+      "changelog-path": "CHANGELOG.md",
+      "extra-files": [
+        {
+          "type": "json",
+          "path": "deno.json",
+          "jsonpath": "$.version"
+        }
+      ]
+    },
+    "packages/redocly": {
+      "component": "redocly",
+      "changelog-path": "CHANGELOG.md",
+      "extra-files": [
+        {
+          "type": "json",
+          "path": "deno.json",
+          "jsonpath": "$.version"
+        }
+      ]
+    },
+    "packages/lint-staged": {
+      "component": "lint-staged",
       "changelog-path": "CHANGELOG.md",
       "extra-files": [
         {

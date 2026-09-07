@@ -1,3 +1,6 @@
+// Copyright (c) 2026 the Zuke contributors
+// SPDX-License-Identifier: MIT
+
 /**
  * `@zuke/gcloud` — typed Google Cloud tooling for Zuke builds: the `gcloud`
  * (Google Cloud SDK) CLI wrapper, plus **GCS** and **Secret Manager** REST task
@@ -38,3 +41,53 @@ export {
   type SecretManagerTasksApi,
 } from "./src/secret_manager.ts";
 export { type GcpRestOptions } from "./src/rest.ts";
+export {
+  GcloudAuthActivateServiceAccountSettings,
+  GcloudAuthConfigureDockerSettings,
+  GcloudAuthListSettings,
+  GcloudAuthPrintAccessTokenSettings,
+  GcloudAuthPrintIdentityTokenSettings,
+  GcloudAuthRevokeSettings,
+} from "./src/auth_commands.ts";
+export {
+  GcloudConfigGetValueSettings,
+  GcloudConfigListSettings,
+  GcloudConfigSetSettings,
+  GcloudConfigUnsetSettings,
+} from "./src/config.ts";
+export {
+  GcloudBuildsDescribeSettings,
+  GcloudBuildsListSettings,
+  GcloudBuildsLogSettings,
+  GcloudBuildsSubmitSettings,
+} from "./src/builds.ts";
+export {
+  GcloudRunDeploySettings,
+  GcloudRunServicesDescribeSettings,
+  GcloudRunServicesListSettings,
+  GcloudRunServicesUpdateSettings,
+  GcloudRunUpdateTrafficSettings,
+  RUN_SERVICE_URL_FORMAT,
+} from "./src/cloud_run.ts";
+export {
+  GcloudArtifactsImagesDeleteSettings,
+  GcloudArtifactsImagesListSettings,
+  GcloudArtifactsRepositoriesDescribeSettings,
+  GcloudArtifactsRepositoriesListSettings,
+} from "./src/artifacts.ts";
+export {
+  GcloudStorageCpSettings,
+  GcloudStorageLsSettings,
+  GcloudStorageRmSettings,
+  GcloudStorageRsyncSettings,
+} from "./src/storage.ts";
+export {
+  GcloudClustersDescribeSettings,
+  GcloudClustersGetCredentialsSettings,
+  GcloudClustersListSettings,
+} from "./src/clusters.ts";
+export {
+  GcloudFunctionsDeploySettings,
+  GcloudFunctionsDescribeSettings,
+  GcloudSecretsVersionsAccessSettings,
+} from "./src/functions.ts";

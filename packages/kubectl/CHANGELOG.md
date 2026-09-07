@@ -1,5 +1,19 @@
 # Changelog
 
+## [1.1.0](https://github.com/zuke-build/zuke/compare/kubectl-v1.0.1...kubectl-v1.1.0) (2026-08-29)
+
+
+### Features
+
+* **kubectl:** broaden the wrapper to the deploy surface a build drives ([#413](https://github.com/zuke-build/zuke/issues/413)) ([a794061](https://github.com/zuke-build/zuke/commit/a7940617d8ca72daa07d173700cbccf98d874cc7))
+
+## [1.0.1](https://github.com/zuke-build/zuke/compare/kubectl-v1.0.0...kubectl-v1.0.1) (2026-08-13)
+
+
+### Bug Fixes
+
+* **cli:** escape line separators in generated literals; license headers and review docs ([#347](https://github.com/zuke-build/zuke/issues/347)) ([114f842](https://github.com/zuke-build/zuke/commit/114f84246e83fc6fb0bd12b55e8eb04192978074))
+
 ## [1.0.0](https://github.com/zuke-build/zuke/compare/kubectl-v0.3.3...kubectl-v1.0.0) (2026-07-30)
 
 

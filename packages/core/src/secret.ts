@@ -1,3 +1,6 @@
+// Copyright (c) 2026 the Zuke contributors
+// SPDX-License-Identifier: MIT
+
 /**
  * Secret sources: resolve a `secret` parameter's value at run time from an
  * external provider instead of requiring it pre-set in the environment.
@@ -31,6 +34,7 @@
  * @module
  */
 
+import { messageOf } from "./internal.ts";
 import { Command } from "./shell.ts";
 import { FileTasks } from "./file.ts";
 import type { AbsolutePath, PathLike } from "./path.ts";
@@ -120,7 +124,7 @@ export class ExecSecretSettings {
     } catch (error) {
       // A missing binary (or other spawn failure) surfaces as a clean
       // SecretError rather than a raw Deno error.
-      const message = error instanceof Error ? error.message : String(error);
+      const message = messageOf(error);
       throw new SecretError(
         `execSecret command "${this.#command}" failed: ${message}`,
       );
@@ -170,7 +174,7 @@ export class FileSecretSettings {
     try {
       text = await FileTasks.readText(this.#path);
     } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
+      const message = messageOf(error);
       throw new SecretError(
         `fileSecret could not read "${this.#path}": ${message}`,
       );

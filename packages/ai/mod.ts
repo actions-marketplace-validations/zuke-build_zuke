@@ -1,3 +1,6 @@
+// Copyright (c) 2026 the Zuke contributors
+// SPDX-License-Identifier: MIT
+
 /**
  * `@zuke/ai` — AI-powered code review for Zuke builds.
  *
@@ -30,6 +33,7 @@ export type {
   Usage,
 } from "./src/types.ts";
 export { AiFixer, aiFixer } from "./src/fixer.ts";
+export type { RunScope } from "./src/run_scope.ts";
 export type { Confidence, FileEdit, Fix, FixLocation } from "./src/fix.ts";
 export { AgentFixer, agentFixer } from "./src/agent_fixer.ts";
 export type {
@@ -51,6 +55,7 @@ export {
   Suppressions,
   suppressions,
 } from "./src/suppress.ts";
+export { DiscussionSettings } from "./src/discussion.ts";
 export {
   correctnessReviewer,
   genericReviewer,

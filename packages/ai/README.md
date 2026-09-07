@@ -1,12 +1,22 @@
 # @zuke/ai
 
-AI code review as a target validation for
+Deep, discussion-driven AI code review as a target validation for
 [Zuke](https://github.com/zuke-build/zuke#readme) builds. Define a reviewer
 fluently — provider and API key are the only required options — and plug it into
 a target with `.validateBefore(...)` / `.validateAfter(...)`. The reviewer
 fetches the diff, asks the model for a structured assessment, prints the
 findings, and **breaks the build** when the assessed risk crosses the threshold
 you choose.
+
+Since v2, a reviewer can go well beyond scoring a diff: judge the change against
+the project's own conventions document, read the changed files whole,
+adversarially verify each candidate finding before reporting it, and **hold a
+discussion on the pull request** — a maintainer contests a finding by replying
+with its id, and an accepted rebuttal dismisses it durably instead of the
+finding resurfacing every push. The comment channel is hardened against prompt
+injection: trust is decided in code from the host's author metadata, and
+untrusted comments never reach the model. See
+[the AI review guide](https://github.com/zuke-build/zuke/blob/master/docs/ai-review.md).
 
 ```ts
 import { Build, parameter, run, target } from "jsr:@zuke/core";
@@ -52,6 +62,15 @@ structured-output mode (Claude `output_config.format`, OpenAI strict
 `.onError("fail" | "warn")`, `.retry({ attempts: 3 })`, `.skipIfKeyMissing()`,
 `.comment()`, `.commentToken(...)`, `.quiet()`.
 
+The v2 depth-and-discussion settings: `.conventionsFile("AGENTS.md")` (judge
+against the project's conventions document, read from the diff base so the
+change under review can't rewrite the rules), `.fileContext()` (send the changed
+files whole, not bare hunks), `.verify()` (adversarially re-check every
+candidate finding; refuted ones are reported but never gate), and
+`.discussion()` (engage with maintainer rebuttals on the PR — an accepted
+refutation stays dismissed instead of resurfacing; only comments whose author
+the host platform attributes as a maintainer ever reach the model).
+
 `.skipIfKeyMissing()` skips the review instead of failing when the API key is
 absent — handy when the key is a CI-only secret — and announces the skip on the
 console and in the job summary so the gap is visible rather than silent.
@@ -72,8 +91,10 @@ hang. `.quiet()` suppresses all reviewer output.
 
 `.comment()` posts the assessment to the pull/merge request on whichever CI host
 the build is running on — **GitHub Actions, GitLab CI, Azure Pipelines, or
-Bitbucket Pipelines** — under a `🤖 Zuke AI review` header. It keeps **one
-comment per reviewer up to date** across re-runs, matched by a hidden marker.
+Bitbucket Pipelines** — under a `🤖 Zuke AI review` header. By default it keeps
+**one comment per reviewer up to date** across re-runs, matched by a hidden
+marker; `.comment("append")` posts a **fresh comment per run** instead, so
+earlier assessments and their finding ids stay on the thread as history.
 
 The token defaults to each host's conventional env var (`GITHUB_TOKEN`,
 `GITLAB_TOKEN`, `SYSTEM_ACCESSTOKEN`, `BITBUCKET_TOKEN`); override with
@@ -212,14 +233,31 @@ class AgentFixer implements Remediation
   A fluent agent fixer. Construct one via {@link agentFixer} with a runner, and
   attach it to a target with `.recoverWith(...)`. Diagnose/report defaults are
   on; file changes happen through the agent, gated to local runs unless
-  `.allowCI()`.
+  `.runOnly(...)` says otherwise.
 
   constructor(run: AgentRunner)
     Create the fixer with the agent runner that performs the edits.
   name: string
     A name for diagnostics — `"agent fix"`.
+  runOnly(scope: RunScope): this
+    Where the agent may run. Defaults to `"local"` — run on a developer's
+    machine, refuse on CI.
+
+    `"ci"` is the inverse, and the shape a repository's own build wants: an
+    agent that heals a pull request must not be turned loose on a working tree
+    someone is in the middle of editing. Off CI the fixer then reports the skip
+    and leaves the failure standing, without ever starting the agent.
+
+    `"both"` permits either host. One setter on one axis, so the effective
+    scope never depends on the order two flags were called in.
   allowCI(): this
-    Permit the agent to run (and edit files) on CI; off by default.
+    Permit the agent to run (and edit files) on CI as well as locally.
+
+    @deprecated
+        Use `.runOnly("both")`, which says the same thing on the one
+        axis that governs it — or `.runOnly("ci")` to keep an autonomous agent off
+        developer machines entirely.
+
   suggest(): this
     Propose the agent's changes as committable inline `suggestion`s on the
     pull request (from its `git diff`) instead of committing them. The build
@@ -257,8 +295,9 @@ class AgentFixer implements Remediation
     The `fetch` implementation used to post the PR comment (test seam).
   async remediate(context: RemediationContext): Promise<RemediationResult>
     Run the agent against the failure, optionally commit its changes, and ask
-    the executor to re-run the target as the verifier. Skips (no retry) on CI
-    unless {@link allowCI} is set, or if the agent run itself fails.
+    the executor to re-run the target as the verifier. Skips (no retry)
+    outside the hosts {@link runOnly} permits, or if the agent run itself
+    fails.
 
 class AiCache
   A best-effort cache of AI provider responses, keyed by a {@link stableHash} of
@@ -319,15 +358,41 @@ class AiFixer implements Remediation
     Apply the proposed fix to the working tree and ask the executor to re-run
     the target. Off by default (the fixer only diagnoses). Writes are confined
     by {@link allowPaths}, the built-in exclusions, and {@link maxEdits}, and
-    are refused on CI unless {@link allowCI} is set.
+    are confined to the hosts {@link runOnly} permits.
   allowPaths(...globs: string[]): this
     Restrict applied edits to paths matching these globs (default: all).
   excludePaths(...globs: string[]): this
     Exclude paths matching these globs from edits, on top of the built-ins.
   maxEdits(count: number): this
     Cap how many files a single applied fix may touch (default 10).
+  runOnly(scope: RunScope): this
+    Where the fixer may run. Defaults to `"local"` — apply on a developer's
+    machine, refuse on CI.
+
+    `"ci"` is the inverse, and the shape a repository's own build wants:
+    self-heal a pull request without ever rewriting a working tree someone is
+    in the middle of editing. Off CI the fixer then returns before the model is
+    called, so it costs no tokens and the underlying failure stands unchanged.
+
+    That is a stronger refusal than the default scope makes on CI, where the
+    fixer still diagnoses and only declines to write: a diagnosis on a pull
+    request is worth reading, whereas one on a local run is an unasked-for
+    charge against the developer's own key.
+
+    `"both"` permits either host. One setter on one axis, so the effective
+    scope never depends on the order two flags were called in.
+
+    ```ts
+    aiFixer((f) => f.provider("openai").apiKey(key).autoApply().runOnly("ci"));
+    ```
   allowCI(): this
-    Permit auto-apply (and committing) on CI; off by default.
+    Permit auto-apply (and committing) on CI as well as locally.
+
+    @deprecated
+        Use `.runOnly("both")`, which says the same thing on the one
+        axis that governs it — or `.runOnly("ci")`, which is what most builds
+        attaching this to their own lint or test target actually want.
+
   commitFixes(): this
     After applying a fix, stage it, commit it, and push to the current branch —
     so a healed pull request carries the fix as a commit. Implies
@@ -434,11 +499,49 @@ class DiffSettings
     diff.
   text_(): string | undefined
     The literal diff text supplied via {@link DiffSettings.text}, if any.
+  base_(): string | undefined
+    The base ref supplied via {@link DiffSettings.base}, if any.
   fetch_(): DiffFetch | undefined
     The base-branch fetch requested via {@link DiffSettings.fetchBase}, or
     `undefined` when none was requested.
   argv_(): string[]
     The `git` argv this diff source resolves to.
+
+class DiscussionSettings
+  Fluent settings for {@link "./reviewer.ts".Reviewer.discussion} — who the
+  reviewer listens to on the PR thread, and how much of it the model may see.
+
+  trustAssociations(...associations: string[]): this
+    Replace the trusted `author_association` set (default `OWNER`, `MEMBER`,
+    `COLLABORATOR`). Comments from authors outside it (and outside
+    {@link trustAuthors}) are dropped before the model sees them.
+  trustAuthors(...logins: string[]): this
+    Trust these author logins in addition to the association rule — e.g. an
+    outside collaborator whose review the project wants the reviewer to
+    engage with.
+  maxCommentTokens(tokens: number): this
+    Cap the total comment text sent to the model at roughly this many tokens
+    (default 4000), newest comments kept first — so a wall of text cannot
+    crowd the diff and the rubric out of the context window.
+  associations_(): string[]
+    INTERNAL: the trusted association set.
+  authors_(): string[]
+    INTERNAL: the extra trusted author logins.
+  threads(): this
+    Also anchor each finding to a file/line review thread on the pull
+    request, so a maintainer contests it by replying in that thread instead of
+    quoting its id somewhere on the PR.
+
+    The summary comment is posted either way and stays the one source of
+    truth: it lists every finding — anchored or not — and carries the state
+    block, so a thread that cannot be posted never hides a finding. The
+    reviewer replies into the thread with the outcome and resolves it once the
+    finding is fixed or dismissed. GitHub only; on other hosts the reviewer
+    notes that and posts the summary alone.
+  maxTokens_(): number
+    INTERNAL: the total comment-token cap.
+  threads_(): boolean
+    INTERNAL: whether findings are also anchored to review threads.
 
 class GateSettings
   Fluent gate configuration passed to {@link "./reviewer.ts".Reviewer.failWhen}.
@@ -502,14 +605,20 @@ class Reviewer implements Validation
     Skip the review (instead of failing) when the API key is missing — handy
     when the key is a CI-only secret. The skip is announced on the console and
     in the job summary so the gap is visible.
-  comment(): this
+  comment(mode: "update" | "append"): this
     Also post the review to the pull/merge request as a comment. Works on
     every supported CI host — GitHub Actions, GitLab CI, Azure Pipelines,
     Bitbucket Pipelines — dispatched at runtime by {@link detectCiHost}. A
-    single comment per reviewer is kept up to date across re-runs. A no-op
-    outside a PR context (e.g. local runs). On each host the workflow must
-    grant the right scope: GitHub `pull-requests: write`, GitLab a token with
-    the `api` scope, Azure `System.AccessToken`, Bitbucket an app password.
+    no-op outside a PR context (e.g. local runs). On each host the workflow
+    must grant the right scope: GitHub `pull-requests: write`, GitLab a token
+    with the `api` scope, Azure `System.AccessToken`, Bitbucket an app
+    password.
+
+    `mode` chooses how re-runs post: `"update"` (default) keeps a single
+    comment per reviewer, edited in place; `"append"` posts a fresh comment
+    every run, so earlier assessments — and their finding ids — stay on the
+    thread as history. The discussion feature works with both: its state block
+    rides on every comment, and the newest one is read back.
   commentToken(token: AnyParameter | string): this
     The token used to post the PR/MR comment. Defaults to the active host's
     conventional env var: `GITHUB_TOKEN` (GitHub), `GITLAB_TOKEN` (GitLab),
@@ -540,6 +649,45 @@ class Reviewer implements Validation
     Hide findings whose stable ID is in a {@link Suppressions} list — a learned
     set of dismissed false positives. Every finding is fingerprinted and its ID
     surfaced in the report, so dismissing one is a copy-paste into the list.
+  conventionsFile(path: string, maxTokens: number): this
+    Feed the project's conventions document (e.g. `AGENTS.md`) to the model as
+    reference material, so the review judges the change against the project's
+    documented rules instead of generic taste. When the diff has a base ref
+    (`.diff((d) => d.base(...))` or a successful `.fetchBase()`), the file is
+    read from that base via `git show` — never from the head under review,
+    so a pull request cannot rewrite the rules it is judged by. Without a base
+    (a local working-tree review) it is read from disk. Truncated at roughly
+    `maxTokens` (default 8000).
+  fileContext(maxTokens: number): this
+    Also send the full post-image contents of the changed files (read via
+    `git show HEAD:<path>`), bounded at roughly `maxTokens` (default 12000) —
+    so the model can check a finding against the surrounding code (an existing
+    guard, a validation a few lines away) instead of judging hunks in
+    isolation. Skipped silently for a literal `.diff((d) => d.text(...))`
+    source with no repository behind it.
+  verify(): this
+    Add an adversarial verification pass: after the review produces candidate
+    findings, a second model call re-checks each against the diff (and the
+    {@link fileContext}, when enabled) and refutes any whose failure path it
+    cannot concretely trace. Refuted candidates are listed in the report but
+    neither posted as findings nor gated on. Costs one extra API call per
+    review with findings; if the pass itself errors, the unverified findings
+    are kept (fail toward reporting, never toward silence).
+  discussion(configure?: Configure<DiscussionSettings>): this
+    Engage with the pull-request discussion instead of repeating findings: the
+    reviewer reads the PR's comments, and when a trusted commenter (by the
+    host's own author metadata — see {@link DiscussionSettings}) contests a
+    finding by quoting its ID, an adjudication pass weighs the rebuttal on
+    technical merit and either upholds the finding (with the gap named) or
+    dismisses it. Dismissals persist across runs in a state block inside the
+    reviewer's own PR comment, so a dismissed finding — or a rewording of it —
+    does not resurface without new evidence. Requires {@link comment} (the
+    comment is where state lives) and a host that can list comments (GitHub
+    currently); elsewhere the discussion is skipped with a console note.
+
+    Untrusted comments are dropped in code before any prompt is built — the
+    model never sees them, so a drive-by "the maintainer approved this"
+    comment cannot influence the review.
   async validate(context: ValidationContext): Promise<void>
     Run the review and gate the build. Throws an {@link AiReviewError} when the
     gate trips (or on a configuration/API error with `onError: "fail"`).
@@ -657,6 +805,13 @@ interface AssessmentFinding
     The line the issue is at, if the model attributed one.
   detail?: string
     A longer explanation, if provided.
+  verification?: "confirmed" | "uncertain"
+    The verify pass's verdict on this finding, when `.verify()` ran and the
+    verifier answered for it: `"confirmed"` means the concrete failure path
+    was traced, `"uncertain"` means the evidence neither confirmed nor refuted
+    it. Both stay reported and gate — only a refutation (which removes the
+    finding and lists it in the report's refuted table) mutes a candidate.
+    Absent when verify did not run or returned no verdict for the finding.
 
 interface BudgetSpend
   A snapshot of what a {@link Budget} has consumed so far.
@@ -808,6 +963,24 @@ type GateRule = { kind: "score"; value: number; } | { kind: "severity"; value: S
 
 type Provider = "claude" | "openai" | "gemini"
   A supported model provider.
+
+type RunScope = "local" | "ci" | "both"
+  Where a fixer may run, set with `.runOnly(...)`.
+
+  - `"local"` — apply on a developer's machine, refuse on CI. The default, and
+    what a fixer has when `.runOnly(...)` is never called.
+  - `"ci"` — apply on CI, and do not run at all off it. The scope a
+    repository's own build wants: heal a pull request without ever rewriting a
+    working tree someone is editing.
+  - `"both"` — apply on either host. What `.allowCI()` selects.
+
+  "On CI" means a host `detectCiHost` recognises: GitHub Actions, GitLab CI,
+  Azure Pipelines and Bitbucket Pipelines. Anywhere else — CircleCI, Jenkins,
+  or a runner that only sets the generic `CI` variable — counts as local, so
+  `"ci"` does not run there and `"local"` does. That is the safe direction for
+  `"ci"` (an unrecognised host gets no writes rather than unexpected ones), but
+  it does mean a fixer scoped to `"ci"` on such a runner will report a skip
+  every time instead of fixing anything. Use `"both"` there.
 
 type Severity = "none" | "low" | "medium" | "high" | "critical"
   A severity level, ordered `none` < `low` < `medium` < `high` < `critical`.

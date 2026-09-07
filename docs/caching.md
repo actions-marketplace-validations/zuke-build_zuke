@@ -94,13 +94,26 @@ details worth knowing:
   dependents still run. Caching a target doesn't strand what depends on it.
 - The fingerprint is recorded **only after a successful run** — a failed target
   is never marked up-to-date.
+- **A cancelled run persists its cache only if nothing was rolled back.** A
+  target records its fingerprint the moment its body returns, and a
+  [compensation](./orchestration.md#cancellation--compensation--oncancel) then
+  reverses that work — usually a *side effect* (a deployment, a migration)
+  rather than the declared outputs, which is why the outputs-still-exist check
+  does not notice. So when a compensation runs, the whole store is left
+  untouched and the next run rebuilds. When **no** compensation runs — the
+  ordinary case, since most builds declare none — nothing was reversed and the
+  fingerprints are kept, so an interrupted build does not cost a full rebuild on
+  the next attempt. The store is also left alone whenever this process is not
+  the one that settled the cancellation, and when a run stops because its
+  [lease](./locks.md#the-runs-own-lease) was taken over: in both, somebody else
+  decides what the outputs are.
 - **`--no-cache`** (or `execute(..., { cache: false })`) ignores the cache
   entirely and re-runs every target.
 - **`--dry-run`** never reads or writes the cache: it prints the plan without
   running any body, so it can't invalidate or refresh a fingerprint.
 
 See the CLI's [Incremental builds](./cli.md#incremental-builds) section and the
-[`.inputs()`/`.outputs()`](./authoring.md#incremental-caching-inputs--outputs)
+[`.inputs()`/`.outputs()`](./authoring.md#incremental-caching--inputs--outputs)
 authoring reference for the same feature from those angles.
 
 ## Remote build cache
@@ -207,12 +220,26 @@ target:
 - Point them only at a cache **you control**, and prefer a
   [secret parameter](./parameters.md) or an environment variable over a
   hard-coded value.
+- **`ZUKE_REMOTE_CACHE_URL` must be `https:`.** A plaintext URL is refused
+  before the first request: an on-path attacker who answers it chooses the file
+  tree that gets written into your workspace, which needs no token to steal.
+  Loopback is exempt, and `ZUKE_ALLOW_INSECURE_URL=1` opts a deliberate
+  plaintext endpoint back in.
 - On CI, **restrict egress** to the cache host, so a misconfigured or overridden
   URL can't exfiltrate build artifacts.
-- **Restore is confined to the workspace.** Every archive entry is validated
-  before anything is written — an **absolute path**, or one containing a
-  **`..`** segment, is rejected outright — so a poisoned or malicious store
-  can't plant files outside the current directory.
+- **Restore is confined to the target's declared outputs.** Every archive entry
+  is validated before anything is written, so a rejected archive leaves no
+  half-written tree. An entry is refused when it is an **absolute path** or
+  contains a **`..`** segment; when it is a **symlink or directory entry**
+  (which archiving never produces, so its presence means something else built
+  the archive); when it lands under **`.git` or `.zuke`** — a restored git hook
+  runs on the next ordinary git command; and when it falls **outside the paths
+  the target declared with `.outputs(...)`**. That last one is what stops an
+  innocuous-looking `deno.json` or lockfile riding along in an otherwise valid
+  artifact.
+- **A refused archive is a cache miss, not a build failure.** The target
+  rebuilds and the refusal is reported as a warning — so whoever can write the
+  store cannot halt every build that reads it.
 
 ### Where it fits
 

@@ -1,3 +1,6 @@
+// Copyright (c) 2026 the Zuke contributors
+// SPDX-License-Identifier: MIT
+
 /**
  * The store-backed MCP tools: `list_runs`/`show_run` (read-only, exposed
  * whenever a state store resolves) and `signal_run`/`resume_check` (mutating,
@@ -10,20 +13,23 @@
  * @module
  */
 
+import { messageOf } from "../internal.ts";
 import type { Build } from "../build.ts";
 import { cancelRun } from "../cancel.ts";
 import { AlreadyResumedError, resumeCheck, resumeRun } from "../resume.ts";
 import { LockConflictError } from "../state/lock.ts";
 import type { StateStore } from "../state/store.ts";
 import {
+  FORCED_OUTCOMES,
   isRunStatus,
   RUN_STATUS_NAMES,
   type RunQuery,
   toJsonValue,
 } from "../state/types.ts";
+import { forceTarget } from "../force.ts";
 import type { JsonValue } from "../target.ts";
 import { AUDIT_RUN_ID } from "./audit.ts";
-import type { McpTool } from "./server.ts";
+import type { McpTool } from "./protocol.ts";
 
 /** What a run-state tool needs to reach the durable surfaces. */
 export interface RunToolDeps {
@@ -161,6 +167,36 @@ const MUTATING_TOOLS: readonly McpTool[] = [
     },
     annotations: { title: "Cancel run", destructiveHint: true },
   },
+  {
+    name: "force_target",
+    description:
+      "Settle one target of a run without running it: skipped (take the step " +
+      "off the plan) or succeeded (a person did it by hand). Refused for a " +
+      "target that already settled, or one the build declares unforceable.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        runId: { type: "string", description: "The run to act on." },
+        target: { type: "string", description: "The dotted target name." },
+        outcome: {
+          type: "string",
+          enum: ["skipped", "succeeded"],
+          description: "What the target settles to without running.",
+        },
+        reason: {
+          type: "string",
+          description: "Why — recorded on the run beside who forced it.",
+        },
+        operatorToken: {
+          type: "string",
+          description:
+            "Operator token, required if the run's target is protected.",
+        },
+      },
+      required: ["runId", "target", "outcome"],
+    },
+    annotations: { title: "Force target", destructiveHint: true },
+  },
 ];
 
 /**
@@ -180,7 +216,7 @@ export const RUN_STATE_TOOL_NAMES: readonly string[] = [
 /** Whether `name` is one of the mutating run-state tools (audited, gated). */
 export function isMutatingRunTool(name: string): boolean {
   return name === "signal_run" || name === "resume_check" ||
-    name === "cancel_run";
+    name === "cancel_run" || name === "force_target";
 }
 
 /** Read an optional string argument, or `undefined` when absent/not a string. */
@@ -227,8 +263,29 @@ function structuredError(error: unknown, runId: string): RunToolResult {
       true,
     );
   }
-  const message = error instanceof Error ? error.message : String(error);
+  const message = messageOf(error);
   return jsonResult({ error: "run_failed", runId, message }, true);
+}
+
+/**
+ * Load run `runId` and apply the same allow-list / operator-token gate a `run:`
+ * tool uses — every mutating run tool re-runs the run's target code (a resume,
+ * a compensation), so all of them pass through here. Returns the structured
+ * result to hand straight back (an unknown run, or a denial), or `null` when the
+ * caller may proceed.
+ */
+async function runDenial(
+  deps: RunToolDeps,
+  args: Record<string, unknown>,
+  runId: string,
+): Promise<RunToolResult | null> {
+  const loaded = await deps.store.getRun(runId);
+  if (loaded === null) return jsonResult({ error: "no_run", runId }, true);
+  const denied = deps.authorize(loaded.record.rootTarget, args);
+  if (denied !== null) {
+    return jsonResult({ error: "unauthorized", reason: denied, runId }, true);
+  }
+  return null;
 }
 
 /**
@@ -245,6 +302,7 @@ export async function callRunStateTool(
   if (name === "signal_run") return await signalRun(deps, args);
   if (name === "resume_check") return await resumeCheckTool(deps, args);
   if (name === "cancel_run") return await cancelRunTool(deps, args);
+  if (name === "force_target") return await forceTargetTool(deps, args);
   return null;
 }
 
@@ -320,14 +378,8 @@ async function signalRun(
   if (runId === undefined) {
     return jsonResult({ error: "missing_argument", argument: "runId" }, true);
   }
-  // A resume runs the run's target code, so it is gated by the same allow-list
-  // and operator-token policy as a `run:` tool.
-  const loaded = await deps.store.getRun(runId);
-  if (loaded === null) return jsonResult({ error: "no_run", runId }, true);
-  const denied = deps.authorize(loaded.record.rootTarget, args);
-  if (denied !== null) {
-    return jsonResult({ error: "unauthorized", reason: denied, runId }, true);
-  }
+  const denied = await runDenial(deps, args, runId);
+  if (denied !== null) return denied;
   const data: JsonValue | undefined = "data" in args
     ? toJsonValue(args.data ?? null)
     : undefined;
@@ -366,12 +418,8 @@ async function resumeCheckTool(
   // that is denied errors; a sweep silently skips runs it may not touch.
   let candidates: string[];
   if (runId !== undefined) {
-    const loaded = await deps.store.getRun(runId);
-    if (loaded === null) return jsonResult({ error: "no_run", runId }, true);
-    const denied = deps.authorize(loaded.record.rootTarget, args);
-    if (denied !== null) {
-      return jsonResult({ error: "unauthorized", reason: denied, runId }, true);
-    }
+    const denied = await runDenial(deps, args, runId);
+    if (denied !== null) return denied;
     candidates = [runId];
   } else {
     const suspended = await deps.store.listRuns({ status: "suspended" });
@@ -399,6 +447,51 @@ async function resumeCheckTool(
   return jsonResult({ ok: failed === 0, checked, failed });
 }
 
+/** `force_target`: settle one target without running it, exactly like `zuke force`. */
+async function forceTargetTool(
+  deps: RunToolDeps,
+  args: Record<string, unknown>,
+): Promise<RunToolResult> {
+  const runId = stringArg(args, "runId");
+  if (runId === undefined) {
+    return jsonResult({ error: "missing_argument", argument: "runId" }, true);
+  }
+  const target = stringArg(args, "target");
+  if (target === undefined) {
+    return jsonResult({ error: "missing_argument", argument: "target" }, true);
+  }
+  const outcome = FORCED_OUTCOMES.find((o) => o === stringArg(args, "outcome"));
+  if (outcome === undefined) {
+    return jsonResult(
+      { error: "invalid_outcome", allowed: FORCED_OUTCOMES },
+      true,
+    );
+  }
+  const denied = await runDenial(deps, args, runId);
+  if (denied !== null) return denied;
+  const reason = stringArg(args, "reason");
+  try {
+    const result = await forceTarget(deps.build, {
+      runId,
+      target,
+      outcome,
+      ...(reason === undefined ? {} : { reason }),
+      stateStore: deps.store,
+      actor: deps.actor,
+      readEnv: deps.readEnv,
+    });
+    return jsonResult({
+      ok: result.ok,
+      runId,
+      target,
+      ...(result.denial === undefined ? {} : { error: result.denial }),
+      message: result.message,
+    }, !result.ok);
+  } catch (error) {
+    return structuredError(error, runId);
+  }
+}
+
 /** `cancel_run`: cancel a run and run its compensations, exactly like `zuke cancel`. */
 async function cancelRunTool(
   deps: RunToolDeps,
@@ -408,14 +501,8 @@ async function cancelRunTool(
   if (runId === undefined) {
     return jsonResult({ error: "missing_argument", argument: "runId" }, true);
   }
-  // Cancelling runs the run's compensation code, so it is gated by the same
-  // allow-list and operator-token policy as a `run:` tool.
-  const loaded = await deps.store.getRun(runId);
-  if (loaded === null) return jsonResult({ error: "no_run", runId }, true);
-  const denied = deps.authorize(loaded.record.rootTarget, args);
-  if (denied !== null) {
-    return jsonResult({ error: "unauthorized", reason: denied, runId }, true);
-  }
+  const denied = await runDenial(deps, args, runId);
+  if (denied !== null) return denied;
   try {
     const result = await cancelRun(deps.build, {
       runId,

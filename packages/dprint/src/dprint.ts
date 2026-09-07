@@ -1,3 +1,6 @@
+// Copyright (c) 2026 the Zuke contributors
+// SPDX-License-Identifier: MIT
+
 /**
  * `DprintTasks` — typed task functions for the `dprint` code formatter, in the
  * same settings-lambda style as the other Zuke tool wrappers: configure a
@@ -24,6 +27,8 @@ import {
   ToolSettings,
 } from "@zuke/core/tooling";
 import type { CommandOutput } from "@zuke/core/shell";
+import { reportSummary } from "@zuke/core";
+import { parseDprintCheckSummary, parseDprintFmtSummary } from "./summary.ts";
 
 /** Shared options for a `dprint` subcommand (`fmt` or `check`). */
 export abstract class DprintSettings extends ToolSettings {
@@ -94,6 +99,12 @@ export class DprintFmtSettings extends DprintSettings {
   protected override subcommand(): string {
     return "fmt";
   }
+
+  /** Report `Formatted`, the files the run changed, onto the build summary. */
+  protected override onOutput(output: CommandOutput): void {
+    const pairs = parseDprintFmtSummary(output);
+    if (pairs !== undefined) reportSummary(pairs);
+  }
 }
 
 /** Settings for `dprint check` (verify formatting without writing). */
@@ -101,6 +112,12 @@ export class DprintCheckSettings extends DprintSettings {
   /** The dprint subcommand this settings class runs: `check`. */
   protected override subcommand(): string {
     return "check";
+  }
+
+  /** Report `Unformatted`, the files that need formatting, onto the build summary. */
+  protected override onOutput(output: CommandOutput): void {
+    const pairs = parseDprintCheckSummary(output);
+    if (pairs !== undefined) reportSummary(pairs);
   }
 }
 

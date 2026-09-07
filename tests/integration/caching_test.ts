@@ -1,3 +1,6 @@
+// Copyright (c) 2026 the Zuke contributors
+// SPDX-License-Identifier: MIT
+
 /**
  * Integration: incremental caching (`.inputs`/`.outputs`/`.cacheKey`), the
  * remote cache, and the affected-targets computation. The caching scenarios
@@ -19,27 +22,12 @@ import {
   target,
 } from "../../packages/core/mod.ts";
 import { runCli, withStateDir } from "./_harness.ts";
-
-/**
- * Run `fn` inside a fresh temporary directory used as the process cwd. The
- * incremental cache resolves `.zuke/cache.json` relative to `Deno.cwd()` (see
- * `resolveCache` in `packages/core/src/executor.ts`), so a caching test must
- * isolate the cwd the same way `packages/core/tests/executor_test.ts` does —
- * otherwise a run through the real CLI would write its cache store into this
- * repository's own `.zuke/` directory. Restores the original cwd and removes
- * the directory afterwards, even on failure.
- */
-async function withTempCwd(fn: (dir: string) => Promise<void>): Promise<void> {
-  const dir = await Deno.makeTempDir({ prefix: "zuke-it-cache-" });
-  const original = Deno.cwd();
-  Deno.chdir(dir);
-  try {
-    await fn(dir);
-  } finally {
-    Deno.chdir(original);
-    await Deno.remove(dir, { recursive: true });
-  }
-}
+// The incremental cache resolves `.zuke/cache.json` relative to `Deno.cwd()`
+// (see `resolveCache` in `packages/core/src/executor.ts`), so a caching test
+// must isolate the cwd the way `packages/core/tests/executor_test.ts` does —
+// otherwise a run through the real CLI would write its cache store into this
+// repository's own `.zuke/` directory.
+import { withTempCwd } from "../../packages/core/tests/_temp.ts";
 
 Deno.test("a target with unchanged inputs is skipped as cached, and reruns when the input changes", async () => {
   await withStateDir(async () => {
@@ -213,4 +201,48 @@ Deno.test("affectedTargets selects only the targets a changed file can reach, wi
   assertEquals(affectedViaShared.has(shared), true);
   assertEquals(affectedViaShared.has(api), true); // dirtied by its dependency
   assertEquals(affectedViaShared.has(web), true); // dirtied by its dependency
+});
+
+Deno.test("a cancelled run does not leave its targets recorded as up to date", async () => {
+  await withStateDir(async () => {
+    await withTempCwd(async (dir) => {
+      await Deno.writeTextFile(`${dir}/input.txt`, "v1");
+      const log: string[] = [];
+      const controller = new AbortController();
+      class B extends Build {
+        // Succeeds, so it records a fingerprint — then the run is cancelled and
+        // its compensation undoes the work. The compensation reverses a *side
+        // effect* (here, a deployment marker) and leaves the declared output
+        // alone, which is the case the outputs-still-exist check cannot catch:
+        // inputs unchanged plus outputs present would otherwise read as "up to
+        // date" on the strength of work that was rolled back.
+        build = target()
+          .inputs("input.txt")
+          .outputs("out.txt")
+          .onCancel(() => this.rollback)
+          .executes(async () => {
+            log.push("build");
+            await Deno.writeTextFile("out.txt", "built");
+            await Deno.writeTextFile("deployed.txt", "yes");
+            controller.abort();
+          });
+        rollback = target().executes(async () => {
+          log.push("rollback");
+          await Deno.remove("deployed.txt");
+        });
+      }
+
+      const first = await runCli(B, ["build"], { signal: controller.signal });
+      assertEquals(first.code, 1);
+      assertEquals(log, ["build", "rollback"]);
+      // The output survived the rollback; the deployment it represents did not.
+      assertEquals(await Deno.readTextFile(`${dir}/out.txt`), "built");
+
+      const second = await runCli(B, ["build"]);
+      assertEquals(second.code, 0);
+      // Rebuilt rather than skipped, so the rolled-back work is done again.
+      assertEquals(log, ["build", "rollback", "build"]);
+      assertEquals(await Deno.readTextFile(`${dir}/deployed.txt`), "yes");
+    });
+  });
 });

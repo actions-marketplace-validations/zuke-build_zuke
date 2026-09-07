@@ -1,3 +1,6 @@
+// Copyright (c) 2026 the Zuke contributors
+// SPDX-License-Identifier: MIT
+
 import { assertEquals, assertRejects } from "../../core/tests/_assert.ts";
 import {
   AiReviewError,
@@ -8,6 +11,8 @@ import {
   secretsReviewer,
   securityReviewer,
 } from "../mod.ts";
+import { withEnv } from "../../core/tests/_env.ts";
+import { captureLines } from "../../core/tests/_console.ts";
 
 const DIFF = "diff --git a/src/app.ts b/src/app.ts\n" +
   "--- a/src/app.ts\n+++ b/src/app.ts\n@@\n+const x = eval(input);\n";
@@ -87,7 +92,7 @@ function routedFetch(opts: {
       init,
       body: typeof init?.body === "string" ? init.body : "",
     });
-    if (url.includes("api.github.com")) {
+    if (url.startsWith("https://api.github.com/")) {
       const status = opts.githubStatus ?? 200;
       const payload = (init?.method ?? "GET") === "GET"
         ? JSON.stringify(opts.comments ?? [])
@@ -99,46 +104,9 @@ function routedFetch(opts: {
   return { fetch: impl, calls };
 }
 
-/** Run `fn` with the given env vars set, restoring the prior values after. */
-async function withEnv(
-  vars: Record<string, string>,
-  fn: () => Promise<void>,
-): Promise<void> {
-  const prior = new Map<string, string | undefined>();
-  for (const [key, value] of Object.entries(vars)) {
-    prior.set(key, Deno.env.get(key));
-    Deno.env.set(key, value);
-  }
-  try {
-    await fn();
-  } finally {
-    for (const [key, value] of prior) {
-      if (value === undefined) Deno.env.delete(key);
-      else Deno.env.set(key, value);
-    }
-  }
-}
-
-/**
- * Capture `console.log`/`console.warn` output produced by `fn`, with the
- * Actions job-summary file unset so non-quiet reviews don't write a real one.
- */
-async function captured(fn: () => Promise<void>): Promise<string[]> {
-  const lines: string[] = [];
-  const { log, warn } = console;
-  const summary = Deno.env.get("GITHUB_STEP_SUMMARY");
-  Deno.env.delete("GITHUB_STEP_SUMMARY");
-  console.log = (...a: unknown[]) => void lines.push(a.join(" "));
-  console.warn = (...a: unknown[]) => void lines.push(a.join(" "));
-  try {
-    await fn();
-  } finally {
-    console.log = log;
-    console.warn = warn;
-    if (summary !== undefined) Deno.env.set("GITHUB_STEP_SUMMARY", summary);
-  }
-  return lines;
-}
+/** Capture console output with the job-summary file unset (no real writes). */
+const captured = (fn: () => Promise<void>): Promise<string[]> =>
+  captureLines(() => withEnv({ GITHUB_STEP_SUMMARY: undefined }, fn));
 
 Deno.test("security review passes below the threshold and calls Claude", async () => {
   const { fetch, calls } = recordFetch(
@@ -699,7 +667,10 @@ Deno.test("the default diff source runs git via the shell (no network)", async (
     r.provider("claude").apiKey("k").quiet().diff((d) => d.staged())
       .fetch(fetch)
   ).validate({ target: "t" });
-  assertEquals(calls.every((c) => c.url.includes("api.anthropic.com")), true);
+  assertEquals(
+    calls.every((c) => c.url.startsWith("https://api.anthropic.com/")),
+    true,
+  );
 });
 
 Deno.test("the findings table is printed when not quiet", async () => {
@@ -1075,7 +1046,7 @@ Deno.test("comment() posts the assessment to the pull request", async () => {
         ).validate({ target: "deploy" })
       );
       const posts = calls.filter((c) =>
-        c.url.includes("api.github.com") && c.init?.method === "POST"
+        c.url.startsWith("https://api.github.com/") && c.init?.method === "POST"
       );
       assertEquals(posts.length, 1);
       assertEquals(
@@ -1102,7 +1073,11 @@ Deno.test("comment() uses GITHUB_TOKEN and updates the existing comment", async 
       const { fetch, calls } = routedFetch({
         provider: claude({ score: 1, findings: [] }),
         comments: [
-          { id: 5, body: "<!-- zuke-ai-review:security review -->\nold" },
+          {
+            id: 5,
+            body: "<!-- zuke-ai-review:security review -->\nold",
+            user: { login: "github-actions[bot]", type: "Bot" },
+          },
         ],
       });
       await captured(() =>
@@ -1137,7 +1112,10 @@ Deno.test("comment() warns and skips on GitHub without a PR ref", async () => {
             .diff((d) => d.text(DIFF)).fetch(fetch)
         ).validate({ target: "deploy" })
       );
-      assertEquals(calls.some((c) => c.url.includes("api.github.com")), false);
+      assertEquals(
+        calls.some((c) => c.url.startsWith("https://api.github.com/")),
+        false,
+      );
       assertEquals(
         lines.some((l) => l.includes("no GitHub PR context")),
         true,
@@ -1169,5 +1147,38 @@ Deno.test("a failed PR comment never breaks the review", async () => {
         true,
       );
     },
+  );
+});
+
+Deno.test("provider_ reflects the configured provider", () => {
+  const bare = securityReviewer();
+  assertEquals(bare.provider_, undefined); // nothing configured yet
+  const configured = securityReviewer((r) => r.provider("openai"));
+  assertEquals(configured.provider_, "openai");
+});
+
+Deno.test("the fetchBase fallback is announced on the console when not quiet", async () => {
+  const { fetch } = recordFetch(
+    claude({ score: 0, severity: "none", summary: "", findings: [] }),
+  );
+  const lines = await captured(() =>
+    securityReviewer((r) =>
+      r.provider("claude").apiKey("k")
+        .diff((d) => d.fetchBase("develop"))
+        .env(() => undefined)
+        .exec((argv) => {
+          if (argv[1] === "fetch") return Promise.reject(new Error("offline"));
+          return Promise.resolve("diff --git a/w b/w\n+working tree");
+        })
+        .fetch(fetch)
+    ).validate({ target: "t" })
+  );
+  // The silent-fallback hazard is called out where the operator can see it.
+  assertEquals(
+    lines.some((l) =>
+      l.includes("fetchBase could not compute the base diff") &&
+      l.includes("falling back to the working-tree diff")
+    ),
+    true,
   );
 });

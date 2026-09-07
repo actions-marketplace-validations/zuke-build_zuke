@@ -1,3 +1,6 @@
+// Copyright (c) 2026 the Zuke contributors
+// SPDX-License-Identifier: MIT
+
 /**
  * `TscTasks` — typed task functions for `tsc`, the TypeScript compiler, in the
  * same settings-lambda style as the other Zuke tool wrappers: configure a
@@ -29,6 +32,8 @@ import {
   ToolSettings,
 } from "@zuke/core/tooling";
 import type { CommandOutput } from "@zuke/core/shell";
+import { reportSummary } from "@zuke/core";
+import { parseTscSummary } from "./summary.ts";
 
 /** Shared base for `tsc` settings; resolves the `tsc` binary. */
 export abstract class TscBaseSettings extends ToolSettings {
@@ -40,6 +45,12 @@ export abstract class TscBaseSettings extends ToolSettings {
   /** Resolve the binary from `node_modules/.bin` by default — tsc is an npm-distributed tool. */
   protected override defaultResolution(): ToolResolution {
     return "node_modules";
+  }
+
+  /** Report `Errors`, the diagnostics printed, onto the build summary. */
+  protected override onOutput(output: CommandOutput): void {
+    const pairs = parseTscSummary(output);
+    if (pairs !== undefined) reportSummary(pairs);
   }
 }
 

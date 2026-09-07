@@ -1,3 +1,6 @@
+// Copyright (c) 2026 the Zuke contributors
+// SPDX-License-Identifier: MIT
+
 /**
  * `@zuke/console` — task-shaped console output for Zuke builds, so a build never
  * reaches for `console.log`. A levelled logger (NUKE-style), Spectre.Console-style
@@ -33,5 +36,6 @@ export {
   type Sink,
 } from "./src/console.ts";
 export { type LogLevel } from "./src/level.ts";
+export { logoLines, type LogoOptions, ZUKE_LOGO } from "./src/logo.ts";
 export { defaultTheme, type Theme } from "./src/theme.ts";
 export { consoleRenderer, createConsoleRenderer } from "./src/renderer.ts";

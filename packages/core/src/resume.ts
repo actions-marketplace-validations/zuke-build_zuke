@@ -1,3 +1,6 @@
+// Copyright (c) 2026 the Zuke contributors
+// SPDX-License-Identifier: MIT
+
 /**
  * Resume a suspended run — the second half of external-event waits (see
  * `./wait.ts`).
@@ -17,22 +20,23 @@
  */
 
 import { type Build, type BuildResult, discoverTargets } from "./build.ts";
-import { defaultReadEnv } from "./internal.ts";
-import { cancelRun } from "./cancel.ts";
+import { defaultReadEnv, messageOf } from "./internal.ts";
+import { cancelRun, compensationSummary } from "./cancel.ts";
 import { execute, type Reporter } from "./executor.ts";
 import type { Plugin } from "./plugin.ts";
 import { planGraph } from "./graph.ts";
+import { graphDrift, runGraphSnapshot } from "./graph_snapshot.ts";
 import { reapAbandoned, recoverStranded } from "./reap.ts";
+import { ForeignRunError, loadOwnedRun, resolveBuildId } from "./ownership.ts";
 import { acquireLease, RUN_LEASE_PREFIX } from "./state/run_lease.ts";
 import type { JsonValue, TargetBuilder } from "./target.ts";
-import { absolutePath } from "./path.ts";
-import { findConfigDir, pathExists } from "./config.ts";
-import { defaultStateHost, type StateStore } from "./state/store.ts";
-import { resolveStateStore } from "./state/resolve.ts";
+import type { StateStore } from "./state/store.ts";
+import { resolveRunStore } from "./run_store.ts";
 import { resolveActor } from "./state/record.ts";
 import type {
   RunGraphNode,
   RunRecord,
+  RunStatus,
   WaitDisposition,
   WaitState,
 } from "./state/types.ts";
@@ -52,6 +56,31 @@ export class AlreadyResumedError extends Error {
     readonly at: string,
   ) {
     super(`run ${runId} was already resumed by ${by} at ${at}`);
+  }
+}
+
+/**
+ * Raised when a run is no longer `suspended` by the time a resume reaches it —
+ * it has been settled, or a cancellation is in progress.
+ *
+ * The counterpart to {@link AlreadyResumedError}, which covers a run another
+ * process is *currently* driving. This covers one that already finished, and a
+ * sweep treats it the same way: not its run to advance, and not a failure. Two
+ * sweeps racing the same run is the normal case — one wins, and the loser
+ * reading `succeeded` has discovered a success, not a fault. Counting it would
+ * put a false alarm in the exit code a cron watches.
+ */
+export class RunNotSuspendedError extends Error {
+  /** The error name. */
+  override name = "RunNotSuspendedError";
+  /** Build the error from the run id and the status found instead. */
+  constructor(
+    /** The run that could not be resumed. */
+    readonly runId: string,
+    /** The status it was in instead of `suspended`. */
+    readonly status: RunStatus,
+  ) {
+    super(`resume: run ${runId} is "${status}", not suspended.`);
   }
 }
 
@@ -117,7 +146,11 @@ export async function resumeRun(
   options: ResumeOptions,
 ): Promise<BuildResult> {
   const readEnv = options.readEnv ?? defaultReadEnv;
-  const store = resolveResumeStore(options, build, readEnv);
+  const store = resolveRunStore(
+    options.stateStore,
+    build.stateStore(),
+    readEnv,
+  );
   if (store === undefined) {
     throw new Error(
       "resume: no state store is configured. Set ZUKE_STATE_DIR / " +
@@ -125,10 +158,13 @@ export async function resumeRun(
     );
   }
 
-  const initial = await store.getRun(options.runId);
-  if (initial === null) {
-    throw new Error(`resume: no run "${options.runId}" found in the store.`);
-  }
+  // Ownership is checked before anything else, and before the shape checks
+  // below: a resume *runs this build's target bodies* against the record it is
+  // given, so a run belonging to another build is not merely out of scope, it is
+  // the wrong code executing against someone else's state. The shape checks
+  // cannot catch it — one `zuke.ts` templated across services agrees on every
+  // target name and edge and differs only in what the bodies do.
+  const initial = await loadOwnedRun(store, options.runId, "resume", readEnv);
 
   const resumerActor = resolveActor(options.actor, readEnv);
   const now = () => new Date().toISOString();
@@ -245,22 +281,6 @@ export async function resumeRun(
   }
 }
 
-/** Resolve the store for a resume — like a normal run, but always defaulting on. */
-function resolveResumeStore(
-  options: ResumeOptions,
-  build: Build,
-  readEnv: (name: string) => string | undefined,
-): StateStore | undefined {
-  return resolveStateStore(options.stateStore, build.stateStore(), {
-    readEnv,
-    host: defaultStateHost,
-    defaultDir: absolutePath(
-      findConfigDir(Deno.cwd(), pathExists) ?? Deno.cwd(),
-    )(".zuke", "runs").path,
-    enableDefault: true,
-  });
-}
-
 /**
  * Compare-and-swap the run from `suspended` to `running`, appending a signal if
  * given. The loser of the race — who finds it already `running` — gets an
@@ -282,12 +302,27 @@ async function transitionToRunning(
       if (record.status === "running") {
         throw new AlreadyResumedError(id, record.actor, record.updatedAt);
       }
-      throw new Error(
-        `resume: run ${id} is "${record.status}", not suspended.`,
-      );
+      throw new RunNotSuspendedError(id, record.status);
     }
     const next = structuredClone(record);
     next.status = "running";
+    // A record written before initiators existed still knows who started it —
+    // in `actor`, right up until the line below overwrites it. Capture it here,
+    // the one moment the evidence is about to be destroyed, so an old run keeps
+    // its owner instead of silently acquiring the sweep that resumed it. `??=`
+    // so a record that already has one is never rewritten: that is the whole
+    // guarantee of the field.
+    next.initiator ??= {
+      actor: record.actor,
+      // Unknowable for a record from before the field; `human` is the
+      // conservative reading, and never claims machinery a policy would treat
+      // as unowned.
+      kind: "human",
+      at: record.createdAt,
+    };
+    // The resumer becomes the record's last writer. `initiator` above is
+    // deliberately not touched again: it answers who asked for this run, and a
+    // sweep picking it up is not that.
     next.actor = resumerActor;
     const at = now();
     // Give back the time the run spent parked. A run's deadline is a budget for
@@ -345,11 +380,7 @@ function assertGraphUnchanged(
   order: TargetBuilder[],
   snapshot: RunGraphNode[],
 ): void {
-  const current: RunGraphNode[] = order.map((t) => ({
-    name: t.name_ ?? "",
-    dependsOn: t.dependsOn_.map((d) => d.name_ ?? "").filter((n) => n !== ""),
-  }));
-  const drift = graphDrift(snapshot, current);
+  const drift = graphDrift(snapshot, runGraphSnapshot(order));
   if (drift.length > 0) {
     throw new Error(
       `resume: the build graph changed since run ${id} was suspended ` +
@@ -358,38 +389,18 @@ function assertGraphUnchanged(
   }
 }
 
-/** The differences between a recorded graph snapshot and the current one. */
-function graphDrift(
-  snapshot: RunGraphNode[],
-  current: RunGraphNode[],
-): string[] {
-  const drift: string[] = [];
-  const snap = new Map(snapshot.map((n) => [n.name, n.dependsOn]));
-  const cur = new Map(current.map((n) => [n.name, n.dependsOn]));
-  for (const name of snap.keys()) {
-    if (!cur.has(name)) drift.push(`removed "${name}"`);
-  }
-  for (const [name, deps] of cur) {
-    const before = snap.get(name);
-    if (before === undefined) drift.push(`added "${name}"`);
-    else if (!sameMembers(before, deps)) drift.push(`re-wired "${name}"`);
-  }
-  return drift;
-}
-
-/** Whether two string lists have the same members (order-insensitive). */
-function sameMembers(a: string[], b: string[]): boolean {
-  if (a.length !== b.length) return false;
-  const set = new Set(a);
-  return b.every((x) => set.has(x));
-}
-
 /** The first waiting target whose deadline has passed, or `null`. */
 function expiredWait(
   record: RunRecord,
   nowMs: number,
 ): { name: string; waitingFor: WaitState } | null {
   for (const [name, state] of Object.entries(record.targets)) {
+    // An operator's forced outcome outranks the deadline, as it outranks the
+    // target's conditions and its cache. Timing out a gate someone has just
+    // forced would run the `onTimeout` disposition — a cancel, or a rollback
+    // target — against the decision they had already made, and the force would
+    // never take effect at all.
+    if (record.overrides?.[name] !== undefined) continue;
     const deadline = state.waitingFor?.deadline;
     if (
       state.status === "waiting" && state.waitingFor !== undefined &&
@@ -510,7 +521,7 @@ async function cancelTimedOut(
     error: new Error(
       `resume: run ${options.runId}: wait "${expired.name}" timed out ` +
         `(deadline ${expired.waitingFor.deadline}) — run cancelled ` +
-        `(${result.compensated.length} compensation(s) ran).`,
+        `(${compensationSummary(result)}).`,
     ),
   };
 }
@@ -541,7 +552,11 @@ export async function resumeCheck(
   // same way execute() does instead of swallowing it when no reporter is given.
   const reporter = options.reporter ??
     (options.silent === true ? silentReporter : consoleReporter);
-  const store = resolveResumeStore({ ...options, runId: "" }, build, readEnv);
+  const store = resolveRunStore(
+    options.stateStore,
+    build.stateStore(),
+    readEnv,
+  );
   if (store === undefined) {
     throw new Error("resume --check: no state store is configured.");
   }
@@ -549,11 +564,13 @@ export async function resumeCheck(
   // this same pass to resume it — otherwise every abandoned run would wait a
   // whole sweep interval for nothing but a state transition.
   const actor = resolveActor(options.actor, readEnv);
+  const buildId = resolveBuildId(readEnv);
   const reaped = await reapAbandoned({
     build,
     store,
     actor,
     reporter,
+    ...(buildId === undefined ? {} : { buildId }),
     now: () => new Date().toISOString(),
     ...(options.runId === undefined ? {} : { runId: options.runId }),
     ...(options.silent === undefined ? {} : { silent: options.silent }),
@@ -568,6 +585,7 @@ export async function resumeCheck(
     store,
     actor,
     reporter,
+    ...(buildId === undefined ? {} : { buildId }),
     now: () => new Date().toISOString(),
     ...(options.runId === undefined ? {} : { runId: options.runId }),
     ...(options.silent === undefined ? {} : { silent: options.silent }),
@@ -577,21 +595,58 @@ export async function resumeCheck(
     ? [options.runId]
     : (await store.listRuns({ status: "suspended" })).map((s) => s.id);
   let failed = reaped.failed + recovered.failed;
+  let foreign = 0;
+  let settled = 0;
   for (const id of ids) {
     try {
       const result = await resumeRun(build, { ...options, runId: id });
       if (!result.ok) failed += 1;
     } catch (error) {
       if (error instanceof AlreadyResumedError) continue; // another process has it
+      // Not this build's run. Skipped rather than counted: a cron watches the
+      // failure count, and a store shared with another build would otherwise
+      // report a permanent non-zero result for runs this build must not touch.
+      // Tallied, though, and reported once below — a sweep that silently skipped
+      // everything would be indistinguishable from one with nothing to do, which
+      // is exactly how a mistyped `ZUKE_BUILD_ID` would look: recovery quietly
+      // stops, and the effects those runs owe are never driven.
+      if (error instanceof ForeignRunError) {
+        foreign += 1;
+        continue;
+      }
+      // Someone else finished it between the listing and the resume. Two sweeps
+      // racing one run is the normal case — the loser reading `succeeded` has
+      // found a success, not a fault — so it is skipped like a lost resume race
+      // rather than counted, which would put a false alarm in the exit code a
+      // cron watches.
+      if (error instanceof RunNotSuspendedError) {
+        settled += 1;
+        continue;
+      }
       // Isolate a per-run failure: one run erroring (a bad graph, a throwing
       // compensation) must not abort the sweep and strand every run behind it.
       failed += 1;
       reporter.error(
-        `resume --check: run ${id} errored: ${
-          error instanceof Error ? error.message : String(error)
-        }`,
+        `resume --check: run ${id} errored: ${messageOf(error)}`,
       );
     }
+  }
+  // One line per sweep rather than one per run: on a store pooled across many
+  // builds most runs are somebody else's, and that is the normal case, not an
+  // error. What matters is that the number is visible at all. A skip needs an
+  // origin on both sides, so `foreign > 0` implies this process has one — tested
+  // for rather than defaulted, so the message never prints a placeholder.
+  if (foreign > 0 && buildId !== undefined) {
+    reporter.info(
+      `resume --check: skipped ${foreign} run(s) belonging to another build ` +
+        `(this build is "${buildId}").`,
+    );
+  }
+  if (settled > 0) {
+    reporter.info(
+      `resume --check: skipped ${settled} run(s) that were no longer ` +
+        `suspended — another process finished them first.`,
+    );
   }
   return { checked: ids.length, failed };
 }

@@ -1,3 +1,6 @@
+// Copyright (c) 2026 the Zuke contributors
+// SPDX-License-Identifier: MIT
+
 /**
  * Unit tests for the outcome views behind `ctx.outcomeOf(...)` — how a status
  * and a run-record row become the shape a target body reads.
@@ -123,4 +126,18 @@ Deno.test("an effect record claiming zero attempts is refused", () => {
     message = error instanceof Error ? error.message : String(error);
   }
   assertEquals(message.includes("positive integer"), true, message);
+});
+
+Deno.test("the settlement's notes win, and the row's fill in after a resume", () => {
+  const live = outcomeView(
+    { status: "succeeded", summary: [{ key: "Tests", value: "3" }] },
+    row({ summary: [{ key: "Tests", value: "2" }] }),
+  );
+  assertEquals(live.summary, [{ key: "Tests", value: "3" }]);
+  const durable = outcomeView(
+    { status: "succeeded" },
+    row({ summary: [{ key: "Lines", value: "98.4%" }] }),
+  );
+  assertEquals(durable.summary, [{ key: "Lines", value: "98.4%" }]);
+  assertEquals("summary" in outcomeView({ status: "succeeded" }, row()), false);
 });

@@ -1,5 +1,26 @@
 # Changelog
 
+## [1.2.0](https://github.com/zuke-build/zuke/compare/npm-v1.1.0...npm-v1.2.0) (2026-09-02)
+
+
+### Features
+
+* summary notes in the run record, on the check target, and from the remaining wrappers ([#465](https://github.com/zuke-build/zuke/issues/465)) ([cb25d83](https://github.com/zuke-build/zuke/commit/cb25d8303ac12bbb31335bfc8ef55082a4c7c71f))
+
+## [1.1.0](https://github.com/zuke-build/zuke/compare/npm-v1.0.1...npm-v1.1.0) (2026-08-28)
+
+
+### Features
+
+* **npm:** wrap the everyday npm surface as typed tasks ([#401](https://github.com/zuke-build/zuke/issues/401)) ([4496856](https://github.com/zuke-build/zuke/commit/4496856bf3074af134ed207c9a76368df640a7b4)), closes [#400](https://github.com/zuke-build/zuke/issues/400)
+
+## [1.0.1](https://github.com/zuke-build/zuke/compare/npm-v1.0.0...npm-v1.0.1) (2026-08-13)
+
+
+### Bug Fixes
+
+* **cli:** escape line separators in generated literals; license headers and review docs ([#347](https://github.com/zuke-build/zuke/issues/347)) ([114f842](https://github.com/zuke-build/zuke/commit/114f84246e83fc6fb0bd12b55e8eb04192978074))
+
 ## [1.0.0](https://github.com/zuke-build/zuke/compare/npm-v0.3.2...npm-v1.0.0) (2026-07-30)
 
 

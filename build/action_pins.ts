@@ -1,3 +1,6 @@
+// Copyright (c) 2026 the Zuke contributors
+// SPDX-License-Identifier: MIT
+
 /**
  * Where the pinned GitHub Action SHAs come from once the workflows are
  * generated: the root `action.yml` manifest, which the generator never writes.
@@ -70,6 +73,18 @@ export const SEED_PINS: Readonly<Record<string, CiActionRef>> = {
   "ossf/scorecard-action": {
     ref: "ossf/scorecard-action@2d1146689b8cda280b9bc96326124645441f03bc",
     version: "v2.4.4",
+  },
+  // The two halves of one action are pinned separately because pins are keyed
+  // by the full `uses:` path, subpath included — and must agree, since they
+  // ship as one release.
+  "github/codeql-action/init": {
+    ref: "github/codeql-action/init@5595ccaf912efad79be6eef63a5619ff05969be3",
+    version: "v4.37.6",
+  },
+  "github/codeql-action/analyze": {
+    ref:
+      "github/codeql-action/analyze@5595ccaf912efad79be6eef63a5619ff05969be3",
+    version: "v4.37.6",
   },
 };
 

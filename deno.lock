@@ -12,6 +12,9 @@
     },
     "@std/yaml@1.2.0": {
       "integrity": "20beb41e4983ba3437dbefac62b14061ab058e8a187596f19d28ff9035f6e6cf"
+    },
+    "@zuke/core@1.25.0": {
+      "integrity": "2f18549957d8db30466bf212ab0aa5a143320c62e4374338b6c6d32e0c6f1b91"
     }
   },
   "npm": {
@@ -478,7 +481,8 @@
       ]
     },
     "@xmldom/xmldom@0.8.13": {
-      "integrity": "sha512-KRYzxepc14G/CEpEGc3Yn+JKaAeT63smlDr+vjB8jRfgTBBI9wRj/nkQEO+ucV8p8I9bfKLWp37uHgFrbntPvw=="
+      "integrity": "sha512-KRYzxepc14G/CEpEGc3Yn+JKaAeT63smlDr+vjB8jRfgTBBI9wRj/nkQEO+ucV8p8I9bfKLWp37uHgFrbntPvw==",
+      "deprecated": true
     },
     "agent-base@7.1.4": {
       "integrity": "sha512-MnA+YT8fwfJPgBx3m60MNqakm30XOkyIoH1y6huTQvC0PwZG7ki8NacLBcrPbNoo8vEZy7Jpuk7+jMO+CUovTQ=="
@@ -1552,12 +1556,12 @@
       },
       "packages/biome": {
         "dependencies": [
-          "jsr:@zuke/core@^1.25.0"
+          "jsr:@zuke/core@^1.44.0"
         ]
       },
       "packages/bun": {
         "dependencies": [
-          "jsr:@zuke/core@^1.25.0"
+          "jsr:@zuke/core@^1.45.0"
         ]
       },
       "packages/claude": {
@@ -1567,7 +1571,9 @@
       },
       "packages/cli": {
         "dependencies": [
-          "jsr:@zuke/core@^1.32.0"
+          "jsr:@zuke/console@^1.1.0",
+          "jsr:@zuke/core@^1.40.0",
+          "jsr:@zuke/gh@^1.6.0"
         ]
       },
       "packages/cmd": {
@@ -1592,17 +1598,17 @@
       },
       "packages/cspell": {
         "dependencies": [
-          "jsr:@zuke/core@^1.25.0"
+          "jsr:@zuke/core@^1.44.0"
         ]
       },
       "packages/cypress": {
         "dependencies": [
-          "jsr:@zuke/core@^1.25.0"
+          "jsr:@zuke/core@^1.45.0"
         ]
       },
       "packages/deno": {
         "dependencies": [
-          "jsr:@zuke/core@^1.25.0"
+          "jsr:@zuke/core@^1.45.0"
         ]
       },
       "packages/docker": {
@@ -1622,22 +1628,22 @@
       },
       "packages/dpdm": {
         "dependencies": [
-          "jsr:@zuke/core@^1.25.0"
+          "jsr:@zuke/core@^1.44.0"
         ]
       },
       "packages/dprint": {
         "dependencies": [
-          "jsr:@zuke/core@^1.25.0"
+          "jsr:@zuke/core@^1.44.0"
         ]
       },
       "packages/eslint": {
         "dependencies": [
-          "jsr:@zuke/core@^1.25.0"
+          "jsr:@zuke/core@^1.44.0"
         ]
       },
       "packages/gcloud": {
         "dependencies": [
-          "jsr:@zuke/core@^1.31.0"
+          "jsr:@zuke/core@^1.32.0"
         ]
       },
       "packages/gemini": {
@@ -1652,7 +1658,7 @@
       },
       "packages/git": {
         "dependencies": [
-          "jsr:@zuke/core@^1.25.0"
+          "jsr:@zuke/core@^1.32.0"
         ]
       },
       "packages/helm": {
@@ -1667,7 +1673,7 @@
       },
       "packages/jest": {
         "dependencies": [
-          "jsr:@zuke/core@^1.25.0"
+          "jsr:@zuke/core@^1.45.0"
         ]
       },
       "packages/jsr": {
@@ -1677,7 +1683,7 @@
       },
       "packages/knip": {
         "dependencies": [
-          "jsr:@zuke/core@^1.25.0"
+          "jsr:@zuke/core@^1.44.0"
         ]
       },
       "packages/kubectl": {
@@ -1690,6 +1696,11 @@
           "jsr:@zuke/core@^1.25.0"
         ]
       },
+      "packages/lint-staged": {
+        "dependencies": [
+          "jsr:@zuke/core@^1.25.0"
+        ]
+      },
       "packages/nest": {
         "dependencies": [
           "jsr:@zuke/core@^1.25.0"
@@ -1697,12 +1708,12 @@
       },
       "packages/node": {
         "dependencies": [
-          "jsr:@zuke/core@^1.25.0"
+          "jsr:@zuke/core@^1.45.0"
         ]
       },
       "packages/npm": {
         "dependencies": [
-          "jsr:@zuke/core@^1.25.0"
+          "jsr:@zuke/core@^1.44.0"
         ]
       },
       "packages/npx": {
@@ -1732,15 +1743,20 @@
       },
       "packages/oxlint": {
         "dependencies": [
-          "jsr:@zuke/core@^1.25.0"
+          "jsr:@zuke/core@^1.44.0"
         ]
       },
       "packages/playwright": {
         "dependencies": [
-          "jsr:@zuke/core@^1.25.0"
+          "jsr:@zuke/core@^1.45.0"
         ]
       },
       "packages/pnpm": {
+        "dependencies": [
+          "jsr:@zuke/core@^1.44.0"
+        ]
+      },
+      "packages/redocly": {
         "dependencies": [
           "jsr:@zuke/core@^1.25.0"
         ]
@@ -1751,6 +1767,16 @@
         ]
       },
       "packages/security": {
+        "dependencies": [
+          "jsr:@zuke/core@^1.25.0"
+        ]
+      },
+      "packages/shellcheck": {
+        "dependencies": [
+          "jsr:@zuke/core@^1.44.0"
+        ]
+      },
+      "packages/storybook": {
         "dependencies": [
           "jsr:@zuke/core@^1.25.0"
         ]
@@ -1767,12 +1793,12 @@
       },
       "packages/tsc": {
         "dependencies": [
-          "jsr:@zuke/core@^1.25.0"
+          "jsr:@zuke/core@^1.44.0"
         ]
       },
       "packages/tsc-alias": {
         "dependencies": [
-          "jsr:@zuke/core@^1.25.0"
+          "jsr:@zuke/core@^1.44.0"
         ]
       },
       "packages/tsdown": {
@@ -1802,12 +1828,12 @@
       },
       "packages/vitest": {
         "dependencies": [
-          "jsr:@zuke/core@^1.25.0"
+          "jsr:@zuke/core@^1.45.0"
         ]
       },
       "packages/yarn": {
         "dependencies": [
-          "jsr:@zuke/core@^1.25.0"
+          "jsr:@zuke/core@^1.44.0"
         ]
       }
     }

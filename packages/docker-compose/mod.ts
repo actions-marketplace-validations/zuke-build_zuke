@@ -1,3 +1,6 @@
+// Copyright (c) 2026 the Zuke contributors
+// SPDX-License-Identifier: MIT
+
 /**
  * `@zuke/docker-compose` — typed Docker Compose task wrappers for Zuke builds.
  *
@@ -17,4 +20,60 @@
  * @module
  */
 
-export * from "./src/docker_compose.ts";
+export {
+  DockerComposeTasks,
+  type DockerComposeTasksApi,
+} from "./src/docker_compose.ts";
+export {
+  type ComposeProbe,
+  defaultComposeProbe,
+  resetComposeInvocationCache_,
+  resolveComposeInvocation,
+} from "./src/invocation.ts";
+export {
+  DockerComposeSettings,
+  ReplicaIndex,
+  ServiceList,
+} from "./src/settings.ts";
+export {
+  DockerComposeCreateSettings,
+  DockerComposeDownSettings,
+  DockerComposeKillSettings,
+  DockerComposePauseSettings,
+  type DockerComposePullPolicy,
+  DockerComposeRestartSettings,
+  DockerComposeRmSettings,
+  DockerComposeScaleSettings,
+  DockerComposeServiceListSettings,
+  DockerComposeStartSettings,
+  DockerComposeStopSettings,
+  DockerComposeUnpauseSettings,
+  DockerComposeUpSettings,
+  DockerComposeWaitSettings,
+} from "./src/lifecycle.ts";
+export {
+  DockerComposeBuildSettings,
+  DockerComposePullSettings,
+  DockerComposePushSettings,
+} from "./src/images.ts";
+export {
+  DockerComposeCommitSettings,
+  DockerComposeConfigSettings,
+  DockerComposeCpSettings,
+  DockerComposeExecSettings,
+  DockerComposeExportSettings,
+  DockerComposeLogsSettings,
+  DockerComposePsSettings,
+  DockerComposeRunSettings,
+  DockerComposeTopSettings,
+} from "./src/containers.ts";
+export {
+  DockerComposeEventsSettings,
+  DockerComposeImagesSettings,
+  DockerComposeListingSettings,
+  DockerComposeLsSettings,
+  DockerComposePortSettings,
+  DockerComposeVersionSettings,
+  DockerComposeVolumesSettings,
+} from "./src/inventory.ts";
+export { type DockerComposeVersion } from "./src/reports.ts";

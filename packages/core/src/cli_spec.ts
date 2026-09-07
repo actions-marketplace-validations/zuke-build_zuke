@@ -1,3 +1,6 @@
+// Copyright (c) 2026 the Zuke contributors
+// SPDX-License-Identifier: MIT
+
 /**
  * The static CLI surface — the reserved positional commands and the built-in
  * option flags — as a single source of truth shared by the argument parser
@@ -41,11 +44,17 @@ export const RUNS_COMMAND = "runs";
 /** The `cancel` command: cancel a run and run its compensations. */
 export const CANCEL_COMMAND = "cancel";
 
+/** The `force` command: settle a target of a live run without running it. */
+export const FORCE_COMMAND = "force";
+
 /** The `register` command: record this build in the build registry. */
 export const REGISTER_COMMAND = "register";
 
 /** The `doc` command: print a package's API docs, isolated from the repo. */
 export const DOC_COMMAND = "doc";
+
+/** The `outdated` command: report JSR packages the lock resolves behind. */
+export const OUTDATED_COMMAND = "outdated";
 
 /** Every reserved command, in help and completion order. */
 export const RESERVED_COMMANDS: readonly ReservedCommand[] = [
@@ -72,6 +81,10 @@ export const RESERVED_COMMANDS: readonly ReservedCommand[] = [
     description: "Cancel a run and run its compensations",
   },
   {
+    name: FORCE_COMMAND,
+    description: "Force a target of a run to skipped or succeeded",
+  },
+  {
     name: REGISTER_COMMAND,
     description: "Register this build in the build registry",
   },
@@ -79,6 +92,10 @@ export const RESERVED_COMMANDS: readonly ReservedCommand[] = [
     name: DOC_COMMAND,
     description:
       "Print a package's API docs (deno doc), isolated from the repo",
+  },
+  {
+    name: OUTDATED_COMMAND,
+    description: "Report JSR packages the lock resolves behind their latest",
   },
 ];
 
@@ -117,6 +134,10 @@ export const BUILTIN_FLAGS: readonly BuiltinFlag[] = [
     name: "--actor",
     description: "Attribute the run to <name> in its state record",
   },
+  {
+    name: "--actor-kind",
+    description: "Who asked for the run: human (default) or service",
+  },
   { name: "--output", description: "Graph output format: text or html" },
   {
     name: "--no-open",
@@ -144,6 +165,11 @@ export const BUILTIN_FLAGS: readonly BuiltinFlag[] = [
     description: "With resume, continue even if a state write was dropped",
   },
   {
+    name: "--exit-code",
+    description:
+      "With outdated, exit non-zero when a package is behind or unchecked",
+  },
+  {
     name: "--status",
     description: "With runs list, keep only runs with this status",
   },
@@ -158,6 +184,18 @@ export const BUILTIN_FLAGS: readonly BuiltinFlag[] = [
   {
     name: "--limit",
     description: "With runs list, return at most this many runs (newest)",
+  },
+  {
+    name: "--initiator",
+    description: "With runs list, keep only runs this actor started",
+  },
+  {
+    name: "--outcome",
+    description: "With force, what the target settles to: skipped or succeeded",
+  },
+  {
+    name: "--reason",
+    description: "With force, why the target was forced (recorded on the run)",
   },
   {
     name: "--counts",

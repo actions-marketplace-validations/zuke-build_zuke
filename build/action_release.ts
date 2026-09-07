@@ -1,3 +1,6 @@
+// Copyright (c) 2026 the Zuke contributors
+// SPDX-License-Identifier: MIT
+
 /**
  * Versioning for the repository's own composite action — the `zuke-build/zuke`
  * listing on the GitHub Marketplace.
@@ -21,6 +24,7 @@
 import { parse as parseYaml } from "@std/yaml";
 
 import actionVersion from "./action_version.json" with { type: "json" };
+import { compareSemver } from "./semver.ts";
 
 /** A parsed `v<major>.<minor>.<patch>` action tag. */
 export interface ActionVersion {
@@ -131,16 +135,11 @@ export function latestVersion(
   for (const tag of tags) {
     const version = parseVersion(tag);
     if (version === undefined) continue;
-    if (newest === undefined || compareVersions(version, newest) > 0) {
+    if (newest === undefined || compareSemver(version, newest) > 0) {
       newest = version;
     }
   }
   return newest;
-}
-
-/** Order two versions by major, then minor, then patch. */
-function compareVersions(a: ActionVersion, b: ActionVersion): number {
-  return a.major - b.major || a.minor - b.minor || a.patch - b.patch;
 }
 
 /**

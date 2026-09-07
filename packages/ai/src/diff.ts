@@ -1,3 +1,6 @@
+// Copyright (c) 2026 the Zuke contributors
+// SPDX-License-Identifier: MIT
+
 /**
  * Sourcing and filtering the unified diff a reviewer assesses.
  *
@@ -61,13 +64,93 @@ export function filterDiff(
     .join("");
 }
 
-/** Truncate a diff to roughly `maxTokens` (≈4 chars/token), noting the cut. */
-export function truncate(diff: string, maxTokens: number): string {
+/**
+ * The distinct file paths a (filtered) diff touches, in diff order — the
+ * post-image paths, so a deleted file (whose `+++` line is `/dev/null`) is
+ * omitted. Used to pull full-file context for the reviewer.
+ */
+export function changedPaths(diff: string): string[] {
+  const paths: string[] = [];
+  for (const section of diff.split(/(?=^diff --git )/m)) {
+    if (!isFileSection(section)) continue;
+    if (/^\+\+\+ \/dev\/null$/m.test(section)) continue;
+    const path = sectionPath(section);
+    if (path !== undefined && !paths.includes(path)) paths.push(path);
+  }
+  return paths;
+}
+
+/** A hunk header, capturing the post-image start line (`@@ -a,b +c,d @@`). */
+const HUNK_RIGHT = /^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@/;
+
+/**
+ * The right-side (post-image) line numbers a unified diff exposes, per file:
+ * every added and context line inside a hunk. These are exactly the lines a
+ * pull-request review comment may anchor to on the `RIGHT` side — a removed
+ * line exists only on the left, and a line outside every hunk is not part of
+ * the diff at all, so anchoring to either is rejected by the host.
+ *
+ * Computed from the same filtered, truncated diff the model was shown, which
+ * makes the result an allowlist rather than a hint: a finding naming a path
+ * `.exclude(...)` removed, an absolute path, a traversal, or a file the diff
+ * never touched simply finds nothing here.
+ */
+export function anchorableLines(diff: string): Map<string, Set<number>> {
+  const anchors = new Map<string, Set<number>>();
+  let path: string | undefined;
+  let inHunk = false;
+  let right = 0;
+  for (const line of diff.split("\n")) {
+    if (line.startsWith("diff --git ")) {
+      path = undefined;
+      inHunk = false;
+      continue;
+    }
+    // The `+++ b/` header only appears before a hunk; the `!inHunk` guard stops
+    // an added line that happens to begin `++ b/` from being read as one.
+    if (!inHunk && line.startsWith("+++ ")) {
+      const target = line.slice("+++ ".length).trim();
+      path = target.startsWith("b/")
+        ? target.slice(2).replace(/\t.*$/, "")
+        : undefined; // `/dev/null` — a deleted file anchors nothing
+      continue;
+    }
+    const hunk = line.match(HUNK_RIGHT);
+    if (hunk) {
+      right = Number(hunk[1]);
+      inHunk = true;
+      continue;
+    }
+    if (!inHunk || path === undefined) continue;
+    if (line.startsWith("\\")) continue; // "\ No newline at end of file"
+    if (line.startsWith("-")) continue; // left side only; does not advance
+    // An added line, a context line, or the bare empty line git emits for a
+    // blank context line — all exist on the right at `right`.
+    let lines = anchors.get(path);
+    if (lines === undefined) {
+      lines = new Set<number>();
+      anchors.set(path, lines);
+    }
+    lines.add(right);
+    right++;
+  }
+  return anchors;
+}
+
+/**
+ * Truncate text to roughly `maxTokens` (≈4 chars/token), noting the cut.
+ * `what` names the text in the truncation note (default `"diff"`).
+ */
+export function truncate(
+  diff: string,
+  maxTokens: number,
+  what = "diff",
+): string {
   const limit = maxTokens * 4;
   if (diff.length <= limit) return diff;
   return `${
     diff.slice(0, limit)
-  }\n… (diff truncated to fit the token budget) …`;
+  }\n… (${what} truncated to fit the token budget) …`;
 }
 
 /**
@@ -126,6 +209,11 @@ export class DiffSettings {
   /** The literal diff text supplied via {@link DiffSettings.text}, if any. */
   text_(): string | undefined {
     return this.#text;
+  }
+
+  /** The base ref supplied via {@link DiffSettings.base}, if any. */
+  base_(): string | undefined {
+    return this.#base;
   }
 
   /**

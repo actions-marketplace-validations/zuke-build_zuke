@@ -1,18 +1,25 @@
+// Copyright (c) 2026 the Zuke contributors
+// SPDX-License-Identifier: MIT
+
 /**
  * Shared value types for the execution engine — the per-run environment and the
  * per-target/-run outcome shapes threaded between the scheduler, lock, and wait
- * modules. Kept in a dependency-free leaf module so those modules can all import
- * it without forming a cycle.
+ * modules. Kept in a leaf module — its only value import is the equally
+ * dependency-free `internal.ts` — so those modules can all import it without
+ * forming a cycle.
  *
  * @module
  */
 
+import { messageOf } from "./internal.ts";
 import type { TargetStatus } from "./build.ts";
 import type { TargetOutcomeView } from "./target.ts";
 import type { TargetReport } from "./report.ts";
+import type { SummaryEntry } from "./summary_note.ts";
 import type { RunStateWriter } from "./state/writer.ts";
 import type { StateStore } from "./state/store.ts";
 import type {
+  RunInitiator,
   SignalRecord,
   TargetRunState,
   TargetRunStatus,
@@ -27,6 +34,12 @@ export interface TargetOutcome {
   ms: number;
   /** The failure, when `status` is `"failed"`. */
   error?: unknown;
+  /**
+   * The notes the target reported into its summary row (see
+   * {@link "./target.ts".TargetContext.reportSummary}); present only when it
+   * reported at least one.
+   */
+  summary?: SummaryEntry[];
   /**
    * For a `.forEach(...)` fan-out target, the reports of its materialised
    * sub-targets, surfaced into the build summary and run record beneath the
@@ -65,6 +78,12 @@ export interface RunEnv {
   store?: StateStore;
   /** The run's actor, stamped on a lock holder. */
   actor: string;
+  /**
+   * Who asked for the run, when the run has a durable record to have stamped
+   * one. Absent for a store-less run, and on a record written before the field
+   * existed — {@link RunEnv.actor} is the closest answer in both cases.
+   */
+  initiator?: RunInitiator;
   /** A link to this run (CI job), stamped on a lock holder when known. */
   runUrl?: string;
   /** External signals received so far, exposed to bodies via `ctx.signals`. */
@@ -103,6 +122,8 @@ export interface TargetSettlement {
   status: TargetRunStatus;
   /** The failure's message, when it failed. */
   error?: string;
+  /** The notes it reported into its summary row, when it reported any. */
+  summary?: SummaryEntry[];
 }
 
 /**
@@ -118,11 +139,13 @@ export function outcomeView(
   row: TargetRunState | undefined,
 ): TargetOutcomeView {
   const error = settled.error ?? row?.error;
+  const summary = settled.summary ?? row?.summary;
   return {
     status: settled.status,
     ...(error === undefined ? {} : { error }),
     ...(row?.startedAt === undefined ? {} : { startedAt: row.startedAt }),
     ...(row?.endedAt === undefined ? {} : { endedAt: row.endedAt }),
+    ...(summary === undefined ? {} : { summary }),
   };
 }
 
@@ -145,6 +168,6 @@ export function outcomesFromRecord(
 
 /** A failure's message, or `undefined` when there was none — for the state record. */
 export function errorMessage(error: unknown): string | undefined {
-  if (error === undefined) return undefined;
-  return error instanceof Error ? error.message : String(error);
+  // The guard stays: `messageOf(undefined)` is the string `"undefined"`.
+  return error === undefined ? undefined : messageOf(error);
 }

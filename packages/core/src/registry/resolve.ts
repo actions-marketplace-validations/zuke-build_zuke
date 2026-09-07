@@ -1,3 +1,6 @@
+// Copyright (c) 2026 the Zuke contributors
+// SPDX-License-Identifier: MIT
+
 /**
  * Selection of the {@link BuildRegistry} for a command, by precedence — the
  * registry analogue of {@link "../state/resolve.ts".resolveStateStore}. Kept a
@@ -8,6 +11,7 @@
  * @module
  */
 
+import { assertSecureBackendUrl } from "../http.ts";
 import type { StateHost } from "../state/store.ts";
 import { FileSystemBuildRegistry } from "./fs_registry.ts";
 import { HttpBuildRegistry } from "./http_registry.ts";
@@ -25,6 +29,7 @@ export function envBuildRegistry(
 ): BuildRegistry | undefined {
   const url = readEnv("ZUKE_REGISTRY_URL");
   if (url !== undefined && url !== "") {
+    assertSecureBackendUrl(url, "ZUKE_REGISTRY_URL", readEnv);
     return new HttpBuildRegistry({
       url,
       token: readEnv("ZUKE_REGISTRY_TOKEN"),

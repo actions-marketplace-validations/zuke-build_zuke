@@ -1,3 +1,6 @@
+// Copyright (c) 2026 the Zuke contributors
+// SPDX-License-Identifier: MIT
+
 /**
  * The landing page's package catalogue, and the generator that renders it into
  * the website's `src/data/tools.ts`.
@@ -82,6 +85,11 @@ export const TOOL_GROUPS: ToolGroup[] = [
     blurb: "Bundle apps and orchestrate monorepos from a typed pipeline.",
     tools: [
       { name: "Vite", pkg: "@zuke/vite", desc: "dev, build, preview" },
+      {
+        name: "Storybook",
+        pkg: "@zuke/storybook",
+        desc: "dev server, static build",
+      },
       { name: "tsup", pkg: "@zuke/tsup", desc: "zero-config bundling" },
       {
         name: "tsdown",
@@ -130,6 +138,11 @@ export const TOOL_GROUPS: ToolGroup[] = [
         pkg: "@zuke/orval",
         desc: "generate API clients & mocks",
       },
+      {
+        name: "Redocly",
+        pkg: "@zuke/redocly",
+        desc: "lint, bundle & split OpenAPI",
+      },
       { name: "docs", pkg: "@zuke/docs", desc: "generate API documentation" },
     ],
   },
@@ -176,6 +189,16 @@ export const TOOL_GROUPS: ToolGroup[] = [
       { name: "Biome", pkg: "@zuke/biome", desc: "check, format, lint, ci" },
       { name: "dprint", pkg: "@zuke/dprint", desc: "fmt, check" },
       { name: "cspell", pkg: "@zuke/cspell", desc: "spell-check your sources" },
+      {
+        name: "ShellCheck",
+        pkg: "@zuke/shellcheck",
+        desc: "lint shell scripts, with a dialect",
+      },
+      {
+        name: "lint-staged",
+        pkg: "@zuke/lint-staged",
+        desc: "lint the staged files, or a diff",
+      },
       { name: "Knip", pkg: "@zuke/knip", desc: "find unused files & exports" },
       {
         name: "dpdm",
@@ -239,7 +262,11 @@ export const TOOL_GROUPS: ToolGroup[] = [
     category: "Cloud & infrastructure",
     blurb: "Provision and deploy with infra-as-code, typed end to end.",
     tools: [
-      { name: "gcloud", pkg: "@zuke/gcloud", desc: "deploy, run, IAM" },
+      {
+        name: "gcloud",
+        pkg: "@zuke/gcloud",
+        desc: "auth, builds, Cloud Run, Artifact Registry, GKE, storage",
+      },
       {
         name: "Terraform",
         pkg: "@zuke/terraform",
@@ -252,7 +279,11 @@ export const TOOL_GROUPS: ToolGroup[] = [
     category: "Version control, registry & CI",
     blurb: "Script Git, GitHub, and publishing straight from your build.",
     tools: [
-      { name: "Git", pkg: "@zuke/git", desc: "commit, tag, push, gitInfo()" },
+      {
+        name: "Git",
+        pkg: "@zuke/git",
+        desc: "commit, tag, push, merge-base, blame, gitInfo()",
+      },
       { name: "GitHub CLI", pkg: "@zuke/gh", desc: "releases, PRs, workflows" },
       { name: "Husky", pkg: "@zuke/husky", desc: "install & manage git hooks" },
       { name: "JSR", pkg: "@zuke/jsr", desc: "publish, add, remove" },

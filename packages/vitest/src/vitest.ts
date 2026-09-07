@@ -1,3 +1,6 @@
+// Copyright (c) 2026 the Zuke contributors
+// SPDX-License-Identifier: MIT
+
 /**
  * `VitestTasks` — typed task functions for the `vitest` test runner, in the
  * same settings-lambda style as the other Zuke tool wrappers: configure a
@@ -27,6 +30,8 @@ import {
   ToolSettings,
 } from "@zuke/core/tooling";
 import type { CommandOutput } from "@zuke/core/shell";
+import { reportTestCounts } from "@zuke/core";
+import { parseTestSummary } from "./test_summary.ts";
 
 /** The Vitest worker pool implementation (`--pool`). */
 export type VitestPool = "threads" | "forks" | "vmThreads" | "vmForks";
@@ -196,6 +201,12 @@ export class VitestSettings extends ToolSettings {
   silent(): this {
     this.#silent = true;
     return this;
+  }
+
+  /** Report the run's counts onto the build summary (see the module docs). */
+  protected override onOutput(output: CommandOutput): void {
+    const counts = parseTestSummary(output);
+    if (counts !== undefined) reportTestCounts(counts);
   }
 
   /** Assemble the `vitest run`/`vitest watch` argv. */

@@ -1,3 +1,6 @@
+// Copyright (c) 2026 the Zuke contributors
+// SPDX-License-Identifier: MIT
+
 /**
  * `DpdmTasks` — a typed task function for the [dpdm](https://github.com/acrazing/dpdm)
  * CLI, which analyzes a project's module dependency graph and reports circular
@@ -30,6 +33,8 @@ import {
   ToolSettings,
 } from "@zuke/core/tooling";
 import type { CommandOutput } from "@zuke/core/shell";
+import { reportSummary } from "@zuke/core";
+import { parseDpdmSummary } from "./summary.ts";
 
 /** Settings for a `dpdm` analysis run. */
 export class DpdmAnalyzeSettings extends ToolSettings {
@@ -154,6 +159,12 @@ export class DpdmAnalyzeSettings extends ToolSettings {
   entries(...paths: PathLike[]): this {
     this.#entries.push(...paths.map(String));
     return this;
+  }
+
+  /** Report `Circular`, the cycles found, onto the build summary. */
+  protected override onOutput(output: CommandOutput): void {
+    const pairs = parseDpdmSummary(output);
+    if (pairs !== undefined) reportSummary(pairs);
   }
 
   /** Assemble the `dpdm <flags> <entries...>` argv. */

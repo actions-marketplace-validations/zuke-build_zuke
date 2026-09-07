@@ -1,5 +1,48 @@
 # Changelog
 
+## [1.6.0](https://github.com/zuke-build/zuke/compare/git-v1.5.0...git-v1.6.0) (2026-09-01)
+
+
+### Features
+
+* **git:** `--error-unmatch` on `lsFiles` ([#439](https://github.com/zuke-build/zuke/issues/439)) ([577daa5](https://github.com/zuke-build/zuke/commit/577daa5caa9021155d9e33afeb748361dfe9ce6e)), closes [#434](https://github.com/zuke-build/zuke/issues/434)
+
+## [1.5.0](https://github.com/zuke-build/zuke/compare/git-v1.4.0...git-v1.5.0) (2026-08-30)
+
+
+### Features
+
+* **git:** wrap the interrogation commands, with readers ([#424](https://github.com/zuke-build/zuke/issues/424)) ([0ff7405](https://github.com/zuke-build/zuke/commit/0ff7405c834a555f1530e80c00b8006cd813aae0))
+
+## [1.4.0](https://github.com/zuke-build/zuke/compare/git-v1.3.0...git-v1.4.0) (2026-08-28)
+
+
+### Features
+
+* **git:** expand task coverage and add value-returning forms ([#398](https://github.com/zuke-build/zuke/issues/398)) ([8c82cac](https://github.com/zuke-build/zuke/commit/8c82cac568507f3645c0f9d93ad4c50a83906aac))
+
+## [1.3.0](https://github.com/zuke-build/zuke/compare/git-v1.2.0...git-v1.3.0) (2026-08-26)
+
+
+### Features
+
+* **git:** branch a worktree from an explicit start point ([#383](https://github.com/zuke-build/zuke/issues/383)) ([4abf1f3](https://github.com/zuke-build/zuke/commit/4abf1f391f1f39a1335582f859b01d5d9ee6b882)), closes [#382](https://github.com/zuke-build/zuke/issues/382)
+* **git:** resolve a remote's default branch ([#385](https://github.com/zuke-build/zuke/issues/385)) ([c469b5f](https://github.com/zuke-build/zuke/commit/c469b5f44fa807258bd7027c33eb9480a8ad227f)), closes [#384](https://github.com/zuke-build/zuke/issues/384)
+
+## [1.2.0](https://github.com/zuke-build/zuke/compare/git-v1.1.1...git-v1.2.0) (2026-08-25)
+
+
+### Features
+
+* **git:** add worktree tasks and a parsed worktree listing ([#377](https://github.com/zuke-build/zuke/issues/377)) ([a6b40fa](https://github.com/zuke-build/zuke/commit/a6b40fac388ee5c70ea64b5fd916edb1e70afdac)), closes [#376](https://github.com/zuke-build/zuke/issues/376)
+
+## [1.1.1](https://github.com/zuke-build/zuke/compare/git-v1.1.0...git-v1.1.1) (2026-08-13)
+
+
+### Bug Fixes
+
+* **cli:** escape line separators in generated literals; license headers and review docs ([#347](https://github.com/zuke-build/zuke/issues/347)) ([114f842](https://github.com/zuke-build/zuke/commit/114f84246e83fc6fb0bd12b55e8eb04192978074))
+
 ## [1.1.0](https://github.com/zuke-build/zuke/compare/git-v1.0.0...git-v1.1.0) (2026-08-07)
 
 

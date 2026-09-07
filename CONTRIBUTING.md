@@ -8,11 +8,17 @@ By participating, you agree to abide by our
 [Code of Conduct](./CODE_OF_CONDUCT.md).
 
 > [!NOTE]
-> Zuke's packages sit at different maturity levels — see
-> [Versioning & compatibility](./docs/versioning.md) for which packages follow
-> semver and which 0.x wrappers may still change within `0.x`. If you are
-> planning a large change, please open an issue first so we can agree on the
-> direction before you invest the effort.
+> Every Zuke package is `1.x` on full semver — see
+> [Versioning & compatibility](./docs/versioning.md) for the compatibility
+> promise, the `@zuke/core` floor, and pinning guidance.
+
+> [!IMPORTANT]
+> **Every change starts with an issue.** Before opening a pull request — for a
+> feature, a bugfix, documentation, a refactor, or any other work — file an
+> issue from
+> [the templates](https://github.com/zuke-build/zuke/issues/new/choose) so the
+> problem, the proposed shape, and the acceptance criteria are agreed before you
+> invest the effort. The pull request then closes it.
 
 ## Prerequisites
 
@@ -42,7 +48,7 @@ deno task ci   # run the full gate to confirm a clean baseline
 | Full pre-commit / CI gate     | `deno task ci` / `./zuke ci`            |
 
 **Run `deno task ci` before opening a pull request — it must be green.**
-`deno task ci` is `deno run -A zuke.ts ci`, the same gate CI's `quality` job
+`deno task ci` is `deno run -A --frozen zuke.ts ci`, the same gate CI's `ci` job
 runs (see [`AGENTS.md`](./AGENTS.md#commands) for the full check list) — so a
 green `deno task ci` locally means a green CI run. If you change a public API,
 regenerate the docs in the same change (`./zuke apiDocs`) — `ci` includes
@@ -50,8 +56,8 @@ regenerate the docs in the same change (`./zuke apiDocs`) — `ci` includes
 
 ## Coding standards (non-negotiable)
 
-These mirror [`CLAUDE.md`](./CLAUDE.md), which is the source of truth for how
-code in this repo is written:
+These mirror [`AGENTS.md`](./AGENTS.md), which is the source of truth for how
+code in this repo is written (`CLAUDE.md` is a one-line pointer to it):
 
 1. **Strict, strongly-typed TypeScript.** Never use `any` (the `no-explicit-any`
    lint rule is on). Never use `as` to force a type or the non-null assertion
@@ -68,9 +74,37 @@ code in this repo is written:
 5. **Tests are hermetic and fast.** No network and no reliance on ambient tools.
    When a test needs a subprocess, invoke `Deno.execPath()` (the running
    `deno`), which is always present and shell-free.
+6. **No dead code.** Remove unreachable branches, unused helpers, and fallbacks
+   that can never fire — tighten the types so the impossible state is
+   unrepresentable rather than guarding it with an arm that never runs.
+   Narrowing the type system itself forces (a `?? fallback` after `Map.get`, an
+   `instanceof Error` check in a `catch`) is not dead code; see
+   [`AGENTS.md`](./AGENTS.md#coding-guidelines-non-negotiable) for the full
+   rule.
+7. **Reuse the helper; never paste a second copy.** Look for the existing one
+   before writing a new one — `packages/core/src/internal.ts`, `tooling.ts`,
+   `shell.ts`, `file.ts` and friends, plus the package's own unexported modules
+   (`packages/gh/src/api.ts` and `credentials.ts` are the pattern). A near-copy
+   differing by a constant or a message is a copy-paste: parameterise the
+   difference and keep one implementation. Copies drift, and the drift is where
+   the bugs live — a guard or an escape must have exactly one implementation.
+   Prefer an unexported module in the same package; a new `@zuke/core` export is
+   for genuinely cross-package needs and brings the API-doc obligations with it.
+   Do not unify what merely looks alike: two wrappers mirroring two real CLIs is
+   not duplication, and an abstraction bigger than the duplication it removes is
+   worse than the duplication.
+8. **SOLID, in the shapes this codebase takes.** One domain per file; extend
+   through the settings lambda rather than a behaviour-switching flag; keep
+   `buildArgs()` pure in every settings subclass; pass the narrow type a
+   function needs instead of a whole settings object; and depend on the seam —
+   `StateHost`/`StateStore`, an injected `fetch`, `EnvReader` — not on `Deno.*`
+   or a global, which is also what keeps the tests hermetic. See
+   [`AGENTS.md`](./AGENTS.md#coding-guidelines-non-negotiable) for each
+   principle's concrete form.
 
-See the architecture notes in [`CLAUDE.md`](./CLAUDE.md) for how targets, the
-dependency graph, the shell `$`, and tool wrappers fit together.
+See the architecture notes in [`AGENTS.md`](./AGENTS.md#architecture-notes) for
+how targets, the dependency graph, the shell `$`, and tool wrappers fit
+together.
 
 ## Commit messages
 
@@ -87,13 +121,54 @@ the squash commit that [release-please](./RELEASING.md) parses.
 
 ## Pull requests
 
-1. Fork and create a topic branch from `master`.
-2. Make your change, adding tests and docs in the same PR.
-3. Run `deno task ci` and make sure it is green.
-4. Open a pull request with a clear description of the change and its
-   motivation. Link any related issue.
-5. Update `README.md`, JSDoc, and the relevant docs in `docs/` whenever
+1. File the issue that describes the work (feature request, bug report, or
+   chore) if one does not exist yet.
+2. Fork and create a topic branch from `master`.
+3. Make your change, adding tests and docs in the same PR.
+4. Run `deno task ci` and make sure it is green.
+5. Open a pull request with a clear description of the change and its
+   motivation, closing the issue with `Closes #<n>`.
+6. Update `README.md`, JSDoc, and the relevant docs in `docs/` whenever
    behaviour changes.
+
+## Code review
+
+Every change reaches `master` through a pull request — there is no direct push
+path — and review has documented requirements:
+
+**How review is conducted.** Each PR is reviewed by (1) the required CI gate
+(`deno task ci`, the same gate you run locally), (2) the AI reviewers, which
+post a security assessment and a code-quality assessment as PR comments, and (3)
+a human maintainer, who reads the diff and every reviewer finding. AI findings
+are advisory: a maintainer addresses each one or answers it on the thread,
+quoting the finding's id — they never merge unexamined.
+
+**What must be checked.** Reviewers verify that the change:
+
+- is correct, and covered by tests per the testing policy above (unit +
+  integration in the same PR; e2e for cross-process or cross-OS behaviour);
+- introduces no security regression (injection, privilege escalation, secret
+  exposure — see the [assurance case](./docs/assurance-case.md) for the
+  boundaries to respect);
+- meets the coding standards above (strict types, no `any`/`as`/`!`, JSDoc on
+  all public symbols) and keeps coverage at 95%+;
+- adds no duplicated logic: a helper that already exists is imported rather than
+  retyped, and a near-copy that differs by a constant is parameterised into one
+  implementation. A second copy of a guard, an escape, or a credential
+  resolution is treated as a defect, not a style note;
+- respects the SOLID shapes above — one domain per file, extension through the
+  settings lambda, narrow parameter types, and dependencies on the injectable
+  seam rather than on `Deno.*` or a global;
+- updates the affected docs in the same PR, and regenerates the API docs on any
+  public-API change;
+- carries a Conventional Commit PR title, since the squash subject is what
+  release-please parses.
+
+**What is required to be acceptable.** A PR merges only when the required status
+checks are green, every AI-reviewer finding has been fixed or answered, and a
+maintainer approves. Larger features additionally get an adversarial review pass
+before the PR is finalized (see
+[`AGENTS.md`](./AGENTS.md#adversarial-review-every-feature)).
 
 ## Reporting bugs and requesting features
 
@@ -107,6 +182,16 @@ the squash commit that [release-please](./RELEASING.md) parses.
 
 Please **do not** open public issues for security vulnerabilities. Follow the
 private reporting process in [`SECURITY.md`](./SECURITY.md) instead.
+
+## Developer Certificate of Origin
+
+Contributions are accepted under the
+[Developer Certificate of Origin 1.1](https://developercertificate.org/) (DCO).
+By opening a pull request you certify that you wrote the contribution (or
+otherwise have the right to submit it) and that you may license it under this
+project's [MIT License](./LICENSE). A `Signed-off-by:` trailer (`git commit -s`)
+is welcome as an explicit record, but submitting the pull request itself
+constitutes your certification.
 
 ## License
 

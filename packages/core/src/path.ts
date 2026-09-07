@@ -1,3 +1,6 @@
+// Copyright (c) 2026 the Zuke contributors
+// SPDX-License-Identifier: MIT
+
 /**
  * Ergonomic, immutable file paths for build scripts.
  *
@@ -28,6 +31,8 @@
  *
  * @module
  */
+
+import { isAbsolutePath } from "./internal.ts";
 
 /**
  * A filesystem path accepted by Zuke APIs: either a plain string or an
@@ -205,4 +210,19 @@ export function absolutePath(first: string, ...rest: string[]): AbsolutePath {
       value === clean(String(other)),
     toString: (): string => value,
   });
+}
+
+/**
+ * Resolve a possibly-relative directory to an {@link AbsolutePath}, against the
+ * current working directory. A leading `/` or a `C:`-style drive letter counts as
+ * already absolute.
+ *
+ * Module-internal: deliberately not re-exported from `mod.ts` — a build script
+ * composes paths with {@link absolutePath} instead.
+ */
+export function resolveDir(dir: string): AbsolutePath {
+  const slashed = dir.replace(/\\/g, "/");
+  return absolutePath(
+    isAbsolutePath(slashed) ? slashed : `${Deno.cwd()}/${slashed}`,
+  );
 }

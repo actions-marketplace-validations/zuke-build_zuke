@@ -32,6 +32,11 @@ launcher under a different name when a `zuke/` directory already occupies it —
 directory collision now fails with an actionable error instead of silently
 skipping the launcher).
 
+Running as an agent, always pass `--yes`: it skips every interactive question,
+including the closing "star the Zuke repository?" prompt — that question is for
+a human at a terminal, and an agent must never answer it (or star anything) on
+the user's behalf.
+
 To read a `@zuke/*` package's API without a Node repo's `@types/node` noise, run
 `zuke doc <package>` (e.g. `zuke doc core`) — it runs `deno doc` in an isolated
 directory.
@@ -48,8 +53,8 @@ zuke import --from makefile   # or pin the source (package.json | makefile)
 ```
 
 Each script/target becomes a `target()`; a command maps to `CmdTasks.exec(...)`
-— a **placeholder**, not the destination: before accepting it, check the
-package catalogue (`llms.txt`'s `## Packages` list, or the table in
+— a **placeholder**, not the destination: before accepting it, check the package
+catalogue (`llms.txt`'s `## Packages` list, or the table in
 [`zuke-write-build`'s cheatsheet](../zuke-write-build/references/cheatsheet.md))
 for a `@zuke/<tool>` wrapper matching that command and replace the placeholder
 with it — leaving `CmdTasks.exec` in place for a tool that has a typed wrapper
@@ -68,10 +73,15 @@ finish replacing any remaining generated `CmdTasks.exec` calls with typed
 - **`./zuke`** + **`./zuke.ps1`** — launchers that locate the project and run
   `zuke.ts` with the Deno on `PATH`. If Deno is missing they point at the
   official install docs and exit rather than piping an install script into a
-  shell, which would download and execute code unverified.
-- **`deno.json`** — merged to add a `zuke` task (and `fmt`/`lint`/`test` if
-  absent).
+  shell, which would download and execute code unverified. They pass `--frozen`
+  once a `deno.lock` exists, so the first run writes the lockfile and every run
+  after verifies it.
+- **`deno.json`** — merged to add a `zuke` task, plus `fmt`/`lint`/`test` if
+  absent. The merge is all-or-nothing: if a `zuke` task is already declared the
+  file is left alone entirely, and an unparseable one is skipped with a notice.
 - **`zuke.json`** — `{ "name": "..." }`, which marks the repo root.
+- **`.gitignore`** — created or appended so `.zuke/` is ignored (the cache and
+  durable run state live there); untouched if it already covers it.
 
 ## Running the build
 
@@ -90,14 +100,18 @@ calls, `zuke mcp` runs a Model Context Protocol server over it (register with
 `claude mcp add zuke -- deno run -A zuke.ts mcp`; add `--allow-run` to let the
 agent execute targets, not just inspect them).
 
-If Deno is already installed you can equivalently use `deno task zuke <target>`
-or `deno run -A zuke.ts <target>`. The `-A` flag grants permissions, since
-targets typically run processes and touch files.
+If Deno is already installed you can also use `deno task zuke <target>` or
+`deno run -A zuke.ts <target>`. The `-A` flag grants permissions, since targets
+typically run processes and touch files. These are not quite equivalent to the
+launcher: the scaffolded `zuke` task deliberately omits `--frozen`, so it may
+heal a stale lockfile where `./zuke` would fail on it.
 
 ## Manual setup (no CLI)
 
 Create `zuke.ts` in the project root, extend `Build`, declare targets with
 `target()`, and call `await run(MyBuild)` at the bottom:
+
+<!-- check -->
 
 ```ts
 import { Build, run, target } from "jsr:@zuke/core";
@@ -122,15 +136,15 @@ Every external tool has a typed `*Tasks` wrapper; **do not fall back to
 `Deno.Command` or hand-rolled shell.** First confirm a wrapper exists at all —
 `llms.txt`'s `## Packages` catalogue or the table in
 [`zuke-write-build`'s cheatsheet](../zuke-write-build/references/cheatsheet.md)
-is the only way to answer that; a per-package `deno doc` needs a name to
-target, so it cannot reveal that one exists. Once you know the package name,
-get its exact signatures:
+is the only way to answer that; a per-package `deno doc` needs a name to target,
+so it cannot reveal that one exists. Once you know the package name, get its
+exact signatures:
 
 - A single package on the command line: `deno doc jsr:@zuke/<package>`. Prefer
   this in a consumer repo — it resolves the version the project actually has
   installed, so it cannot describe an API that version lacks.
-- The whole typed surface of every package is in **`llms-full.txt`** (indexed
-  by `llms.txt`) — at the repo root in the Zuke repo itself, or from a consumer
+- The whole typed surface of every package is in **`llms-full.txt`** (indexed by
+  `llms.txt`) — at the repo root in the Zuke repo itself, or from a consumer
   repo <https://raw.githubusercontent.com/zuke-build/zuke/master/llms-full.txt>
   (index: <https://raw.githubusercontent.com/zuke-build/zuke/master/llms.txt>).
   Both track `master`, so they may document symbols that are merged but not yet

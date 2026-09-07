@@ -47,6 +47,8 @@ class BunAddSettings extends BunSettings
     Pin the exact version (`--exact`).
   global(): this
     Install globally (`--global`).
+  override protected onOutput(output: CommandOutput): void
+    Report `Installed` and `Removed` onto the build summary.
   override protected buildArgs(): string[]
     Assemble the `bun add` argv.
 
@@ -57,6 +59,8 @@ class BunInstallSettings extends BunSettings
     Install without devDependencies (`--production`).
   frozenLockfile(): this
     Fail if the lockfile is out of date (`--frozen-lockfile`).
+  override protected onOutput(output: CommandOutput): void
+    Report `Installed` and `Removed` onto the build summary.
   override protected buildArgs(): string[]
     Assemble the `bun install` argv.
 
@@ -65,6 +69,8 @@ class BunRemoveSettings extends BunSettings
 
   packages(...names: string[]): this
     Package names to remove (required).
+  override protected onOutput(output: CommandOutput): void
+    Report `Installed` and `Removed` onto the build summary.
   override protected buildArgs(): string[]
     Assemble the `bun remove` argv.
 
@@ -93,6 +99,8 @@ class BunTestSettings extends BunSettings
     Collect coverage (`--coverage`).
   bail(): this
     Stop after the first failure (`--bail`).
+  override protected onOutput(output: CommandOutput): void
+    Report the run's counts onto the build summary (see the module docs).
   override protected buildArgs(): string[]
     Assemble the `bun test` argv.
 

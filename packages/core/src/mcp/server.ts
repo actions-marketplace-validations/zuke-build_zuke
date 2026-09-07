@@ -1,3 +1,6 @@
+// Copyright (c) 2026 the Zuke contributors
+// SPDX-License-Identifier: MIT
+
 /**
  * An MCP (Model Context Protocol) server over a Zuke build.
  *
@@ -28,64 +31,36 @@ import { Redactor } from "../redact.ts";
 import { resolveActor } from "../state/record.ts";
 import type { RunEvent, RunEventOutcome } from "../state/types.ts";
 import type { StateStore } from "../state/store.ts";
-import type { RunStateWriter } from "../state/writer.ts";
-import { openAuditLog } from "./audit.ts";
-import { targetMatcher, timingSafeEqual } from "./authz.ts";
+import { AUDIT_SAFE_KEYS, auditText, AuditTrail } from "./audit.ts";
+import { operatorTokenDenial, targetMatcher } from "./authz.ts";
 import {
   callRunStateTool,
   isMutatingRunTool,
   runStateToolDefs,
 } from "./runtools.ts";
 import {
+  EMPTY_CONTEXT,
   err,
-  INTERNAL_ERROR,
   INVALID_PARAMS,
-  INVALID_REQUEST,
   type JsonRpcResponse,
-  type McpIdentityHook,
   type McpRequestContext,
-  METHOD_NOT_FOUND,
   ok,
-  resolveIdentity,
 } from "./jsonrpc.ts";
-
-/**
- * The MCP protocol versions this server implements, newest first. The server's
- * method surface (`initialize`, `tools/list`, `tools/call`, `ping`) is common
- * to all of them; {@link PROTOCOL_VERSION} is the newest.
- */
-export const SUPPORTED_PROTOCOL_VERSIONS: readonly string[] = [
-  "2025-06-18",
-  "2025-03-26",
-  "2024-11-05",
-];
-
-/** The newest MCP protocol version this server implements. */
-export const PROTOCOL_VERSION = SUPPORTED_PROTOCOL_VERSIONS[0];
-
-/** The `run:` prefix that names a per-target execution tool. */
-const RUN_PREFIX = "run:";
-
-/** Control keys whose values are always safe to record (booleans, never secrets). */
-const AUDIT_SAFE_KEYS: ReadonlySet<string> = new Set(["dryRun", "confirm"]);
-
-/** The request context handed to {@link McpServer.handleMessage} on stdio (no headers). */
-const EMPTY_CONTEXT: McpRequestContext = { headers: new Headers() };
-
-/** A JSON Schema fragment (kept loose — MCP only needs plain JSON Schema). */
-type JsonSchema = Record<string, unknown>;
-
-/** An MCP tool definition, as returned by `tools/list`. */
-export interface McpTool {
-  readonly name: string;
-  readonly description: string;
-  readonly inputSchema: JsonSchema;
-  readonly annotations?: {
-    readonly title?: string;
-    readonly readOnlyHint?: boolean;
-    readonly destructiveHint?: boolean;
-  };
-}
+import type { McpAuthenticator, ResolvedIdentity } from "./auth.ts";
+import {
+  confirmationResult,
+  dispatchMessage,
+  DRY_RUN_PROPERTY,
+  type JsonSchema,
+  type McpTool,
+  negotiateInitialize,
+  OPERATOR_TOKEN_PROPERTY,
+  RUN_PREFIX,
+  runDisabledResult,
+  textResult,
+  toolCall,
+  unauthorizedResult,
+} from "./protocol.ts";
 
 /** Options for {@link McpServer}. */
 export interface McpServerOptions {
@@ -136,16 +111,16 @@ export interface McpServerOptions {
    * tool call is written to the audit log.
    */
   stateStore?: StateStore;
-  /** Who to attribute audited calls to (`--actor`); below {@link identity}. */
+  /** Who to attribute audited calls to (`--actor`); below {@link authenticator}. */
   actor?: string;
   /**
-   * Resolve a trusted caller identity per request (e.g. from an authenticating
-   * reverse proxy's header). When set, its actor overrides `--actor`, the
-   * environment, and the client's self-reported label for every call, and a
-   * throwing hook rejects the request before anything runs. Off by default, so
-   * stdio/local use is unchanged.
+   * Authenticate the caller per request. When set, the identity it resolves
+   * overrides `--actor`, the environment, and the client's self-reported label
+   * for every call, and a refusal stops the request before anything runs. Off by
+   * default, so stdio/local use is unchanged. The CLI builds this from the
+   * build's `mcpAuth()` or `mcpIdentity()` (see `serveMcp`).
    */
-  identity?: McpIdentityHook;
+  authenticator?: McpAuthenticator;
   /** Reads an environment variable (injectable for tests). */
   readEnv?: (name: string) => string | undefined;
   /** The server version reported in `initialize`. Defaults to `"0.0.0"`. */
@@ -175,16 +150,6 @@ function schemaForParam(param: AnyParameter): JsonSchema {
     base.enum = [...param.options_];
   }
   return base;
-}
-
-/** The MCP result content for a single block of text. */
-function textResult(text: string, isError = false): Record<string, unknown> {
-  return { content: [{ type: "text", text }], isError };
-}
-
-/** Whether a JSON value is a plain object (a string-keyed record). */
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 /** Whether a JSON value is a scalar a parameter can accept. */
@@ -228,12 +193,12 @@ export class McpServer {
   readonly #confirmDestructive: boolean;
   readonly #store?: StateStore;
   readonly #actor?: string;
-  readonly #identity?: McpIdentityHook;
+  readonly #authenticator?: McpAuthenticator;
   readonly #readEnv: (name: string) => string | undefined;
   /** The connecting client's `initialize` name, a low-priority audit actor. */
   #clientLabel?: string;
-  /** The audit-log writer, opened lazily on the first audited call. */
-  #auditLog?: RunStateWriter;
+  /** The audit trail, opened lazily on the first audited call. */
+  #trail?: AuditTrail;
 
   constructor(
     private readonly build: Build,
@@ -257,7 +222,7 @@ export class McpServer {
     this.#confirmDestructive = options.confirmDestructive ?? false;
     this.#store = options.stateStore;
     this.#actor = options.actor;
-    this.#identity = options.identity;
+    this.#authenticator = options.authenticator;
     this.#readEnv = options.readEnv ?? (() => undefined);
     this.#version = options.version ?? "0.0.0";
   }
@@ -378,22 +343,14 @@ export class McpServer {
       if (param.required_ && !param.hasFallback_) required.push(paramName);
     }
     // Execution controls, alongside the declared parameters.
-    properties.dryRun = {
-      type: "boolean",
-      description: "Plan without executing any target body.",
-    };
+    properties.dryRun = DRY_RUN_PROPERTY;
     // A call that would run a protected target must carry the operator token.
     // Checked over the whole plan, so a target that merely *depends* on a
     // protected one advertises the requirement too — otherwise the schema would
     // omit the very argument the call is then denied for.
     const planned = this.#plannedNames(name);
     if (planned === null || this.#planTouchesProtected(planned)) {
-      properties.operatorToken = {
-        type: "string",
-        description:
-          "Operator token (ZUKE_OPERATOR_TOKEN) required: this target, or one " +
-          "it depends on, is protected.",
-      };
+      properties.operatorToken = OPERATOR_TOKEN_PROPERTY;
       required.push("operatorToken");
     }
     // With --confirm-destructive, a destructive target needs an explicit
@@ -427,115 +384,41 @@ export class McpServer {
    * Handle one parsed JSON-RPC message. Returns the response to send, or `null`
    * for a notification (which takes no reply).
    */
-  async handleMessage(
+  handleMessage(
     message: unknown,
     ctx: McpRequestContext = EMPTY_CONTEXT,
+    identity?: ResolvedIdentity,
   ): Promise<JsonRpcResponse | null> {
-    if (
-      typeof message !== "object" || message === null ||
-      !("method" in message) || typeof message.method !== "string"
-    ) {
-      return err(idOf(message), INVALID_PARAMS, "Invalid Request");
-    }
-    const method = message.method;
-    const id = idOf(message);
-    const params = "params" in message ? message.params : undefined;
-
-    // Notifications (no id) never receive a response.
-    if (id === null && method.startsWith("notifications/")) return null;
-
-    // Resolve the trusted caller identity once, before any dispatch. A throwing
-    // hook — or one that yields no usable actor — rejects the whole request:
-    // nothing runs, nothing is written, and it never falls back to the
-    // (untrusted) static actor, so the hook's precedence stays absolute.
-    let identityActor: string | undefined;
-    if (this.#identity !== undefined) {
-      const resolved = resolveIdentity(this.#identity, ctx);
-      if (resolved === null) return err(id, INVALID_REQUEST, "Unauthorized");
-      identityActor = resolved;
-    }
-
-    switch (method) {
-      case "initialize":
-        return ok(id, this.#initialize(params));
-      case "ping":
-        return ok(id, {});
-      case "tools/list":
-        // Same backstop as tools/call: building the tool list now walks each
-        // target's plan, so an unforeseen throw must not tear down the
-        // transport for every later message on the connection.
-        try {
-          return ok(id, { tools: this.tools() });
-        } catch {
-          return err(id, INTERNAL_ERROR, "Internal error listing tools");
-        }
-      case "tools/call":
-        // Backstop: no tool call may crash the transport. Expected failures are
-        // already structured tool results; this catches anything unforeseen and
-        // returns a JSON-RPC error (generic, so no raw detail can escape).
-        try {
-          return await this.#callTool(id, params, identityActor);
-        } catch {
-          return err(
-            id,
-            INTERNAL_ERROR,
-            "Internal error handling the tool call",
-          );
-        }
-      default:
-        // An unknown notification is silently ignored; an unknown request errors.
-        if (id === null) return null;
-        return err(id, METHOD_NOT_FOUND, `Unknown method: ${method}`);
-    }
+    return dispatchMessage(message, ctx, {
+      authenticator: this.#authenticator,
+      initialize: (params) => this.#initialize(params),
+      tools: () => this.tools(),
+      callTool: (id, params, caller) => this.#callTool(id, params, caller),
+    }, identity);
   }
 
   /**
-   * The `initialize` result. Negotiate the protocol version per the MCP spec:
-   * echo the client's requested version only when this server implements it,
-   * otherwise answer with the server's newest supported version (the client
-   * then proceeds or disconnects). An unknown or malformed request never
-   * reflects an unsupported version back.
+   * The `initialize` result, and the side effect of remembering the client's
+   * self-reported name as a low-priority audit actor. It is an untrusted label
+   * (never an authorization input), and on a shared HTTP endpoint it reflects
+   * the most recent client to connect — set --actor for authoritative
+   * attribution there (see docs/mcp.md).
    */
   #initialize(params: unknown): Record<string, unknown> {
-    // Remember the client's self-reported name as a low-priority audit actor.
-    // It is an untrusted label (never an authorization input), and on a shared
-    // HTTP endpoint it reflects the most recent client to connect — set --actor
-    // for authoritative attribution there (see docs/mcp.md).
-    if (
-      isRecord(params) && isRecord(params.clientInfo) &&
-      typeof params.clientInfo.name === "string"
-    ) {
-      this.#clientLabel = params.clientInfo.name;
-    }
-    const requested = isRecord(params) &&
-        typeof params.protocolVersion === "string"
-      ? params.protocolVersion
-      : undefined;
-    const protocolVersion = requested !== undefined &&
-        SUPPORTED_PROTOCOL_VERSIONS.includes(requested)
-      ? requested
-      : PROTOCOL_VERSION;
-    return {
-      protocolVersion,
-      capabilities: { tools: { listChanged: false } },
-      serverInfo: { name: "zuke", version: this.#version },
-    };
+    const { result, clientLabel } = negotiateInitialize(params, this.#version);
+    if (clientLabel !== undefined) this.#clientLabel = clientLabel;
+    return result;
   }
 
-  /** Dispatch a `tools/call`, attributed to `actor` (the resolved caller). */
+  /** Dispatch a `tools/call`, attributed to `identity` (the resolved caller). */
   async #callTool(
     id: string | number | null,
     params: unknown,
-    actor: string | undefined,
+    identity: ResolvedIdentity | undefined,
   ): Promise<JsonRpcResponse> {
-    if (!isRecord(params) || !("name" in params)) {
-      return err(id, INVALID_PARAMS, "tools/call requires a tool name");
-    }
-    const name = params.name;
-    if (typeof name !== "string") {
-      return err(id, INVALID_PARAMS, "tool name must be a string");
-    }
-    const args = isRecord(params.arguments) ? params.arguments : {};
+    const call = toolCall(params);
+    if ("error" in call) return err(id, INVALID_PARAMS, call.error);
+    const { name, args } = call;
 
     if (name === "list_targets") {
       return ok(id, textResult(this.#describe().targets));
@@ -547,9 +430,9 @@ export class McpServer {
       return ok(id, textResult(this.#describe().graph));
     }
     if (name.startsWith(RUN_PREFIX)) {
-      return await this.#run(id, name.slice(RUN_PREFIX.length), args, actor);
+      return await this.#run(id, name.slice(RUN_PREFIX.length), args, identity);
     }
-    const runStateResult = await this.#callRunStateTool(name, args, actor);
+    const runStateResult = await this.#callRunStateTool(name, args, identity);
     if (runStateResult !== null) return ok(id, runStateResult);
     // An unknown tool is reported through the result (isError), per MCP, so the
     // model sees it rather than a transport-level failure.
@@ -565,11 +448,11 @@ export class McpServer {
   async #callRunStateTool(
     name: string,
     args: Record<string, unknown>,
-    identityActor: string | undefined,
+    identity: ResolvedIdentity | undefined,
   ): Promise<Record<string, unknown> | null> {
     const store = this.#store;
     if (store === undefined) return null;
-    const actor = identityActor ?? this.#resolveActor();
+    const actor = identity?.actor ?? this.#resolveActor();
     const mutating = isMutatingRunTool(name);
     if (mutating && !this.#allowRun) {
       return textResult(
@@ -621,21 +504,14 @@ export class McpServer {
     id: string | number | null,
     targetName: string,
     args: Record<string, unknown>,
-    identityActor: string | undefined,
+    identity: ResolvedIdentity | undefined,
   ): Promise<JsonRpcResponse> {
     const runName = `${RUN_PREFIX}${targetName}`;
-    const actor = identityActor ?? this.#resolveActor();
+    const actor = identity?.actor ?? this.#resolveActor();
     // Execution off entirely: a generic message (reveals no specific target).
     if (!this.#allowRun) {
       await this.#audit(runName, args, "denied", actor, "run_disabled");
-      return ok(
-        id,
-        textResult(
-          "Running targets is disabled. Start the server with " +
-            "`zuke mcp --allow-run` to enable execution.",
-          true,
-        ),
-      );
+      return ok(id, runDisabledResult("--allow-run"));
     }
     const root = this.#targets.get(targetName);
     // A target that is unknown OR not in the allow-list is reported identically,
@@ -654,21 +530,7 @@ export class McpServer {
       // The precise reason goes to the audit trail, which is operator-only; the
       // caller gets the collapsed one (see clientDenial).
       await this.#audit(runName, args, "denied", actor, denial);
-      return ok(
-        id,
-        textResult(
-          JSON.stringify(
-            {
-              error: "unauthorized",
-              tool: runName,
-              reason: clientDenial(denial),
-            },
-            null,
-            2,
-          ),
-          true,
-        ),
-      );
+      return ok(id, unauthorizedResult(runName, clientDenial(denial)));
     }
 
     const dryRun = args.dryRun === true;
@@ -684,18 +546,10 @@ export class McpServer {
         .filter((n): n is string => n !== undefined);
       return ok(
         id,
-        textResult(
-          JSON.stringify(
-            {
-              status: "confirmation_required",
-              tool: runName,
-              plan,
-              hint: "Re-call with confirm:true to execute.",
-            },
-            null,
-            2,
-          ),
-          false,
+        confirmationResult(
+          runName,
+          "Re-call with confirm:true to execute.",
+          plan,
         ),
       );
     }
@@ -742,6 +596,11 @@ export class McpServer {
         dryRun,
         github: false,
         actor,
+        // The caller's kind travels with their actor. Without it the run's
+        // initiator would take its kind from the *server process's*
+        // environment — recording a service token as a person, or every
+        // engineer as machinery on a host where ZUKE_ACTOR_KIND is set.
+        ...(identity?.kind === undefined ? {} : { actorKind: identity.kind }),
         readEnv: this.#readEnv,
       });
     } catch (error) {
@@ -779,25 +638,10 @@ export class McpServer {
     const planned = this.#plannedNames(name);
     if (planned === null) return "unresolved_plan";
     if (this.#planTouchesProtected(planned)) {
-      const denial = this.#checkOperatorToken(args);
+      const denial = operatorTokenDenial(args, this.#operatorToken);
       if (denial !== null) return denial;
     }
     return null;
-  }
-
-  /**
-   * Validate a protected target's operator token, returning a denial reason
-   * (for the structured error and audit) or `null` when the token is valid.
-   */
-  #checkOperatorToken(args: Record<string, unknown>): string | null {
-    if (this.#operatorToken === undefined || this.#operatorToken === "") {
-      return "operator_token_unconfigured";
-    }
-    const provided = args.operatorToken;
-    if (typeof provided !== "string") return "missing_operator_token";
-    return timingSafeEqual(provided, this.#operatorToken)
-      ? null
-      : "invalid_operator_token";
   }
 
   /** Resolve the actor for audited calls: --actor → env → the client label. */
@@ -829,16 +673,8 @@ export class McpServer {
       args: this.#auditArgs(args),
     };
     if (detail !== undefined) event.detail = detail;
-    try {
-      this.#auditLog ??= await openAuditLog(
-        store,
-        () => new Date().toISOString(),
-        new Redactor(),
-      );
-      await this.#auditLog.appendEvent(event);
-    } catch {
-      // Auditing is best-effort: a store hiccup must not fail the tool call.
-    }
+    this.#trail ??= new AuditTrail(store);
+    await this.#trail.append(event);
   }
 
   /**
@@ -893,27 +729,4 @@ export class McpServer {
  */
 function clientDenial(reason: string): string {
   return reason === "unresolved_plan" ? "not_allowed" : reason;
-}
-
-/**
- * The string form an argument takes in the audit trail: a structure is
- * serialised, everything else stringified. Used both to seed the redactor and
- * to render the recorded value, so the two can never disagree about what text
- * a value produces.
- */
-function auditText(value: unknown): string {
-  return typeof value === "object" && value !== null
-    ? JSON.stringify(value)
-    : String(value);
-}
-
-/** Extract a JSON-RPC id from a message, defaulting to `null`. */
-function idOf(message: unknown): string | number | null {
-  if (
-    typeof message === "object" && message !== null && "id" in message &&
-    (typeof message.id === "string" || typeof message.id === "number")
-  ) {
-    return message.id;
-  }
-  return null;
 }

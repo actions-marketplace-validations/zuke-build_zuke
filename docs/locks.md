@@ -30,8 +30,8 @@ parameters resolve, so the key can read `this.<param>.value`.
 ## Semantics
 
 - **Exclusive.** While a run holds the lock for a `key`, any other run that
-  tries to acquire the same key **fails** with a `LockConflictError` — it does
-  not queue or block. The error's message is the rendered guidance and its
+  tries to acquire the same key **fails** with a `LockConflictError` — unless it
+  asks to wait (below). The error's message is the rendered guidance and its
   `holder` carries the structured identity (`actor`, `runId`, `since`,
   `runUrl?`).
 - **The key** is set with `s.lockKey(...parts)` (sanitised and joined, safe as a
@@ -48,6 +48,43 @@ parameters resolve, so the key can read `this.<param>.value`.
   failure, or cancellation** — in a `finally`, so the common path never relies
   on the TTL. The TTL is only the backstop for a killed process.
 
+## Waiting instead of failing
+
+Failing fast is right for a resource where a second run is a mistake worth
+reporting. It is the wrong answer for a resource a developer wants to *use* —
+one dev environment, one database, one port — where the useful behaviour is to
+keep asking until the resource frees, instead of making the developer run the
+command again.
+
+```ts
+devStack = target()
+  .lock((s) =>
+    s.lockKey("dev-env")
+      .withTtl("4h")
+      .waitUpTo("30m")     // queue instead of failing
+      .pollEvery("5s"))    // how often to retry; 5s is the default
+  .executes(async (ctx) => {/* … */});
+```
+
+- `s.waitUpTo(duration)` retries until the lock frees, and raises
+  `LockConflictError` only once the wait is spent. Its message says how long it
+  waited, so a timeout is not mistaken for a lock that was never retried.
+- `s.pollEvery(duration)` paces the retries (default `"5s"`). Nothing hands the
+  lock over: a waiter takes it on its next retry, so it starts up to one poll
+  interval after the holder released it, and only if no one else took it first.
+- While waiting, the run prints who holds the lock and since when, once per
+  holder rather than once per retry.
+- A cancelled run stops waiting immediately; a 30-minute wait never outlives the
+  run it belongs to.
+- Omitting `waitUpTo` keeps the fail-fast behaviour exactly as it was.
+
+**There is no queue.** "Waiting" is a retry loop, not a place in a line: each
+waiter races every other waiter — and every fresh run — for the lock the moment
+it frees. A run that has waited twenty minutes has no claim over one that
+arrived a second ago, and can lose the race repeatedly when contention is heavy.
+Arrival order would need the store itself to hand out places, which is not
+something a waiting client can arrange for itself.
+
 ## Conflicts
 
 The loser of a conflict gets actionable guidance, on every surface:
@@ -60,6 +97,29 @@ The loser of a conflict gets actionable guidance, on every surface:
 
 Provide `s.onConflict(holder => …)` to phrase the guidance for your domain; omit
 it for a sensible default that names the holder and its run.
+
+## Seeing what is held
+
+A lock's holder is visible to the run that loses a race for it. To ask without
+contending — the usual case when a shared resource looks stuck — list them:
+
+```ts
+import { listStoreLocks } from "jsr:@zuke/core";
+
+for (const { key, holder, expiresAt } of await listStoreLocks(store)) {
+  console.log(`${key}: ${holder.actor} (run ${holder.runId}) since ${holder.since}`);
+}
+```
+
+Only live locks are listed: an expired record is free, and the next acquirer
+takes it over. `expiresAt` answers the follow-up question — when it frees itself
+if the holder never comes back — and the acquisition token is never included,
+since a listing is read-only.
+
+The filesystem backend lists locks; an HTTP backend does when the server
+implements `GET /locks` (see [the contract](./state-api.md)). A backend that
+cannot enumerate fails the call with a message saying so, rather than reporting
+an empty listing that would read as "nobody holds anything".
 
 ## Requires a state store
 
@@ -98,9 +158,18 @@ holder is gone and the run can be taken over.
 - **A resume refuses a run whose holder has not let go.** Two processes working
   one run is worse than a delayed resume, so the claim is checked before the
   compare-and-swap and a resumer that cannot take it stops.
-- **Losing it stops the run.** If a renewal is refused — the claim is
-  demonstrably somebody else's now — the run aborts rather than carrying on
-  beside whoever took it over.
+- **Losing it stops the run — it does not cancel it.** If a renewal is refused —
+  the claim is demonstrably somebody else's now — the run stops rather than
+  carrying on beside whoever took it over. Stopping is *all* it does: it does
+  **not** run the compensations, and it does **not** settle the record. Both
+  belong to the new holder now, and unwinding work that holder is already
+  building on would be the very "two processes on one run" the lease exists to
+  prevent. Per-target progress already queued is dropped rather than flushed —
+  the writer stops writing the moment the claim is lost, so nothing it had left
+  to say lands on the new holder's record — nothing new is started, and the
+  process reports that the run was taken over. A claim lost *during* a
+  cancellation's rollback stops that walk where it stands, for the same reason:
+  the remaining compensations belong to whoever holds the run now.
 - **A refused renewal is loss; a failed one is not.** A store answers "no" when
   the claim has changed hands, but it *throws* for a filesystem mutex it could
   not take in time, or an HTTP 503, or a DNS blip. None of those say who holds
@@ -113,7 +182,20 @@ holder is gone and the run can be taken over.
 - **Whoever takes the claim gives it back.** A resume releases the lease it took
   on every path out, including one where the run fails — a claim held by nobody
   would make a run that has demonstrably stopped look like one still being
-  worked on. A run that took its own lease releases it when it settles; if that
-  process breaks first, the claim lapses at its TTL instead.
+  worked on. A run that took its own lease releases it when it settles, and
+  **cancellation is settling**: a Ctrl-C'd run hands the claim back as soon as
+  its record is terminal, rather than holding it for the rest of the TTL. The two
+  exceptions are a lease that was *lost* (not ours to give back) and a process
+  that breaks before it can release, where the claim lapses at its TTL instead.
 - **A crashed holder's claim lapses at the TTL.** Nothing polls for it: expiry is
-  evaluated by the store the next time somebody tries to acquire.
+  evaluated by the store the next time somebody tries to acquire — and until
+  somebody does, a lapsed claim is still its holder's: a renewal extends it
+  whatever its expiry says. So "expired" is not "abandoned", and nothing may
+  delete a lock record on expiry alone. `runs prune` deliberately leaves them
+  behind for that reason; clearing one belongs to whoever can *prove* the holder
+  is gone, which a sweep does by acquiring it.
+- **A run that cannot take its lease does not start.** Acquiring is retried past
+  a store having a bad moment, but a store that never answers fails the run with
+  a named error rather than running unclaimed — a `running` record with no holder
+  is exactly what a sweep reads as abandoned, so running without one would leave
+  a healthy build looking dead for its whole duration.

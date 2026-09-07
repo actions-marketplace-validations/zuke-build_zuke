@@ -1,3 +1,6 @@
+// Copyright (c) 2026 the Zuke contributors
+// SPDX-License-Identifier: MIT
+
 /**
  * Zuke — a code-first, strongly-typed build automation system for Deno.
  *
@@ -104,7 +107,9 @@ export {
   resumeCheck,
   type ResumeOptions,
   resumeRun,
+  RunNotSuspendedError,
 } from "./src/resume.ts";
+export { ForeignRunError, ownsRun, resolveBuildId } from "./src/ownership.ts";
 export {
   type CancelOptions,
   type CancelResult,
@@ -116,6 +121,14 @@ export {
   type Renderer,
   type TargetReport,
 } from "./src/renderer.ts";
+export {
+  reportSummary,
+  reportTestCounts,
+  type SummaryEntry,
+  type SummaryPairs,
+  type SummaryValue,
+  type TestCounts,
+} from "./src/summary_note.ts";
 export type { Style } from "./src/render.ts";
 export type { BuildCache, OpenCacheOptions } from "./src/cache.ts";
 export {
@@ -132,12 +145,14 @@ export {
 } from "./src/remote_cache.ts";
 export {
   defaultStateHost,
+  listStoreLocks,
   type LockResult,
   type PutResult,
   type StateHost,
   type StateStore,
 } from "./src/state/store.ts";
 export {
+  type HeldLockEntry,
   LockConflictError,
   type LockHolder,
   lockKey,
@@ -150,16 +165,27 @@ export {
 } from "./src/state/run_lease.ts";
 export { parseDuration } from "./src/duration.ts";
 export {
+  type ForceDenial,
+  type ForceOptions,
+  type ForceResult,
+  forceTarget,
+} from "./src/force.ts";
+export {
+  type ActorKind,
   type EffectState,
   type EffectStatus,
+  type ForcedOutcome,
+  initiatorOf,
   type RunEvent,
   type RunEventOutcome,
   type RunGraphNode,
+  type RunInitiator,
   type RunQuery,
   type RunRecord,
   type RunStatus,
   type RunSummary,
   type SignalRecord,
+  type TargetOverride,
   type TargetRunState,
   type TargetRunStatus,
   type WaitDisposition,
@@ -195,11 +221,13 @@ export {
   resolveBuildRegistry,
   type ResolveRegistryOptions,
 } from "./src/registry/resolve.ts";
+export { type McpRequestContext } from "./src/mcp/jsonrpc.ts";
 export {
+  type McpAuthenticator,
+  type McpAuthReject,
   type McpIdentity,
   type McpIdentityHook,
-  type McpRequestContext,
-} from "./src/mcp/jsonrpc.ts";
+} from "./src/mcp/auth.ts";
 export { type AbsolutePath, absolutePath, type PathLike } from "./src/path.ts";
 export { CONFIG_FILE, repoRoot } from "./src/config.ts";
 export {
@@ -247,7 +275,13 @@ export {
   FileTasks,
   type FileTasksApi,
   type RemoveOptions,
+  type SymlinkOptions,
 } from "./src/file.ts";
+export {
+  BrowserOpenSettings,
+  BrowserTasks,
+  type BrowserTasksApi,
+} from "./src/browser.ts";
 export {
   assert,
   assertDirectoryExists,

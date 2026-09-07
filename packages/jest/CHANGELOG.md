@@ -1,5 +1,19 @@
 # Changelog
 
+## [1.1.0](https://github.com/zuke-build/zuke/compare/jest-v1.0.1...jest-v1.1.0) (2026-09-02)
+
+
+### Features
+
+* report test counts from every test-runner wrapper ([#461](https://github.com/zuke-build/zuke/issues/461)) ([2256d1e](https://github.com/zuke-build/zuke/commit/2256d1e41609067d42f40e3bc6107d3cec4fd379))
+
+## [1.0.1](https://github.com/zuke-build/zuke/compare/jest-v1.0.0...jest-v1.0.1) (2026-08-13)
+
+
+### Bug Fixes
+
+* **cli:** escape line separators in generated literals; license headers and review docs ([#347](https://github.com/zuke-build/zuke/issues/347)) ([114f842](https://github.com/zuke-build/zuke/commit/114f84246e83fc6fb0bd12b55e8eb04192978074))
+
 ## [1.0.0](https://github.com/zuke-build/zuke/compare/jest-v0.2.3...jest-v1.0.0) (2026-07-30)
 
 

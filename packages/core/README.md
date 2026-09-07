@@ -142,6 +142,8 @@ function appendJobSummary(markdown: string): boolean
 
 async function archiveOutputs(outputs: readonly string[], host: OutputHost): Promise<Uint8Array>
   Archive a target's `outputs` into a gzipped tar of their current contents.
+  A declared output that does not exist is skipped, as is anything under a
+  `.git` or `.zuke` directory.
 
 function assert(condition: unknown, message: string): asserts condition
   Assert that `condition` is truthy, narrowing it for the rest of the scope.
@@ -356,6 +358,14 @@ function findCycle(targets: Map<string, TargetBuilder>): string[] | null
   @return
       the cycle as a path of names (e.g. `["a", "b", "a"]`) or `null`.
 
+async function forceTarget(build: Build, options: ForceOptions): Promise<ForceResult>
+  Record an operator's forced outcome for one target of a run.
+
+  The write is a compare-and-swap, retried against a re-read record, so two
+  operators forcing different targets at once cannot lose each other's
+  decision. Every refusal is re-checked on each attempt, because the thing that
+  beat us to the record may be the target settling.
+
 function generateCi(pipeline: CiPipeline, provider: CiProvider): string
   Render `pipeline` as the YAML configuration for `provider`:
   `.github/workflows/*.yml`, `.gitlab-ci.yml`, `azure-pipelines.yml`, or
@@ -369,10 +379,14 @@ async function gitChangedFiles(base: string, run: (args: string[]) => Promise<st
   test without a repository.
 
 async function glob(pattern: string, options: GlobOptions): Promise<string[]>
-  Expand a glob pattern to the matching paths, relative to `cwd`, sorted for
-  determinism. The walk starts at the pattern's static prefix, so anchor
-  patterns (e.g. `src/**\/*.ts`) to avoid scanning the whole tree. Symlinked
-  directories are not followed.
+  Expand a glob pattern to the matching paths, sorted for determinism. The walk
+  starts at the pattern's static prefix, so anchor patterns (e.g.
+  `src/**\/*.ts`) to avoid scanning the whole tree. Symlinked directories are
+  not followed.
+
+  A relative pattern is resolved against `cwd` and its matches are returned
+  relative to it. An absolute pattern (a leading `/`, or a `C:`-style drive)
+  names its own root: `cwd` plays no part and the matches come back absolute.
 
 function globToRegExp(pattern: string): RegExp
   Compile a glob pattern into an anchored {@link RegExp} that matches a full
@@ -417,6 +431,14 @@ async function httpJson<T = unknown>(url: string, options: HttpOptions): Promise
 
 async function httpText(url: string, options: HttpOptions): Promise<string>
   Fetch `url` and return its body as text. Throws {@link HttpError} on non-2xx.
+
+function initiatorOf(run: RunRecord | RunSummary): string
+  Who a run is attributed to for a reader that wants its owner rather than
+  its last writer: the recorded initiator, else the actor.
+
+  The fallback is not a guess — on a record written before the initiator
+  existed, and on any run that was never resumed, `actor` still holds exactly
+  the value the initiator would have been stamped with.
 
 async function installNpmTool(spec: NpmToolSpec, options: InstallNpmToolOptions): Promise<AbsolutePath>
   Provision an npm-registry package as a version-pinned, cached tool and return
@@ -465,6 +487,17 @@ async function installTree(options: InstallTreeOptions): Promise<AbsolutePath>
 function isCI(): boolean
   Whether the build appears to be running in a CI environment.
 
+function listStoreLocks(store: StateStore): Promise<HeldLockEntry[]>
+  The locks `store` holds, or a friendly failure when the backend cannot
+  enumerate them.
+
+  An empty array reads as "nobody holds anything", which is the worst possible
+  answer to give someone looking at a wedged resource, so a store with no
+  {@link StateStore.listLocks} says so rather than answering.
+
+  @throws {Error}
+      If the store does not support listing.
+
 function lockKey(...parts: Array<string | number>): string
   Join parts into a lock key that is safe to use as a filename and URL segment.
   Each part is sanitised (non-`[A-Za-z0-9._-]` runs become `_`) and empty parts
@@ -481,6 +514,12 @@ function operatingSystem(os: typeof Deno.build.os): OperatingSystem
   import { operatingSystem } from "jsr:@zuke/core";
   if (operatingSystem() === "macos") { ... }
   ```
+
+function ownsRun(record: RunRecord, buildId: string | undefined): boolean
+  Whether a process whose origin is `buildId` may recover `record`.
+
+  True unless both origins are known and differ — see the module documentation
+  for why an absent origin abstains rather than refusing.
 
 function parameter(description?: string): Parameter<string, string | undefined>
   Create a new build parameter (a `string` by default). Configure it fluently:
@@ -547,6 +586,45 @@ function repoRoot(...segments: string[]): AbsolutePath
   @throws
       if no {@link CONFIG_FILE} is found in the cwd or any ancestor.
 
+function reportSummary(pairs: SummaryPairs): void
+  Report `key: value` notes into the running target's row of the
+  end-of-build summary — the ambient form of
+  {@link "./target.ts".TargetContext.reportSummary}, for code that has no
+  context in hand: a tool wrapper reporting the counts its tool printed, or a
+  helper called from a body.
+
+  ```ts
+  reportSummary({ Tests: 837, Passed: 837, Failed: 0 });
+  ```
+
+  Notes accumulate across calls in the same target, and reporting a key again
+  replaces its value. Outside a running target (a wrapper called from a plain
+  script, a compensation) there is no row to report into, so the call is a
+  no-op rather than an error — a wrapper never has to ask where it runs.
+
+function reportTestCounts(counts: TestCounts): void
+  Report a test run's counts into the running target's row of the
+  end-of-build summary, in the shape every test-runner wrapper shares:
+
+  ```text
+  test        Succeeded    8.1s  // Tests: 837 · Passed: 835 · Failed: 0 · Skipped: 2
+  ```
+
+  `Tests` is the sum of every category; `Passed` and `Failed` always appear,
+  and `Skipped`, `Todo` and `Flaky` only when non-zero — mirroring the
+  runners, which print their optional counts the same way. The ambient form
+  of reporting applies (see {@link reportSummary}): a wrapper calls this from
+  its `onOutput` hook with what it parsed, and outside a running target the
+  call is a no-op.
+
+function resolveBuildId(readEnv: (name: string) => string | undefined): string | undefined
+  The origin of the build running in this process — `ZUKE_BUILD_ID`, else
+  `GITHUB_REPOSITORY`, else `undefined` when neither is set.
+
+  Recorded on a run at creation and compared by every recovery path. An empty
+  value counts as unset, so an exported-but-empty variable does not become an
+  origin that matches nothing.
+
 function resolveBuildRegistry(option: BuildRegistry | false | undefined, declared: BuildRegistry | undefined, options: ResolveRegistryOptions): BuildRegistry | undefined
   Pick the build registry by precedence: an explicit `option` wins (`false`
   disables the registry entirely), then a `declared` registry (a build's
@@ -568,12 +646,25 @@ function resolveStateStore(option: StateStore | false | undefined, declared: Sta
   filesystem store under `<root>/.zuke/runs`. A plain build with no durable
   feature and no configuration gets `undefined`, so it carries zero overhead.
 
-async function restoreOutputs(artifact: Uint8Array, host: OutputHost): Promise<string[]>
+async function restoreOutputs(artifact: Uint8Array, host: OutputHost, outputs?: readonly string[]): Promise<string[]>
   Restore the files in `artifact` (a gzipped tar produced by
-  {@link archiveOutputs}) to disk, returning the paths written. Entry names are
-  validated first: an absolute path or one escaping the workspace (`..`) is
-  rejected before anything is written, so a malicious archive can't plant files
-  outside the current directory.
+  {@link archiveOutputs}) to disk, returning the paths written.
+
+  Every entry is validated before anything is written, so a rejected archive
+  leaves no half-written, partially-trusted output tree. An entry is refused
+  when its name is absolute or escapes the workspace with `..`, when it is a
+  symlink or directory entry (which {@link archiveOutputs} never produces),
+  when it lands under `.git` or `.zuke`, and — when `outputs` is given — when it
+  falls outside the target's declared outputs.
+
+  @param outputs
+      The declaring target's {@link TargetBuilder.outputs}. Pass them
+      whenever they are known, which is what the executor does: an archive built
+      from those outputs can only contain paths under them, so anything else is a
+      store that has been written to by something other than a Zuke build, and
+      restoring it would let that writer choose files anywhere in the workspace —
+      a `deno.json`, a lockfile, a script a later target runs. Omitting them keeps
+      the older, name-only confinement for a caller that has no output list.
 
 async function resumeCheck(build: Build, options: Omit<ResumeOptions, "runId" | "signal" | "data"> & { runId?: string; }): Promise<{ checked: number; failed: number; }>
   Re-attempt every suspended run in the store (or just `runId`): predicate-based
@@ -690,6 +781,9 @@ function validateGraph(targets: Map<string, TargetBuilder>): void
 
 const AnnounceTasks: AnnounceTasksApi
   Announcement task functions for posting build status to chat platforms.
+
+const BrowserTasks: BrowserTasksApi
+  Task functions for the user's browser.
 
 const CHECKOUT_ACTION: "actions/checkout"
   The action a {@link CiCheckout} is generated from when pins are resolved.
@@ -848,6 +942,20 @@ class AssertionError extends Error
 
   override name: string
     The error name.
+
+class BrowserOpenSettings extends ToolSettings
+  Settings for {@link BrowserTasksApi.open | BrowserTasks.open}. The binary and
+  argv are derived from the platform ({@link ToolSettings.os_}); the shared
+  chainers (`quiet`, `noThrow`, `toolPath`, …) apply as on any tool.
+
+  constructor(url: string)
+    Build settings that open `url` (must be `http:`/`https:`).
+  readonly url: string
+    The validated URL this invocation opens.
+  override protected defaultTool(): string
+    The platform opener: `open`, `xdg-open`, or `rundll32`.
+  override protected buildArgs(): string[]
+    The opener's argv: the URL, behind the protocol handler on Windows.
 
 class Build
   Base class for user-defined builds. Provides no targets of its own; subclasses
@@ -1026,6 +1134,61 @@ class Build
       }
     }
     ```
+  mcpAuth(): McpAuthenticator | undefined
+    An authenticator for `zuke mcp` — the general form of
+    {@link Build.mcpIdentity}, for a server callers reach directly rather than
+    through a proxy that has already identified them.
+
+    It runs before any dispatch, may be asynchronous (verifying a signature is),
+    and refuses by returning an {@link McpAuthReject} rather than by throwing —
+    so over HTTP the refusal is answered with its own status and
+    `WWW-Authenticate` challenge, which is how an MCP client discovers where to
+    authenticate. The identity it resolves overrides `--actor`, the environment,
+    and the client label for that call, and flows to the audit trail, run
+    records, lock holders, and (for a registry-spawned build) the child's
+    `ZUKE_ACTOR`, `ZUKE_ACTOR_KIND` and `ZUKE_ACTOR_ROLES`. Throwing still
+    refuses the request: the seam is fail-closed. Default: none.
+
+    Declare either this or {@link Build.mcpIdentity}; declaring both is
+    refused when the server starts, rather than letting one silently win.
+
+    ```ts
+    class ControlPlane extends Build {
+      override mcpAuth(): McpAuthenticator {
+        return {
+          authenticate: async (ctx: McpRequestContext) => {
+            const claims = await verifyBearer(ctx.headers.get("authorization"));
+            if (claims === null) {
+              return { status: 401, error: "invalid_token", challenge: "Bearer" };
+            }
+            return { actor: claims.sub, kind: "human", roles: claims.roles };
+          },
+        };
+      }
+    }
+    ```
+  unforceable(): TargetBuilder[]
+    Targets an operator may not force with `zuke force` — the steps whose
+    body must actually run, whatever a live incident looks like.
+
+    Forcing settles a target without executing it: `skipped` takes a step off
+    the plan, `succeeded` records that a person did it by hand. That is the
+    right tool for a step that cannot succeed and the wrong one for a step
+    whose whole purpose is to be the thing that happened — a production apply,
+    a signing step, a migration. Naming those here refuses the force rather
+    than trusting an operator under pressure to remember which is which.
+
+    Returns target references, not names, so renaming a target keeps the
+    list correct instead of silently emptying it.
+
+    ```ts
+    class CD extends Build {
+      applyProduction = target().executes(() => applyTerraform());
+      override unforceable() {
+        return [this.applyProduction];
+      }
+    }
+    ```
 
 class CiFile
   A declared CI file. Assign one (via {@link cicd}) to a build field and Zuke
@@ -1162,12 +1325,33 @@ class FileSystemStateStore implements StateStore
     List runs matching `query`, newest first. Unreadable files are skipped.
   async deleteRun(id: string): Promise<void>
     Delete a run's file (under its lock); a missing run is a no-op.
+
+    The run's lock records are deliberately left alone. It is tempting to take
+    them with the run — they are named after it, so once it is gone nothing can
+    look them up again — but "expired" does not mean "abandoned" in this store:
+    {@link renewLock} extends a lock whenever the token matches, whatever its
+    expiry, so a lapsed claim is still the holder's until somebody acquires
+    it. Deleting the record instead makes the next renewal answer `false`, which
+    the holder reads as the lease being lost, and a run that is merely slow —
+    the exact case the lease exists to tell apart from a dead one — stops.
+    Pruning must never be able to do that.
+
+    The litter is small and bounded in practice: {@link releaseLock} removes a
+    lock's file, and a run releases its lease whenever it settles, so only a
+    holder that dies without releasing leaves one behind. Clearing those safely
+    belongs to whoever can prove the holder is gone — a reaping sweep, which
+    proves it by acquiring — not to a command deleting old records.
   async acquireLock(key: string, holder: LockHolder, ttlMs: number): Promise<LockResult>
     Atomically acquire the lock `key` for `holder`, taking over if expired.
   async renewLock(key: string, token: string, ttlMs: number): Promise<boolean>
     Extend the lock `key` held under `token`; `false` if the token lost it.
   async releaseLock(key: string, token: string): Promise<void>
     Release the lock `key` if still held under `token`; a no-op otherwise.
+  async listLocks(): Promise<HeldLockEntry[]>
+    Every live lock in the `locks/` directory, ordered by key. `<key>.acq`
+    mutex markers and anything else in there are skipped; a record that fails
+    to parse is skipped too, since one corrupt file must not hide every other
+    lock from someone trying to see who holds what.
 
 class ForEachSettings
   Fluent configuration for {@link TargetBuilder.forEach}, in the settings-lambda
@@ -1187,6 +1371,20 @@ class ForEachSettings
     item's later stages are still skipped). The fan-out target still fails at
     the end if any item failed. Without this, the first item failure stops the
     batch — the default.
+
+class ForeignRunError extends Error
+  Thrown when a recovery path is handed a run that a different build owns:
+  the run's recorded origin and this process's disagree.
+
+  A sweep treats it as "not mine" and moves on rather than counting a failure,
+  the same way it treats a run another process has already resumed. A command
+  that named one run reports it, because the operator asked about a run that is
+  not this build's to touch.
+
+  constructor(readonly runId: string, readonly owner: string, readonly self: string)
+    Build the error from the run and the two disagreeing origins.
+  override name: string
+    The error name.
 
 class GraphError extends Error
   Raised when the build graph is invalid (cycle or unknown dependency).
@@ -1220,7 +1418,7 @@ class HttpBuildRegistry implements BuildRegistry
     `GET /builds/:id` → descriptor + `ETag`; a `404` is a miss.
   async register(descriptor: BuildDescriptor, expectedVersion: string | null): Promise<PutBuildResult>
     `PUT /builds/:id` guarded by `If-Match` / `If-None-Match`; `412` → conflict.
-  async deregister(id: string): Promise<void>
+  deregister(id: string): Promise<void>
     `DELETE /builds/:id`; a missing build (`404`) is not an error.
   async listBuilds(query: BuildQuery): Promise<BuildSummary[]>
     `GET /builds?name=&since=` → an array of {@link BuildSummary}.
@@ -1277,12 +1475,16 @@ class HttpStateStore implements StateStore
     `PUT /runs/:id` guarded by `If-Match` / `If-None-Match`; `412` → conflict.
   async listRuns(query: RunQuery): Promise<RunSummary[]>
     `GET /runs?status=&target=&since=` → an array of {@link RunSummary}.
-  async deleteRun(id: string): Promise<void>
+  deleteRun(id: string): Promise<void>
     `DELETE /runs/:id`; a missing run (`404`) is not an error.
   async acquireLock(key: string, holder: LockHolder, ttlMs: number): Promise<LockResult>
     `POST /locks/:key` → `201 { token }`, or `409` with the current holder.
   async renewLock(key: string, token: string, ttlMs: number): Promise<boolean>
     `PUT /locks/:key` renews; a `409`/`404` means the token lost the lock.
+  async listLocks(): Promise<HeldLockEntry[]>
+    `GET /locks` → the live locks the server holds. A server that has not
+    implemented the endpoint (`404`/`501`) is told apart from one that holds
+    nothing: an empty listing is an answer, and a missing endpoint is not.
   async releaseLock(key: string, token: string): Promise<void>
     `DELETE /locks/:key` releases; a missing lock (`404`) is not an error.
 
@@ -1311,6 +1513,10 @@ class LockSettings
     The TTL (a duration string or milliseconds); set by {@link withTtl}.
   onConflict_?: (holder: LockHolder) => string
     The conflict-guidance renderer; set by {@link onConflict}.
+  waitUpTo_?: string | number
+    How long to wait for a held lock; set by {@link waitUpTo}.
+  pollEvery_?: string | number
+    How often to retry while waiting; set by {@link pollEvery}.
   lockKey(...parts: Array<string | number>): this
     Set the lock key from parts, sanitised and joined via
     {@link "./state/lock.ts".lockKey} — e.g. `s.lockKey("deploy", repo)`.
@@ -1320,6 +1526,23 @@ class LockSettings
     How long the lock survives a killed holder — a duration string like `"4h"`
     / `"30m"` (see the duration parser) or raw milliseconds. A live holder
     renews it while it runs, so it never expires under it.
+  waitUpTo(duration: string | number): this
+    Wait up to this long for a held lock instead of failing at once — a
+    duration string like `"30m"` or raw milliseconds. The target queues, and
+    takes the lock when the run holding it finishes; it fails with a
+    {@link "./state/lock.ts".LockConflictError} only once the wait is spent.
+
+    Set this for a shared resource a developer wants to use — one dev
+    environment, one database, one port — where failing fast just makes them
+    run the command again. Leave it off for a resource where a second run is a
+    mistake worth reporting immediately, which stays the default.
+
+    Waiting runs retry independently, so a queue of them is not served in
+    arrival order: a run that has waited longer has no claim over one that
+    arrived a moment ago.
+  pollEvery(duration: string | number): this
+    How often to retry while {@link waitUpTo} waits (default `"5s"`). Alone it
+    does nothing — without a wait there is no retry to pace.
   onConflict(render: (holder: LockHolder) => string): this
     Render the guidance shown to a run that loses the lock. Receives the
     current {@link "./state/lock.ts".LockHolder}; the returned string becomes
@@ -1421,10 +1644,33 @@ class Redactor
 
   add(value: string): void
     Register a secret value to mask. Ignores empty strings and duplicates.
+
+    A multi-line value registers each of its lines as well as the whole
+    string, because redaction runs a line at a time and a whole-value pattern
+    can never match one line of it. Lines are trimmed, and a very short one is
+    skipped so it cannot mask ordinary text wherever it appears.
   redact(line: string): string
     Replace every registered secret in `line` with {@link REDACTED}.
   get size(): number
-    The number of distinct secret values registered.
+    The number of distinct patterns registered. A single-line secret
+    contributes one; a multi-line secret contributes the whole value plus each
+    of its qualifying lines.
+
+class RunNotSuspendedError extends Error
+  Raised when a run is no longer `suspended` by the time a resume reaches it —
+  it has been settled, or a cancellation is in progress.
+
+  The counterpart to {@link AlreadyResumedError}, which covers a run another
+  process is currently driving. This covers one that already finished, and a
+  sweep treats it the same way: not its run to advance, and not a failure. Two
+  sweeps racing the same run is the normal case — one wins, and the loser
+  reading `succeeded` has discovered a success, not a fault. Counting it would
+  put a false alarm in the exit code a cron watches.
+
+  constructor(readonly runId: string, readonly status: RunStatus)
+    Build the error from the run id and the status found instead.
+  override name: string
+    The error name.
 
 class SecretError extends Error
   Raised when a {@link SecretSource} cannot produce a value.
@@ -2104,6 +2350,17 @@ interface AnyParameter
     Whether the parameter resolved to a defined value (used by `.requires()`).
   stringValue_(): string | undefined
     The resolved value as a string, or `undefined` if unset (for masking).
+
+interface BrowserTasksApi
+  The shape of {@link BrowserTasks}.
+
+  open(url: string, configure?: Configure<BrowserOpenSettings>): Promise<CommandOutput>
+    Open `url` in the default browser. Resolves when the opener process exits
+    (browsers detach, so this is launch, not page load).
+
+    ```ts
+    await BrowserTasks.open("https://github.com/zuke-build/zuke");
+    ```
 
 interface BuildCache
   The incremental cache used by the executor to skip up-to-date targets.
@@ -2809,6 +3066,10 @@ interface ExecuteOptions
   actor?: string
     Who to attribute the run to in its state record (CLI `--actor`). Falls back
     to `ZUKE_ACTOR`, then the CI actor, then `"anonymous"`.
+  actorKind?: ActorKind
+    Whether a person or a machine asked for the run (CLI `--actor-kind`). Falls
+    back to `ZUKE_ACTOR_KIND`, else `"human"`. Recorded on the run's immutable
+    initiator, never inferred from the actor's name.
   resume?: ResumeState
     Continue a suspended run instead of starting a fresh one. Set by
     {@link "./resume.ts".resumeRun} after it has transitioned the run to
@@ -2877,6 +3138,23 @@ interface FileTasksApi
     are copied recursively).
   move(source: PathLike, destination: PathLike): Promise<void>
     Move (rename) `source` to `destination`.
+  symlink(target: PathLike, path: PathLike, options?: SymlinkOptions): Promise<void>
+    Create a symbolic link at `path` pointing to `target`.
+
+    `target` is stored in the link verbatim, so a relative one resolves
+    against the link's own directory — which is what makes a link between two
+    sibling checkouts survive both being moved together.
+
+    With {@link SymlinkOptions.force} an entry already at `path` is replaced
+    atomically, which is the `ln -sfn` case a re-run of an idempotent target
+    needs; without it an existing entry is an `AlreadyExists` error. A
+    directory at `path` is never replaced.
+  readLink(path: PathLike): Promise<string>
+    The target of the symbolic link at `path`, exactly as stored in the link —
+    relative if it was created relative, and not checked for existence.
+
+    Throws if `path` is not a symbolic link, which is the same answer
+    `Deno.readLink` gives.
   readText(path: PathLike): Promise<string>
     Read the UTF-8 text content of the file at `path`.
   writeText(path: PathLike, content: string): Promise<void>
@@ -2903,11 +3181,42 @@ interface ForEachSpec
   configure?: Configure<ForEachSettings>
     Optional fan-out settings (concurrency, per-item failure isolation).
 
+interface ForceOptions
+  Options for {@link forceTarget}.
+
+  runId: string
+    The run to act on.
+  target: string
+    The dotted target name to force.
+  outcome: ForcedOutcome
+    What the target should settle to without running.
+  reason?: string
+    Why — recorded on the override and shown by `zuke runs show`.
+  actor?: string
+    Who to attribute the decision to (`--actor`); resolved as for a run.
+  stateStore?: StateStore | false
+    The durable store the run lives in; resolved as for a run when absent.
+  readEnv?: (name: string) => string | undefined
+    Reads an environment variable (injectable for tests).
+
+interface ForceResult
+  The result of a {@link forceTarget} call.
+
+  ok: boolean
+    Whether the override was recorded.
+  denial?: ForceDenial
+    Why it was refused, when it was.
+  message: string
+    A message naming the target and the rule, suitable for an operator.
+  override?: TargetOverride
+    The override as recorded, when it was.
+
 interface GlobOptions
   Options for {@link glob}.
 
   cwd?: string
-    Directory to resolve the pattern against (default: `Deno.cwd()`).
+    Directory to resolve the pattern against (default: `Deno.cwd()`). Ignored
+    for an absolute pattern, which names its own root.
 
 interface HeldLease
   A held lease. Release it when the work it covers is over.
@@ -2921,6 +3230,20 @@ interface HeldLease
     run it will drive exists. A signal can be read late and still be true.
   release(): Promise<void>
     Stop the heartbeat and release the claim (best-effort).
+
+interface HeldLockEntry
+  One live lock, as reported by {@link "./store.ts".StateStore.listLocks} — the
+  key, who holds it, and when it lapses if the holder disappears.
+
+  Deliberately not the stored record: the acquisition token is the holder's
+  proof of ownership, and a read-only listing has no business handing it out.
+
+  key: string
+    The lock key, as it was acquired.
+  holder: LockHolder
+    Who holds it.
+  expiresAt: number
+    Epoch-millisecond expiry: when it frees itself if the holder is gone.
 
 interface HttpBuildRegistryOptions
   Configuration for an {@link HttpBuildRegistry}.
@@ -3074,24 +3397,75 @@ interface LockHolder
   runUrl?: string
     A link to the holding run (e.g. its CI job), when known.
 
+interface McpAuthReject
+  Why a request was refused, and how the transport should say so.
+
+  The status and challenge are what make OAuth discovery work: an MCP client
+  learns where to authenticate from a `401` carrying `WWW-Authenticate`, which a
+  JSON-RPC error inside a `200` can never tell it.
+
+  status: number
+    The HTTP status to answer with — a client error, `401` or `403` in practice.
+  error: string
+    A short reason, machine-readable where there is a standard code for it (an
+    OAuth authenticator's `"invalid_token"`, say). It becomes the JSON-RPC
+    error message on the refusal, so it is read by people too.
+  detail?: string
+    A short human-readable detail. Never a secret: it is returned to the caller.
+  challenge?: string
+    The `WWW-Authenticate` header value to challenge with, when one applies. A
+    value a header cannot carry (a newline, a NUL, a character outside Latin-1)
+    is dropped rather than sent, so it cannot turn the refusal into a fault.
+
+interface McpAuthenticator
+  Authenticates one request for the MCP server.
+
+  Invoked once per message, before any dispatch: a rejection stops the request
+  outright, so nothing executes and nothing is written to state. Returning an
+  {@link McpIdentity} accepts the caller; returning an {@link McpAuthReject}
+  refuses it. Throwing also refuses it — the seam is fail-closed, so a bug in an
+  authenticator denies rather than admits.
+
+  Configure one with `override mcpAuth()` on the build.
+
+  authenticate(ctx: McpRequestContext): Promise<McpIdentity | McpAuthReject> | McpIdentity | McpAuthReject
+    Resolve the caller's identity from the request, or refuse the request.
+
 interface McpIdentity
-  A trusted caller identity, resolved per request by a {@link McpIdentityHook}
-  (typically from an authenticating reverse proxy's header). Its
-  {@link McpIdentity.actor} is the highest-precedence attribution — it overrides
-  `--actor`, the environment, and the client's self-reported label for the call.
+  A trusted caller identity, resolved per request by an
+  {@link McpAuthenticator}. Its {@link McpIdentity.actor} is the
+  highest-precedence attribution — it overrides `--actor`, the environment, and
+  the client's self-reported label for the call.
 
   actor: string
-    The authenticated actor (e.g. an OAuth subject).
+    The authenticated actor — an OAuth subject, a GitHub login, a service name.
+  kind?: "human" | "service"
+    Whether a person or a machine is calling. Absent is read as `"human"`, the
+    conservative default: a policy that treats service callers differently must
+    see the claim stated rather than inferred.
+  roles?: readonly string[]
+    The roles this caller holds. Absent is read as none, so an authenticator
+    that says nothing about roles grants nothing. A name containing a comma is
+    dropped: the comma separates the roles a registry-spawned child reads, so
+    such a name would reach it as two.
   via?: string
     How the identity was established (e.g. `"oauth-proxy"`); informational.
 
 interface McpRequestContext
-  The per-request context a transport hands the message handler. Carries the
-  request's headers, so a server's identity hook can authenticate the caller
-  from a trusted proxy header. Empty on the stdio transport (no headers).
+  The per-request context a transport hands the message handler, and the only
+  thing an authenticator sees of the request. Empty on the stdio transport,
+  which has no request to describe.
 
   readonly headers: Headers
     The request headers; an empty {@link Headers} on stdio.
+  readonly request?: Request
+    The HTTP request the caller arrived on, when it did — so an authenticator
+    can read its method and URL, not just its headers. Absent on the stdio
+    transport, which has no request.
+
+    Its body is deliberately empty: the body belongs to the transport, which
+    reads it once to parse the JSON-RPC message, and a credential never lives
+    there. Everything else — method, URL, headers — is the real request's.
 
 interface NpmToolSpec
   A specification of an npm-registry package to provision as a tool.
@@ -3380,6 +3754,26 @@ interface RunInfo
   readonly dryRun: boolean
     True when the run is a dry run (no target body executes).
 
+interface RunInitiator
+  Who asked for a run, stamped once when it is created and never rewritten.
+
+  Distinct from {@link RunRecord.actor}, which every resume overwrites with
+  whoever picked the run up — so on a run that suspended and was resumed by a
+  sweep, `actor` is the sweep's service account and this is still the engineer
+  who started it. That is the subject a run-scoped authorization rule means by
+  "whoever started this run", and the difference a notification needs to tell a
+  person's deploy from a scheduler's.
+
+  actor: string
+    Who asked for the run, resolved once at creation.
+  kind: ActorKind
+    Whether a person or a machine asked. Stated, never inferred from the actor.
+  at: string
+    ISO-8601 time this attribution was fixed. The run's `createdAt` for a run
+    stamped at creation, and the original run's `createdAt` for one backfilled
+    when a resume was about to overwrite the evidence — so it dates the
+    attribution, not the write that recorded it.
+
 interface RunOptions
   Options for {@link run}.
 
@@ -3413,12 +3807,38 @@ interface RunRecord
     Unique run ID (matches {@link "../target.ts".TargetContext} `runId`).
   build: string
     The build class name.
+  buildId?: string
+    Which build instance this run belongs to — `ZUKE_BUILD_ID`, else
+    `GITHUB_REPOSITORY`, resolved once at creation. Absent when neither was set
+    (and on every record written before this field existed).
+
+    The class name above cannot identify a build: a `zuke.ts` templated across
+    a dozen services shares its name, its target names and its graph shape, so
+    every shape-based check passes and one service's recovery sweep would drive
+    another's runs with its own target bodies. This is what a recovery path
+    compares; see {@link "../ownership.ts"}.
   rootTarget: string
     The dotted name of the requested (root) target.
   status: RunStatus
     The run's lifecycle status.
   actor: string
-    Who started the run (resolved from `--actor`, `ZUKE_ACTOR`, or CI env).
+    The run's last writer (resolved from `--actor`, `ZUKE_ACTOR`, or CI
+    env). Every resume overwrites it with whoever picked the run up, so it
+    answers "who touched this most recently", not "whose run is this" — see
+    {@link RunRecord.initiator} for that.
+  initiator?: RunInitiator
+    Who asked for the run, stamped once at creation and immutable thereafter.
+
+    Absent on a record written before this field existed; such a record's
+    {@link RunRecord.actor} is the closest answer available, and is exactly the
+    right one on a run that was never resumed.
+  overrides?: Record<string, TargetOverride>
+    Operator-forced target outcomes, keyed by dotted target name (see
+    {@link TargetOverride}). Absent until something is forced.
+
+    Read when the executor reaches the target, so an override lands for any
+    target the run has not started yet — in practice on the next resume, since
+    that is the process that loads the record after the force was written.
   createdAt: string
     ISO-8601 timestamp when the run was created.
   updatedAt: string
@@ -3482,7 +3902,11 @@ interface RunSummary
   status: RunStatus
     The run's lifecycle status.
   actor: string
-    Who started the run.
+    The run's last writer (see {@link RunRecord.actor}).
+  initiator?: RunInitiator
+    Who asked for the run (see {@link RunRecord.initiator}). Absent on a record
+    written before the field existed, and from a store that does not project
+    it — {@link RunSummary.actor} is the fallback in both cases.
   createdAt: string
     ISO-8601 creation timestamp.
   updatedAt: string
@@ -3583,6 +4007,41 @@ interface StateStore
     detect a lost lock.
   releaseLock(key: string, token: string): Promise<void>
     Release the lock `key` if still held under `token`; a no-op otherwise.
+  listLocks?(): Promise<HeldLockEntry[]>
+    Every lock currently held, keyed and ordered by key — the read-only answer
+    to "who holds this, and until when?". Expired records are not held locks
+    and are left out: reporting one as held is the failure this exists to
+    prevent.
+
+    Optional, so a store implemented outside this repository does not break by
+    not having one. A caller that needs the listing rather than an empty result
+    should go through {@link listStoreLocks}, which fails with a message naming
+    the backend instead of pretending the store holds nothing.
+
+interface SummaryEntry
+  One rendered `key: value` note on a target's summary row.
+
+  readonly key: string
+    The note's label, as reported (whitespace collapsed to one line).
+  readonly value: string
+    The note's value, rendered as text (whitespace collapsed to one line).
+
+interface SymlinkOptions
+  Options for {@link FileTasksApi.symlink}.
+
+  force?: boolean
+    Replace an existing entry at the link path, the way `ln -sfn` does
+    (default `false`, which throws an `AlreadyExists` as `Deno.symlink` does).
+
+    The replacement is atomic: the new link is created under a sibling temp
+    name and renamed over the path, so a concurrent reader sees either the old
+    entry or the new link and never a missing path. A directory at the
+    path is never replaced — the rename refuses it, empty or not — so forcing
+    a link cannot cost a caller a directory.
+  type?: "file" | "dir"
+    What the link points at: `"file"` or `"dir"`. Windows needs the
+    distinction and ignores nothing else; POSIX ignores the option entirely.
+    Pass `"dir"` when linking a directory, or the link is unusable on Windows.
 
 interface TarEntry
   A single entry within a tar archive — a regular file or a symbolic link.
@@ -3605,6 +4064,13 @@ interface TargetContext
 
   readonly runId: string
     Unique ID of this run, stable for every target in the run.
+  readonly initiator?: RunInitiator
+    Who asked for this run — stamped once when the run was created, and
+    unchanged by any later resume, so it still names the engineer who started a
+    deploy that a sweep has since picked up several times.
+
+    Absent when the run has no durable record to have stamped one (no state
+    store), and on a record written before the field existed.
   readonly target: string
     Dotted name of the executing target.
   readonly signal: AbortSignal
@@ -3647,6 +4113,22 @@ interface TargetContext
     Every outcome this run has settled so far, keyed by dotted target name — a
     snapshot, not a live view. Targets that have not settled are absent rather
     than present with a placeholder status.
+  reportSummary(pairs: SummaryPairs): void
+    Report `key: value` notes into this target's row of the end-of-build
+    summary — where a count or a version belongs once the body is done:
+
+    ```text
+    test        Succeeded    8.1s  // Tests: 837 · Passed: 837 · Failed: 0
+    ```
+
+    Notes accumulate across calls, and reporting a key again replaces its
+    value in place. Each key and value is rendered on one line (whitespace
+    collapsed, control sequences removed). Library code with no context in
+    hand — a tool wrapper reporting the counts its tool printed — reports
+    through the ambient {@link "./summary_note.ts".reportSummary}, and those
+    notes land in the same row. A failed target keeps its notes:
+    a red `test` row still says how many failed. A compensation (see
+    {@link TargetBuilder.onCancel}) has no row, so its calls are dropped.
 
 interface TargetOutcomeView
   What another target in this run did, as {@link TargetContext.outcomeOf}
@@ -3665,6 +4147,30 @@ interface TargetOutcomeView
     When it started, ISO-8601, if it did.
   readonly endedAt?: string
     When it settled, ISO-8601, if it has.
+  readonly summary?: readonly SummaryEntry[]
+    The notes it reported into its row of the build summary (see
+    {@link TargetContext.reportSummary}), when it reported any — so an
+    aggregating target can read a dependency's test counts, not only its
+    verdict. Durable: present after a resume too.
+
+interface TargetOverride
+  An operator's decision to settle a target without running it — recorded on
+  the run so the executor honours it and the trail says who decided.
+
+  Two shapes of intervention, both of which a build cannot express itself:
+  `skipped` takes a step off the plan that cannot succeed, and `succeeded`
+  marks one that a person completed by hand. Dependents proceed either way; the
+  difference is what a later cancellation compensates, since only the second
+  asserts that the target's effects exist.
+
+  outcome: ForcedOutcome
+    What the target settles to when the executor reaches it.
+  actor: string
+    Who forced it (a resolved actor).
+  at: string
+    ISO-8601 time the override was recorded.
+  reason?: string
+    Why, when the operator gave a reason.
 
 interface TargetReport
   One row of the end-of-build summary.
@@ -3675,6 +4181,10 @@ interface TargetReport
     The target's terminal status.
   ms: number
     The target's wall-clock duration in milliseconds.
+  summary?: SummaryEntry[]
+    The notes the target reported into its row (see
+    {@link "./target.ts".TargetContext.reportSummary}) — present only when it
+    reported at least one, so a note-less row stays `{ name, status, ms }`.
 
 interface TargetRunState
   The recorded progress of a single target.
@@ -3694,6 +4204,12 @@ interface TargetRunState
   effects?: Record<string, EffectState>
     The declared effects of this target, keyed by effect name — present only
     once at least one has been armed.
+  summary?: SummaryEntry[]
+    The notes the target reported into its row of the build summary (see
+    {@link "../target.ts".TargetContext.reportSummary}), in the order they
+    were first reported — present only when it reported at least one, and
+    redacted like every other stored string. What lets `zuke runs show` and
+    `ctx.outcomeOf` say a target ran 4094 tests, not only that it succeeded.
 
 interface TargetStateHandle
   A target's durable, per-target metadata, surfaced on {@link TargetContext} as
@@ -3717,6 +4233,24 @@ interface TargetTiming
     The run id (see {@link RunInfo}).
   readonly durationMs: number
     The target's wall-clock duration in milliseconds (0 for skipped/cached).
+
+interface TestCounts
+  The counts a test run produced — the one shape every test-runner wrapper
+  maps its runner's own summary line onto, so `DenoTasks.test`,
+  `VitestTasks.run`, `JestTasks.run` and the rest all put the same labels on
+  their rows. `passed` and `failed` are always known; the rest are the
+  optional categories a runner may or may not have, left out when it has none.
+
+  readonly passed: number
+    Tests that passed.
+  readonly failed: number
+    Tests that failed.
+  readonly skipped?: number
+    Tests the run selected but did not execute: skipped, ignored, pending.
+  readonly todo?: number
+    Tests marked as still to be written.
+  readonly flaky?: number
+    Tests that failed and then passed on a retry (Playwright's "flaky").
 
 interface ToolTasksApi
   The task surface of {@link ToolTasks}.
@@ -3810,6 +4344,9 @@ interface WaitTrigger
     correlation state across a suspend/resume; a trigger that only inspects
     signals may ignore it (fewer parameters stay assignable).
 
+type ActorKind = "human" | "service"
+  Whether a person or a machine asked for a run (see {@link RunInitiator}).
+
 type AnnouncementLevel = "success" | "failure" | "warning" | "info"
   The outcome an announcement conveys. It drives the accent colour and the icon
   prepended to the message; defaults to `"info"`.
@@ -3882,6 +4419,13 @@ type ForEachFactory<Item> = (item: Item, index: number) => Record<string, Target
   stage implicitly depends on the one declared before it, so an item's stages
   run in insertion order.
 
+type ForceDenial = "unknown_run" | "run_terminal" | "unknown_target" | "already_settled" | "unforceable" | "has_effects" | "foreign_run" | "write_failed"
+  Why a force was refused. Each maps to a message naming the target, so an
+  operator learns which rule stopped them rather than that "it failed".
+
+type ForcedOutcome = "skipped" | "succeeded"
+  What an operator may force a target to, without running it.
+
 type JsonValue = string | number | boolean | null | JsonValue[] | { [key: string]: JsonValue; }
   A JSON-serialisable value — the only thing that may be persisted in a
   target's {@link TargetStateHandle}, since run state is stored as JSON.
@@ -3891,10 +4435,11 @@ type LockResult = { ok: true; token: string; } | { ok: false; holder: LockHolder
   the current `holder` when the lock is already held.
 
 type McpIdentityHook = (ctx: McpRequestContext) => McpIdentity
-  Resolve a trusted {@link McpIdentity} from a request's context. Invoked once
-  per message, before any dispatch; throwing rejects the whole request with
-  an auth error, so nothing executes and nothing is written to state — the seam
-  a proxy in front of the server uses to inject an authenticated identity.
+  Resolve a trusted {@link McpIdentity} from a request's context. The original,
+  synchronous identity seam, kept as sugar for the common case of trusting a
+  header an authenticating reverse proxy injected: throwing rejects the whole
+  request. {@link authenticatorFromHook} adapts one onto
+  {@link McpAuthenticator}, which is what the server actually runs.
 
 type NpmRunner = (args: string[]) => Promise<void>
   Runs `npm install <args>` — the injectable subprocess seam. Defaults to
@@ -3946,6 +4491,13 @@ type RunStatus = "running" | "suspended" | "cancelling" | "succeeded" | "failed"
   The lifecycle status of a whole run. `cancelling` is the transient state a
   cancellation moves through — the run has been asked to stop and its
   compensations are running — before it settles as `cancelled`.
+
+type SummaryPairs = Readonly<Record<string, SummaryValue>>
+  The notes a target reports, keyed by their label — `{ Passed: 837, Failed: 0 }`.
+  Keys render in the order they are first reported.
+
+type SummaryValue = string | number
+  A value a summary note may carry; a number is rendered as written.
 
 type Target = TargetBuilder
   A configured target. Alias of {@link TargetBuilder} — the same object both
@@ -4291,6 +4843,13 @@ abstract class ToolSettings
     The binary to spawn when {@link toolPath} is not set.
   abstract protected buildArgs(): string[]
     The subcommand argv. Must be pure — no I/O, no environment reads.
+  protected onOutput(_output: CommandOutput): void
+    Called by {@link run} with the process's output once it has exited —
+    before a non-zero exit becomes a `CommandError`, so a wrapper sees the
+    output of a failed run too. The base does nothing. A wrapper overrides it
+    to read a result its tool prints and report it, e.g. a test runner's
+    pass/fail line into the build summary via `reportSummary`; it must not
+    throw. Not called when the process times out or could not be spawned.
   protected defaultResolution(): ToolResolution
     The wrapper's default binary-resolution strategy. The base returns
     `"path"` (bare name on `PATH`); a JS-ecosystem wrapper whose binary is

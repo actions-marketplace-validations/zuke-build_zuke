@@ -1,3 +1,6 @@
+// Copyright (c) 2026 the Zuke contributors
+// SPDX-License-Identifier: MIT
+
 import { assertEquals, assertStringIncludes } from "./_assert.ts";
 import { Build, parameter, target } from "../mod.ts";
 import {
@@ -5,7 +8,8 @@ import {
   METHOD_NOT_FOUND,
   serveStdio,
 } from "../src/mcp/jsonrpc.ts";
-import { McpServer, PROTOCOL_VERSION } from "../src/mcp/server.ts";
+import { McpServer } from "../src/mcp/server.ts";
+import { PROTOCOL_VERSION } from "../src/mcp/protocol.ts";
 import { serveMcp } from "../src/mcp/command.ts";
 
 /** A small build with parameters and a dependency edge, for the server tests. */
@@ -426,4 +430,19 @@ Deno.test("serveMcp runs the whole handshake over injected streams", async () =>
   assertEquals(out.length, 2);
   assertStringIncludes(JSON.stringify(out[0]), "zuke");
   assertStringIncludes(JSON.stringify(out[1]), "list_targets");
+});
+
+Deno.test("the stdio banner reports read-only when running is not enabled", async () => {
+  const { output } = capturingWriter();
+  const original = console.error;
+  const banner: string[] = [];
+  console.error = (...args: unknown[]) => void banner.push(args.join(" "));
+  try {
+    await serveMcp(new Demo(), { input: streamOf(""), output });
+  } finally {
+    console.error = original;
+  }
+  const text = banner.join("\n");
+  assertStringIncludes(text, "read-only");
+  assertEquals(text.includes("run enabled"), false);
 });

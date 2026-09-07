@@ -1,10 +1,16 @@
+// Copyright (c) 2026 the Zuke contributors
+// SPDX-License-Identifier: MIT
+
 import {
   assertEquals,
   assertRejects,
   assertThrows,
 } from "../../core/tests/_assert.ts";
 import { ToolNotFoundError } from "@zuke/core/tooling";
-import { missingTool } from "@zuke/core/tooling/conformance";
+import {
+  assertWrapperConformance,
+  missingTool,
+} from "@zuke/core/tooling/conformance";
 import {
   DockerBuildSettings,
   DockerExecSettings,
@@ -22,7 +28,7 @@ import {
   DockerStopSettings,
   DockerTagSettings,
   DockerTasks,
-} from "../src/docker.ts";
+} from "../mod.ts";
 
 Deno.test("the default binary is docker", () => {
   assertEquals(new DockerPsSettings().argv()[0], "docker");
@@ -322,4 +328,10 @@ Deno.test("every DockerTasks function reaches execution", async () => {
   for (const call of calls) {
     await assertRejects(call, ToolNotFoundError);
   }
+});
+
+Deno.test("docker: conforms to the wrapper contract", async () => {
+  await assertWrapperConformance(() => new DockerBuildSettings(), "docker", {
+    resolution: "path",
+  });
 });

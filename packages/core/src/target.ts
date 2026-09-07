@@ -1,3 +1,6 @@
+// Copyright (c) 2026 the Zuke contributors
+// SPDX-License-Identifier: MIT
+
 /**
  * Target authoring API: the `target()` fluent builder, the `group()` parallel
  * batch, and the `Target` type.
@@ -32,7 +35,12 @@ import type { AnyParameter } from "./params.ts";
 import type { Configure } from "./tooling.ts";
 import { type LockHolder, lockKey } from "./state/lock.ts";
 import type { WaitTrigger } from "./wait.ts";
-import type { SignalRecord, TargetRunStatus } from "./state/types.ts";
+import type {
+  RunInitiator,
+  SignalRecord,
+  TargetRunStatus,
+} from "./state/types.ts";
+import type { SummaryEntry, SummaryPairs } from "./summary_note.ts";
 
 /**
  * Fluent configuration for {@link TargetBuilder.lock}, in the settings-lambda
@@ -49,6 +57,10 @@ export class LockSettings {
   ttl_?: string | number;
   /** The conflict-guidance renderer; set by {@link onConflict}. */
   onConflict_?: (holder: LockHolder) => string;
+  /** How long to wait for a held lock; set by {@link waitUpTo}. */
+  waitUpTo_?: string | number;
+  /** How often to retry while waiting; set by {@link pollEvery}. */
+  pollEvery_?: string | number;
 
   /**
    * Set the lock key from parts, sanitised and joined via
@@ -72,6 +84,35 @@ export class LockSettings {
    */
   withTtl(ttl: string | number): this {
     this.ttl_ = ttl;
+    return this;
+  }
+
+  /**
+   * Wait up to this long for a held lock instead of failing at once — a
+   * duration string like `"30m"` or raw milliseconds. The target queues, and
+   * takes the lock when the run holding it finishes; it fails with a
+   * {@link "./state/lock.ts".LockConflictError} only once the wait is spent.
+   *
+   * Set this for a shared resource a developer wants to *use* — one dev
+   * environment, one database, one port — where failing fast just makes them
+   * run the command again. Leave it off for a resource where a second run is a
+   * mistake worth reporting immediately, which stays the default.
+   *
+   * Waiting runs retry independently, so a queue of them is not served in
+   * arrival order: a run that has waited longer has no claim over one that
+   * arrived a moment ago.
+   */
+  waitUpTo(duration: string | number): this {
+    this.waitUpTo_ = duration;
+    return this;
+  }
+
+  /**
+   * How often to retry while {@link waitUpTo} waits (default `"5s"`). Alone it
+   * does nothing — without a wait there is no retry to pace.
+   */
+  pollEvery(duration: string | number): this {
+    this.pollEvery_ = duration;
     return this;
   }
 
@@ -256,6 +297,13 @@ export interface TargetOutcomeView {
   readonly startedAt?: string;
   /** When it settled, ISO-8601, if it has. */
   readonly endedAt?: string;
+  /**
+   * The notes it reported into its row of the build summary (see
+   * {@link TargetContext.reportSummary}), when it reported any — so an
+   * aggregating target can read a dependency's test counts, not only its
+   * verdict. Durable: present after a resume too.
+   */
+  readonly summary?: readonly SummaryEntry[];
 }
 
 /**
@@ -268,6 +316,15 @@ export interface TargetOutcomeView {
 export interface TargetContext {
   /** Unique ID of this run, stable for every target in the run. */
   readonly runId: string;
+  /**
+   * Who asked for this run — stamped once when the run was created, and
+   * unchanged by any later resume, so it still names the engineer who started a
+   * deploy that a sweep has since picked up several times.
+   *
+   * Absent when the run has no durable record to have stamped one (no state
+   * store), and on a record written before the field existed.
+   */
+  readonly initiator?: RunInitiator;
   /** Dotted name of the executing target. */
   readonly target: string;
   /**
@@ -323,6 +380,24 @@ export interface TargetContext {
   readonly signals: ReadonlyMap<string, SignalRecord>;
   /** True when the run is a dry run (bodies do not execute under a dry run). */
   readonly dryRun: boolean;
+  /**
+   * Report `key: value` notes into **this target's row** of the end-of-build
+   * summary — where a count or a version belongs once the body is done:
+   *
+   * ```text
+   * test        Succeeded    8.1s  // Tests: 837 · Passed: 837 · Failed: 0
+   * ```
+   *
+   * Notes accumulate across calls, and reporting a key again replaces its
+   * value in place. Each key and value is rendered on one line (whitespace
+   * collapsed, control sequences removed). Library code with no context in
+   * hand — a tool wrapper reporting the counts its tool printed — reports
+   * through the ambient {@link "./summary_note.ts".reportSummary}, and those
+   * notes land in the same row. A failed target keeps its notes:
+   * a red `test` row still says how many failed. A compensation (see
+   * {@link TargetBuilder.onCancel}) has no row, so its calls are dropped.
+   */
+  reportSummary(pairs: SummaryPairs): void;
 }
 
 /**

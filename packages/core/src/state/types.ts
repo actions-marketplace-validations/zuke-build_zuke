@@ -1,3 +1,6 @@
+// Copyright (c) 2026 the Zuke contributors
+// SPDX-License-Identifier: MIT
+
 /**
  * The durable run-state vocabulary: {@link RunRecord} and its parts.
  *
@@ -17,6 +20,14 @@
  */
 
 import type { JsonValue } from "../target.ts";
+import type { SummaryEntry } from "../summary_note.ts";
+import { asObject, fields } from "../json_shape.ts";
+
+/** The field readers for a run record's own fields. */
+const { str, optionalStr } = fields("state: run record field");
+
+/** The field readers for one graph node, which names itself in its errors. */
+const graphNode = fields("state: graph node");
 
 /**
  * The lifecycle status of a whole run. `cancelling` is the transient state a
@@ -74,6 +85,66 @@ export interface RunEvent {
   args: Record<string, string>;
   /** A short, redacted human detail (e.g. a denial reason), when present. */
   detail?: string;
+}
+
+/** What an operator may force a target to, without running it. */
+export type ForcedOutcome = "skipped" | "succeeded";
+
+/** The {@link ForcedOutcome} values, for validating an untrusted string. */
+export const FORCED_OUTCOMES: readonly ForcedOutcome[] = [
+  "skipped",
+  "succeeded",
+];
+
+/**
+ * An operator's decision to settle a target without running it — recorded on
+ * the run so the executor honours it and the trail says who decided.
+ *
+ * Two shapes of intervention, both of which a build cannot express itself:
+ * `skipped` takes a step off the plan that cannot succeed, and `succeeded`
+ * marks one that a person completed by hand. Dependents proceed either way; the
+ * difference is what a later cancellation compensates, since only the second
+ * asserts that the target's effects exist.
+ */
+export interface TargetOverride {
+  /** What the target settles to when the executor reaches it. */
+  outcome: ForcedOutcome;
+  /** Who forced it (a resolved actor). */
+  actor: string;
+  /** ISO-8601 time the override was recorded. */
+  at: string;
+  /** Why, when the operator gave a reason. */
+  reason?: string;
+}
+
+/** Whether a person or a machine asked for a run (see {@link RunInitiator}). */
+export type ActorKind = "human" | "service";
+
+/** The {@link ActorKind} values, for validating an untrusted string. */
+export const ACTOR_KINDS: readonly ActorKind[] = ["human", "service"];
+
+/**
+ * Who asked for a run, stamped once when it is created and never rewritten.
+ *
+ * Distinct from {@link RunRecord.actor}, which every resume overwrites with
+ * whoever picked the run up — so on a run that suspended and was resumed by a
+ * sweep, `actor` is the sweep's service account and this is still the engineer
+ * who started it. That is the subject a run-scoped authorization rule means by
+ * "whoever started this run", and the difference a notification needs to tell a
+ * person's deploy from a scheduler's.
+ */
+export interface RunInitiator {
+  /** Who asked for the run, resolved once at creation. */
+  actor: string;
+  /** Whether a person or a machine asked. Stated, never inferred from the actor. */
+  kind: ActorKind;
+  /**
+   * ISO-8601 time this attribution was fixed. The run's `createdAt` for a run
+   * stamped at creation, and the *original* run's `createdAt` for one backfilled
+   * when a resume was about to overwrite the evidence — so it dates the
+   * attribution, not the write that recorded it.
+   */
+  at: string;
 }
 
 /** What a timed-out wait does: fail, cancel the run, or run a compensation target. */
@@ -138,6 +209,14 @@ export interface TargetRunState {
    * once at least one has been armed.
    */
   effects?: Record<string, EffectState>;
+  /**
+   * The notes the target reported into its row of the build summary (see
+   * {@link "../target.ts".TargetContext.reportSummary}), in the order they
+   * were first reported — present only when it reported at least one, and
+   * redacted like every other stored string. What lets `zuke runs show` and
+   * `ctx.outcomeOf` say a target ran 4094 tests, not only that it succeeded.
+   */
+  summary?: SummaryEntry[];
 }
 
 /** One entry of a run's graph-shape snapshot. */
@@ -157,12 +236,46 @@ export interface RunRecord {
   id: string;
   /** The build class name. */
   build: string;
+  /**
+   * Which build **instance** this run belongs to — `ZUKE_BUILD_ID`, else
+   * `GITHUB_REPOSITORY`, resolved once at creation. Absent when neither was set
+   * (and on every record written before this field existed).
+   *
+   * The class name above cannot identify a build: a `zuke.ts` templated across
+   * a dozen services shares its name, its target names and its graph shape, so
+   * every shape-based check passes and one service's recovery sweep would drive
+   * another's runs with its own target bodies. This is what a recovery path
+   * compares; see {@link "../ownership.ts"}.
+   */
+  buildId?: string;
   /** The dotted name of the requested (root) target. */
   rootTarget: string;
   /** The run's lifecycle status. */
   status: RunStatus;
-  /** Who started the run (resolved from `--actor`, `ZUKE_ACTOR`, or CI env). */
+  /**
+   * The run's **last writer** (resolved from `--actor`, `ZUKE_ACTOR`, or CI
+   * env). Every resume overwrites it with whoever picked the run up, so it
+   * answers "who touched this most recently", not "whose run is this" — see
+   * {@link RunRecord.initiator} for that.
+   */
   actor: string;
+  /**
+   * Who asked for the run, stamped once at creation and immutable thereafter.
+   *
+   * Absent on a record written before this field existed; such a record's
+   * {@link RunRecord.actor} is the closest answer available, and is exactly the
+   * right one on a run that was never resumed.
+   */
+  initiator?: RunInitiator;
+  /**
+   * Operator-forced target outcomes, keyed by dotted target name (see
+   * {@link TargetOverride}). Absent until something is forced.
+   *
+   * Read when the executor reaches the target, so an override lands for any
+   * target the run has not started yet — in practice on the next resume, since
+   * that is the process that loads the record after the force was written.
+   */
+  overrides?: Record<string, TargetOverride>;
   /** ISO-8601 timestamp when the run was created. */
   createdAt: string;
   /** ISO-8601 timestamp of the last write. */
@@ -231,8 +344,14 @@ export interface RunSummary {
   rootTarget: string;
   /** The run's lifecycle status. */
   status: RunStatus;
-  /** Who started the run. */
+  /** The run's last writer (see {@link RunRecord.actor}). */
   actor: string;
+  /**
+   * Who asked for the run (see {@link RunRecord.initiator}). Absent on a record
+   * written before the field existed, and from a store that does not project
+   * it — {@link RunSummary.actor} is the fallback in both cases.
+   */
+  initiator?: RunInitiator;
   /** ISO-8601 creation timestamp. */
   createdAt: string;
   /** ISO-8601 timestamp of the last write. */
@@ -261,6 +380,7 @@ export function toSummary(record: RunRecord): RunSummary {
     build: record.build,
     rootTarget: record.rootTarget,
     status: record.status,
+    ...(record.initiator === undefined ? {} : { initiator: record.initiator }),
     actor: record.actor,
     createdAt: record.createdAt,
     updatedAt: record.updatedAt,
@@ -280,6 +400,25 @@ const RUN_STATUSES: readonly RunStatus[] = [
 /** The {@link RunStatus} values as a list, for CLI help and error messages. */
 export const RUN_STATUS_NAMES: readonly string[] = RUN_STATUSES;
 
+/** The run statuses past which nothing more happens. */
+const TERMINAL_STATUSES: readonly RunStatus[] = [
+  "succeeded",
+  "failed",
+  "cancelled",
+];
+
+/**
+ * Whether a run has reached a status past which nothing more happens — the only
+ * prunable ones, and the ones no operator verb can act on.
+ *
+ * `cancelling` is deliberately **not** terminal: the run is still settling, and
+ * a caller that treats it as finished would act on a plan that is being torn
+ * down. Callers that must refuse it too should say so themselves.
+ */
+export function isTerminalRunStatus(status: RunStatus): boolean {
+  return TERMINAL_STATUSES.includes(status);
+}
+
 /** True when `value` is a valid {@link RunStatus} (used to validate CLI filters). */
 export function isRunStatus(value: string): value is RunStatus {
   return RUN_STATUSES.some((s) => s === value);
@@ -298,38 +437,6 @@ const TARGET_STATUSES: readonly TargetRunStatus[] = [
 /** Serialise a run record to the canonical stored form (pretty JSON + newline). */
 export function stringifyRunRecord(record: RunRecord): string {
   return `${JSON.stringify(record, null, 2)}\n`;
-}
-
-/** Narrow an unknown value to a plain object without casting, else `null`. */
-function asObject(value: unknown): Record<string, unknown> | null {
-  if (typeof value !== "object" || value === null || Array.isArray(value)) {
-    return null;
-  }
-  const out: Record<string, unknown> = {};
-  for (const [key, val] of Object.entries(value)) out[key] = val;
-  return out;
-}
-
-/** Read a required string field, throwing a descriptive error if it is not one. */
-function str(object: Record<string, unknown>, field: string): string {
-  const value = object[field];
-  if (typeof value !== "string") {
-    throw new Error(`state: run record field "${field}" is not a string`);
-  }
-  return value;
-}
-
-/** Read an optional string field, throwing if present but not a string. */
-function optionalStr(
-  object: Record<string, unknown>,
-  field: string,
-): string | undefined {
-  const value = object[field];
-  if (value === undefined) return undefined;
-  if (typeof value !== "string") {
-    throw new Error(`state: run record field "${field}" is not a string`);
-  }
-  return value;
 }
 
 /**
@@ -381,7 +488,22 @@ function parseTargetState(value: unknown): TargetRunState {
   if (object.effects !== undefined) {
     state.effects = parseEffects(object.effects);
   }
+  if (object.summary !== undefined) {
+    state.summary = parseSummary(object.summary);
+  }
   return state;
+}
+
+/** Validate a target's stored summary notes: a list of `{ key, value }` strings. */
+function parseSummary(value: unknown): SummaryEntry[] {
+  if (!Array.isArray(value)) throw new Error("state: summary is not an array");
+  return value.map((entry) => {
+    const object = asObject(entry);
+    if (object === null) {
+      throw new Error("state: summary note is not an object");
+    }
+    return { key: str(object, "key"), value: str(object, "value") };
+  });
 }
 
 /** Validate a target's effect rows, keyed by effect name. */
@@ -487,6 +609,70 @@ function parseRunEvent(value: unknown): RunEvent {
   return event;
 }
 
+/**
+ * Validate and narrow an optional {@link RunInitiator}, or `undefined` when the
+ * record carries none (every record written before the field existed).
+ *
+ * A present but malformed initiator throws rather than being dropped. Dropping
+ * it would make the record fall back to `actor`, which a resume may already have
+ * rewritten — quietly answering "who started this run" with the name of whoever
+ * last resumed it. A throw is the louder failure: the record does not parse, so
+ * the filesystem store skips that file and the run disappears from a listing
+ * rather than appearing under the wrong name. That is the intended trade — a
+ * run you cannot see prompts a look, one attributed to the wrong person does
+ * not — but it does mean a corrupted initiator costs the whole record, so the
+ * shape written here is deliberately small.
+ */
+function parseInitiator(value: unknown): RunInitiator | undefined {
+  if (value === undefined) return undefined;
+  const object = asObject(value);
+  if (object === null) throw new Error("state: run initiator is not an object");
+  const kind = ACTOR_KINDS.find((k) => k === object.kind);
+  if (kind === undefined) {
+    throw new Error(`state: unknown initiator kind "${object.kind}"`);
+  }
+  return { actor: str(object, "actor"), kind, at: str(object, "at") };
+}
+
+/**
+ * Validate and narrow the optional {@link RunRecord.overrides} map, or
+ * `undefined` when the record carries none.
+ *
+ * Strict for the same reason {@link parseInitiator} is: an override changes
+ * whether a target's body runs, so a malformed one must not be quietly read as
+ * "nothing was forced" — that would execute a step an operator had taken off
+ * the plan.
+ */
+function parseOverrides(
+  value: unknown,
+): Record<string, TargetOverride> | undefined {
+  if (value === undefined) return undefined;
+  const object = asObject(value);
+  if (object === null) throw new Error("state: run overrides is not an object");
+  const overrides: Record<string, TargetOverride> = {};
+  for (const [name, raw] of Object.entries(object)) {
+    const entry = asObject(raw);
+    if (entry === null) {
+      throw new Error(`state: override for "${name}" is not an object`);
+    }
+    const outcome = FORCED_OUTCOMES.find((o) => o === entry.outcome);
+    if (outcome === undefined) {
+      throw new Error(
+        `state: unknown forced outcome "${entry.outcome}" for "${name}"`,
+      );
+    }
+    const override: TargetOverride = {
+      outcome,
+      actor: str(entry, "actor"),
+      at: str(entry, "at"),
+    };
+    const reason = optionalStr(entry, "reason");
+    if (reason !== undefined) override.reason = reason;
+    overrides[name] = override;
+  }
+  return overrides;
+}
+
 /** Validate and narrow a {@link SignalRecord}. */
 function parseSignalRecord(value: unknown): SignalRecord {
   const object = asObject(value);
@@ -555,13 +741,10 @@ export function parseRunRecord(text: string): RunRecord {
   const graph: RunGraphNode[] = rawGraph.map((node) => {
     const n = asObject(node);
     if (n === null) throw new Error("state: graph node is not an object");
-    const dependsOn = n.dependsOn;
-    if (
-      !Array.isArray(dependsOn) || dependsOn.some((d) => typeof d !== "string")
-    ) {
-      throw new Error(`state: graph node "dependsOn" is not a string array`);
-    }
-    return { name: str(n, "name"), dependsOn: dependsOn.filter(isString) };
+    return {
+      name: str(n, "name"),
+      dependsOn: graphNode.strArray(n, "dependsOn"),
+    };
   });
 
   const rawParams = asObject(object.params);
@@ -627,8 +810,14 @@ export function parseRunRecord(text: string): RunRecord {
   };
   // Optional and only when present, so a round-trip preserves the exact key set
   // and a record written before these existed parses unchanged.
+  const buildId = optionalStr(object, "buildId");
+  if (buildId !== undefined) record.buildId = buildId;
   const deadlineAt = optionalStr(object, "deadlineAt");
   if (deadlineAt !== undefined) record.deadlineAt = deadlineAt;
+  const initiator = parseInitiator(object.initiator);
+  if (initiator !== undefined) record.initiator = initiator;
+  const overrides = parseOverrides(object.overrides);
+  if (overrides !== undefined) record.overrides = overrides;
   const intended = optionalStr(object, "intendedTerminal");
   if (intended !== undefined) {
     const found = RUN_STATUSES.find((s) => s === intended);
@@ -638,11 +827,6 @@ export function parseRunRecord(text: string): RunRecord {
     record.intendedTerminal = found;
   }
   return record;
-}
-
-/** A `filter` type guard that narrows to `string`. */
-function isString(value: unknown): value is string {
-  return typeof value === "string";
 }
 
 /**
@@ -657,7 +841,7 @@ export function parseRunSummary(value: unknown): RunSummary {
   if (runStatus === undefined) {
     throw new Error(`state: unknown run status "${status}"`);
   }
-  return {
+  const summary: RunSummary = {
     id: str(object, "id"),
     build: str(object, "build"),
     rootTarget: str(object, "rootTarget"),
@@ -666,4 +850,19 @@ export function parseRunSummary(value: unknown): RunSummary {
     createdAt: str(object, "createdAt"),
     updatedAt: str(object, "updatedAt"),
   };
+  const initiator = parseInitiator(object.initiator);
+  if (initiator !== undefined) summary.initiator = initiator;
+  return summary;
+}
+
+/**
+ * Who a run is attributed to for a reader that wants its *owner* rather than
+ * its last writer: the recorded initiator, else the actor.
+ *
+ * The fallback is not a guess — on a record written before the initiator
+ * existed, and on any run that was never resumed, `actor` still holds exactly
+ * the value the initiator would have been stamped with.
+ */
+export function initiatorOf(run: RunRecord | RunSummary): string {
+  return run.initiator?.actor ?? run.actor;
 }

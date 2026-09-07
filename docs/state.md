@@ -52,9 +52,15 @@ Each run is stored as one JSON document:
 {
   "id": "3f2a…", // == ctx.runId
   "build": "CD", // the Build class name
+  "buildId": "acme/api", // optional; which build instance owns it (see below)
   "rootTarget": "deploy", // the requested target
   "status": "succeeded", // running | suspended | cancelling | succeeded | failed | cancelled
-  "actor": "alice", // who ran it (see below)
+  "actor": "alice", // the run's LAST writer (see below)
+  "initiator": { // optional; who ASKED for the run, stamped once at creation
+    "actor": "alice",
+    "kind": "human", // human | service
+    "at": "2026-07-17T…Z"
+  },
   "createdAt": "2026-07-17T…Z",
   "updatedAt": "2026-07-17T…Z",
   "graph": [ // the shape it planned, in declaration order
@@ -62,6 +68,10 @@ Each run is stored as one JSON document:
     { "name": "deploy", "dependsOn": ["build"] }
   ],
   "params": { "env": "sit" }, // resolved, NON-secret parameters only
+  "deadlineAt": "2026-07-17T…Z", // optional; from Build.deadline(), enforced by the reaper
+  "intendedTerminal": "cancelled", // optional; set when a run enters `cancelling`
+  "signals": {}, // external signals delivered to a .waitsFor() gate
+  "events": [], // the audit trail (MCP tool calls, reap events)
   "targets": {
     "build": {
       "status": "succeeded",
@@ -73,7 +83,9 @@ Each run is stored as one JSON document:
       "status": "succeeded",
       "meta": { "target": "sit-7" },
       "startedAt": "…",
-      "endedAt": "…"
+      "endedAt": "…",
+      "waitingFor": null, // the gate it is parked on, when suspended
+      "effects": {} // per-effect intent + settlement, for crash re-drive
     }
   },
   "degraded": false // optional; true if a state write was lost (see below)
@@ -89,6 +101,78 @@ The executor writes the record when it is created, on each target's start and
 finish, and when the run ends. So if the process is killed mid-run, the record
 on disk shows the target that was executing as `running`, with its `startedAt`
 stamped.
+
+`buildId` is the run's **origin**: `ZUKE_BUILD_ID`, else `GITHUB_REPOSITORY`,
+resolved once when the run is created. It says which build a run belongs to when
+a store is shared, because the class name above cannot — a `zuke.ts` templated
+across services shares its name, its target names and its graph. Every recovery
+path compares it and touches a run only when the two origins agree; an absent one
+on either side abstains rather than refusing, so records written before the field
+existed stay recoverable. See
+[Whose run is it?](./orchestration.md#whose-run-is-it).
+
+### `actor` and `initiator` — two different questions
+
+`actor` is the run's **last writer**. It resolves from `--actor`, then
+`ZUKE_ACTOR`, then the CI actor, else `"anonymous"` — and **every resume
+overwrites it** with whoever picked the run up. On a deploy that parked at a gate
+and was resumed by a sweep, `actor` is the sweep's service account.
+
+`initiator` is who **asked for** the run. It is stamped once when the run is
+created and never written again, so it still names the engineer who started that
+deploy. Its `kind` comes from `--actor-kind` (`human` or `service`), else
+`ZUKE_ACTOR_KIND` — which the [MCP](./mcp.md) registry exports into a spawned
+child, so a run launched by an authenticated caller records that caller. The
+default is `human`: a service claim is what lets a policy treat a run as unowned
+machinery, so it must be stated rather than guessed from an actor's name. A typo
+in the flag fails the run; an unrecognised environment value reads as unstated.
+
+Read it from a body as `ctx.initiator`, see it on `zuke runs show`, and filter by
+it with `zuke runs list --initiator <name>`. That filter is applied after the
+store answers, so that a store which does not project the field cannot return an
+unfiltered list that looks filtered — which also means `--limit` is applied after
+it, not by the store. On a large store, narrow server-side first with `--since`
+or `--status`; those still go to the store. The field is optional: a record
+written before it existed has none, and `actor` is then the closest answer —
+which is the exact one for a run nobody ever resumed.
+
+### Forcing a target — `overrides`
+
+An operator sometimes has to take a step off a live run: one that cannot
+succeed, or one a person completed by hand.
+
+```sh
+zuke force <run-id> <target> --outcome skipped|succeeded [--reason "…"]
+```
+
+That records an entry under `overrides`, keyed by target name, carrying the
+outcome, who forced it, when, and why. The executor reads it when it reaches the
+target and settles it **without running the body** — ahead of the target's
+`onlyWhen` conditions and its cache, because forcing is a decision that outranks
+what the build would work out for itself. Dependents proceed either way.
+
+The two outcomes differ in what a later cancellation does. A forced `succeeded`
+asserts the target's effects exist, so it is compensated like any other
+succeeded target; a forced `skipped` never happened, so it is not — exactly like
+a target a condition skipped.
+
+It is refused, naming the rule, when the target has already settled (the record
+is the account of what happened, and rewriting a settled outcome would make it
+untrue), when the run is terminal, when the target is not in the run's graph, or
+when the build declared it off-limits:
+
+```ts
+class CD extends Build {
+  override unforceable() {
+    return [this.applyProduction]; // references, so a rename cannot empty this
+  }
+}
+```
+
+An override lands for any target the run has not started yet, which in practice
+means the next resume — that is the process which loads the record after the
+force was written. `zuke runs show` prints every override, and over
+[MCP](./mcp.md) the same operation is the `force_target` tool.
 
 A record also carries an append-only `events` array — the **audit trail** of
 [MCP](./mcp.md) tool calls against the run (time, tool, actor, outcome, redacted
@@ -139,6 +223,8 @@ Writes are atomic (write-temp-then-rename) and guarded by an `O_EXCL` lock file
 so two processes on the **same host** cannot corrupt a record. The version used
 for compare-and-swap is a content hash.
 
+<!-- check -->
+
 ```ts
 import { FileSystemStateStore } from "jsr:@zuke/core";
 const store = new FileSystemStateStore(".zuke/runs");
@@ -163,6 +249,17 @@ const store = new HttpStateStore({ url: "https://zuke-state.internal", token });
 > records (with non-secret parameters and target metadata) are sent there. Point
 > it only at a store you control, and prefer a secret parameter or an
 > environment variable over a hard-coded value.
+>
+> **`ZUKE_STATE_URL` must be `https:`.** A plaintext URL is refused before the
+> first request, with a named error and exit code 1. Confidentiality is the
+> obvious half — `ZUKE_STATE_TOKEN` travels with every request, and that token
+> forges run records, the audit trail, and the [locks](./locks.md) two deploys
+> rely on being exclusive. Integrity is the half that matters more and needs no
+> token at all: an on-path attacker who answers a plaintext request chooses what
+> a resume reads back. Loopback (`localhost`, `127.0.0.0/8`, `::1`) is exempt —
+> there is no path to sit on — and a deliberate plaintext endpoint elsewhere is
+> reachable with `ZUKE_ALLOW_INSECURE_URL=1`. The same rule and the same opt-out
+> apply to `ZUKE_REGISTRY_URL` and `ZUKE_REMOTE_CACHE_URL`.
 
 ## Concurrency & compare-and-swap
 

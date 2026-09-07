@@ -1,3 +1,6 @@
+// Copyright (c) 2026 the Zuke contributors
+// SPDX-License-Identifier: MIT
+
 /**
  * `BiomeTasks` — typed task functions for the [Biome](https://biomejs.dev) CLI,
  * in the settings-lambda style: configure a fluent settings object in a lambda,
@@ -23,6 +26,8 @@ import {
   ToolSettings,
 } from "@zuke/core/tooling";
 import type { CommandOutput } from "@zuke/core/shell";
+import { reportSummary } from "@zuke/core";
+import { parseBiomeSummary } from "./summary.ts";
 
 /**
  * Base for all `biome` subcommand settings: the binary is `biome`, and the
@@ -44,6 +49,12 @@ export abstract class BiomeSettings extends ToolSettings {
   /** Resolve the binary from `node_modules/.bin` by default — biome is an npm-distributed tool. */
   protected override defaultResolution(): ToolResolution {
     return "node_modules";
+  }
+
+  /** Report `Files`, `Errors` and `Warnings` onto the build summary. */
+  protected override onOutput(output: CommandOutput): void {
+    const pairs = parseBiomeSummary(output);
+    if (pairs !== undefined) reportSummary(pairs);
   }
 
   /** Files or directories to operate on; omit to use the configured includes. */

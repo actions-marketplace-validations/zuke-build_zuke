@@ -1,3 +1,6 @@
+// Copyright (c) 2026 the Zuke contributors
+// SPDX-License-Identifier: MIT
+
 /**
  * Unit tests for {@link RegistryMcpServer}: live discovery from the registry,
  * spawn-based execution through an injected runner (no real subprocess), the M5
@@ -11,12 +14,14 @@ import {
   type JsonRpcResponse,
   METHOD_NOT_FOUND,
 } from "../src/mcp/jsonrpc.ts";
-import { PROTOCOL_VERSION } from "../src/mcp/server.ts";
+import { PROTOCOL_VERSION } from "../src/mcp/protocol.ts";
+import { authenticatorFromHook } from "../src/mcp/auth.ts";
 import { serveMcp } from "../src/mcp/command.ts";
 import {
   defaultRegistryRunner,
   RegistryMcpServer,
   type RegistryRunner,
+  type RegistryRunOptions,
   type RegistryRunResult,
 } from "../src/mcp/registry_server.ts";
 import {
@@ -29,7 +34,7 @@ import type {
   PutBuildResult,
 } from "../src/registry/registry.ts";
 import { FileSystemStateStore } from "../src/state/fs_store.ts";
-import type { StateHost } from "../src/state/store.ts";
+import { FakeStateHost } from "./_fakes.ts";
 
 // ---- fakes ------------------------------------------------------------------
 
@@ -55,46 +60,6 @@ class FakeRegistry implements BuildRegistry {
   }
   listBuilds() {
     return Promise.resolve([...this.map.values()].map(toBuildSummary));
-  }
-}
-
-/** An in-memory {@link StateHost} for a real FileSystemStateStore (audit trail). */
-class FakeStateHost implements StateHost {
-  readonly files = new Map<string, string>();
-  readonly locks = new Set<string>();
-  readText(path: string): Promise<string | null> {
-    return Promise.resolve(this.files.get(path) ?? null);
-  }
-  writeText(path: string, content: string): Promise<void> {
-    this.files.set(path, content);
-    return Promise.resolve();
-  }
-  rename(from: string, to: string): Promise<void> {
-    const content = this.files.get(from);
-    if (content !== undefined) {
-      this.files.set(to, content);
-      this.files.delete(from);
-    }
-    return Promise.resolve();
-  }
-  createExclusive(path: string): Promise<boolean> {
-    if (this.locks.has(path)) return Promise.resolve(false);
-    this.locks.add(path);
-    return Promise.resolve(true);
-  }
-  remove(path: string): Promise<void> {
-    this.files.delete(path);
-    this.locks.delete(path);
-    return Promise.resolve();
-  }
-  listDir(): Promise<string[]> {
-    return Promise.resolve([]);
-  }
-  mkdirp(): Promise<void> {
-    return Promise.resolve();
-  }
-  now(): number {
-    return 1_000_000;
   }
 }
 
@@ -127,16 +92,19 @@ function descriptor(
   };
 }
 
-/** A runner that records every spawn (argv, cwd, actor) and returns a fixed result. */
+/** One recorded spawn: where it ran, and the caller claims it carried. */
+type RecordedRun = { argv: string[]; cwd: string } & RegistryRunOptions;
+
+/** A runner that records every spawn (argv, cwd, claims) and returns a fixed result. */
 function recordingRunner(
   result: RegistryRunResult = { code: 0, stdout: "ran", stderr: "" },
 ): {
   runner: RegistryRunner;
-  calls: { argv: string[]; cwd: string; actor?: string }[];
+  calls: RecordedRun[];
 } {
-  const calls: { argv: string[]; cwd: string; actor?: string }[] = [];
+  const calls: RecordedRun[] = [];
   const runner: RegistryRunner = (argv, cwd, options) => {
-    calls.push({ argv: [...argv], cwd, actor: options?.actor });
+    calls.push({ argv: [...argv], cwd, ...options });
     return Promise.resolve(result);
   };
   return { runner, calls };
@@ -1024,11 +992,11 @@ Deno.test("an identity hook attributes the call to the trusted actor, not the la
     runner,
     stateStore: store,
     actor: "config-actor", // even an explicit --actor is overridden by the hook
-    identity: (ctx) => {
+    authenticator: authenticatorFromHook((ctx) => {
       const sub = ctx.headers.get("x-user");
       if (sub === null) throw new Error("no identity from proxy");
       return { actor: sub, via: "oauth-proxy" };
-    },
+    }),
   });
 
   // The client self-reports a name; the hook must win over it.
@@ -1058,11 +1026,11 @@ Deno.test("a throwing identity hook rejects the request and writes nothing", asy
     allowRun: true,
     runner,
     stateStore: store,
-    identity: (ctx) => {
+    authenticator: authenticatorFromHook((ctx) => {
       const sub = ctx.headers.get("x-user");
       if (sub === null) throw new Error("no identity from proxy");
       return { actor: sub };
-    },
+    }),
   });
 
   // No `x-user` header → the hook throws → a JSON-RPC auth error, no dispatch.
@@ -1101,7 +1069,9 @@ Deno.test("a hook yielding an empty actor is rejected, never a spawn", async () 
     stateStore: store,
     actor: "ci-bot", // the static fallback that must NOT be used
     // `headers.get(...) ?? ""` yields `{ actor: "" }` on a missing header.
-    identity: (ctx) => ({ actor: ctx.headers.get("x-user") ?? "" }),
+    authenticator: authenticatorFromHook(
+      (ctx) => ({ actor: ctx.headers.get("x-user") ?? "" }),
+    ),
   });
   const res = await callWith(server, "run:Api:deploy", {});
   assertEquals(res?.error?.message, "Unauthorized");
@@ -1232,4 +1202,624 @@ Deno.test("registry HTTP serving does not head-of-line-block a read behind a run
     ac.abort();
     await finished;
   }
+});
+
+Deno.test("a descriptor pointing at a remote entry module is refused, not spawned", async () => {
+  const registry = new FakeRegistry();
+  registry.add(descriptor("Api", ["deploy"], {
+    kind: "module",
+    module: "https://attacker.example/x.ts",
+    cwd: "/r",
+  }));
+  const store = new FileSystemStateStore("/state", new FakeStateHost());
+  const { runner, calls } = recordingRunner();
+  const server = new RegistryMcpServer(registry, {
+    allowRun: true,
+    stateStore: store,
+    runner,
+    readEnv: () => undefined,
+  });
+
+  const result = await call(server, "run:Api:deploy");
+  assertEquals(result.isError, true);
+  assertStringIncludes(result.text, "launch_origin_not_allowed");
+  assertStringIncludes(result.text, "ZUKE_REGISTRY_LAUNCH_HOSTS");
+  assertEquals(calls.length, 0); // nothing was spawned
+
+  const audit = await store.getRun("mcp-audit");
+  assertEquals(
+    (audit?.record.events ?? []).some((e) =>
+      e.tool === "run:Api:deploy" && e.outcome === "denied" &&
+      e.detail === "launch_origin_not_allowed"
+    ),
+    true,
+  );
+});
+
+Deno.test("an allow-listed remote entry module spawns", async () => {
+  const registry = new FakeRegistry();
+  registry.add(descriptor("Api", ["deploy"], {
+    kind: "module",
+    module: "https://builds.example.com/zuke.ts",
+    cwd: "/r",
+  }));
+  const { runner, calls } = recordingRunner();
+  const server = new RegistryMcpServer(registry, {
+    allowRun: true,
+    runner,
+    readEnv: (name) =>
+      name === "ZUKE_REGISTRY_LAUNCH_HOSTS" ? "builds.example.com" : undefined,
+  });
+
+  const result = await call(server, "run:Api:deploy");
+  assertEquals(result.isError, false);
+  assertEquals(calls.length, 1);
+  assertEquals(
+    calls[0].argv.includes("https://builds.example.com/zuke.ts"),
+    true,
+  );
+});
+
+Deno.test("the launch check runs before the destructive-confirmation prompt", async () => {
+  // A refused location must fail fast, not ask the operator to confirm a spawn
+  // that could never happen.
+  const registry = new FakeRegistry();
+  registry.add(descriptor("Api", ["deploy"], {
+    kind: "module",
+    module: "https://attacker.example/x.ts",
+    cwd: "/r",
+  }));
+  const { runner, calls } = recordingRunner();
+  const server = new RegistryMcpServer(registry, {
+    allowRun: true,
+    confirmDestructive: true,
+    runner,
+    readEnv: () => undefined,
+  });
+
+  const result = await call(server, "run:Api:deploy", { confirm: true });
+  assertEquals(result.isError, true);
+  assertStringIncludes(result.text, "launch_origin_not_allowed");
+  assertEquals(calls.length, 0);
+});
+
+// ---- remaining protocol edges, schema rendering, and audit resilience -------
+
+Deno.test("defaultRegistryRunner exports the resolved actor as ZUKE_ACTOR", async () => {
+  const result = await defaultRegistryRunner(
+    [
+      Deno.execPath(),
+      "eval",
+      "console.log(Deno.env.get('ZUKE_ACTOR') ?? 'NO_ACTOR')",
+    ],
+    Deno.cwd(),
+    { actor: "trusted-caller" },
+  );
+  assertEquals(result.code, 0);
+  // The spawned build attributes its run to the same actor as the audit trail.
+  assertStringIncludes(result.stdout, "trusted-caller");
+});
+
+Deno.test("a run tool's schema renders enums on arrays and typed defaults", async () => {
+  const registry = new FakeRegistry();
+  const base = descriptor("Api", ["deploy"]);
+  registry.add({
+    ...base,
+    surface: {
+      ...base.surface,
+      parameters: [
+        // An array of constrained strings: the enum rides on the items.
+        {
+          name: "levels",
+          flag: "levels",
+          description: "",
+          required: false,
+          kind: "string",
+          boolean: false,
+          array: true,
+          options: ["low", "high"],
+        },
+        // A boolean default "true" comes back as JSON true.
+        {
+          name: "verbose",
+          flag: "verbose",
+          description: "",
+          required: false,
+          kind: "boolean",
+          boolean: true,
+          array: false,
+          options: [],
+          default: "true",
+        },
+        // A string default is carried verbatim.
+        {
+          name: "region",
+          flag: "region",
+          description: "",
+          required: false,
+          kind: "string",
+          boolean: false,
+          array: false,
+          options: [],
+          default: "eu",
+        },
+      ],
+    },
+  });
+  const server = new RegistryMcpServer(registry, { allowRun: true });
+  const schema = runToolSchema(
+    await server.handleMessage(req("tools/list")),
+    "run:Api:deploy",
+  );
+  const props = schemaProps(schema);
+  assertEquals(props.levels, {
+    type: "array",
+    items: { type: "string", enum: ["low", "high"] },
+  });
+  assertEquals(props.verbose, { type: "boolean", default: true });
+  assertEquals(props.region, { type: "string", default: "eu" });
+});
+
+Deno.test("an array parameter with a mismatched element is rejected before any spawn", async () => {
+  const registry = new FakeRegistry();
+  registry.add(paramDescriptor());
+  const { runner, calls } = recordingRunner();
+  const server = new RegistryMcpServer(registry, { allowRun: true, runner });
+  // The array shape is right, but one element is not a string.
+  const result = await call(server, "run:Deploy:deploy", {
+    repos: ["expense-service", 5],
+  });
+  assertEquals(result.isError, true);
+  assertStringIncludes(result.text, "repos");
+  assertEquals(calls.length, 0);
+});
+
+Deno.test("protection reaches a dependency shared through a diamond exactly once", async () => {
+  const registry = new FakeRegistry();
+  // release → {a, b} → lint: the protected `lint` is reachable twice, and the
+  // closure walk must both dedupe it and still enforce the token.
+  const base = descriptor("Api", ["lint", "a", "b", "release"]);
+  registry.add({
+    ...base,
+    surface: {
+      ...base.surface,
+      targets: base.surface.targets.map((t) => {
+        if (t.name === "a" || t.name === "b") {
+          return { ...t, dependsOn: ["lint"] };
+        }
+        if (t.name === "release") return { ...t, dependsOn: ["a", "b"] };
+        return t;
+      }),
+    },
+  });
+  const { runner, calls } = recordingRunner();
+  const server = new RegistryMcpServer(registry, {
+    allowRun: true,
+    protectPatterns: ["Api:lint"],
+    operatorToken: "good-token",
+    runner,
+  });
+  const denied = await call(server, "run:Api:release");
+  assertEquals(denied.isError, true);
+  assertStringIncludes(denied.text, "missing_operator_token");
+  assertEquals(calls.length, 0);
+  const okd = await call(server, "run:Api:release", {
+    operatorToken: "good-token",
+  });
+  assertEquals(okd.isError, false);
+  assertEquals(calls.length, 1);
+});
+
+Deno.test("an id-less unknown method is a silent notification; a bad name errors", async () => {
+  const server = new RegistryMcpServer(new FakeRegistry());
+  // An unknown method with no id is treated as a notification: no reply.
+  assertEquals(
+    await server.handleMessage({ jsonrpc: "2.0", method: "does/not/exist" }),
+    null,
+  );
+  // A non-string tool name is an invalid-params error, not a crash.
+  const res = await server.handleMessage(req("tools/call", { name: 5 }));
+  assertEquals(
+    isRec(res) && isRec(res.error) && typeof res.error.message === "string"
+      ? res.error.message.includes("must be a string")
+      : false,
+    true,
+  );
+  // A plain unknown tool (no run: prefix) is surfaced through the result.
+  const unknown = await call(server, "no_such_tool");
+  assertEquals(unknown.isError, true);
+  assertStringIncludes(unknown.text, "Unknown tool: no_such_tool");
+});
+
+Deno.test("a dead audit store never blocks the run, and a later call retries", async () => {
+  // Reads reject too, so even *opening* the audit log fails — the failed open
+  // must be dropped (not memoized) so the next call can retry it.
+  class BrokenHost extends FakeStateHost {
+    override readText(): Promise<string | null> {
+      return Promise.reject(new Error("disk gone"));
+    }
+    override writeText(): Promise<void> {
+      return Promise.reject(new Error("disk full"));
+    }
+  }
+  const registry = new FakeRegistry();
+  registry.add(descriptor("Api", ["deploy"]));
+  const store = new FileSystemStateStore("/state", new BrokenHost());
+  const { runner, calls } = recordingRunner();
+  const server = new RegistryMcpServer(registry, {
+    allowRun: true,
+    stateStore: store,
+    runner,
+  });
+  // Auditing is best-effort: the spawn happens and the call succeeds even
+  // though every audit write rejects — twice, since a failed open is dropped
+  // so the next call can retry rather than reusing a poisoned promise.
+  const first = await call(server, "run:Api:deploy");
+  assertEquals(first.isError, false);
+  const second = await call(server, "run:Api:deploy");
+  assertEquals(second.isError, false);
+  assertEquals(calls.length, 2);
+});
+
+Deno.test("a supplied operator token is never recorded in the audit trail", async () => {
+  const registry = new FakeRegistry();
+  registry.add(descriptor("Api", ["deploy"]));
+  const store = new FileSystemStateStore("/state", new FakeStateHost());
+  const { runner } = recordingRunner();
+  const server = new RegistryMcpServer(registry, {
+    allowRun: true,
+    protectPatterns: ["Api:deploy"],
+    operatorToken: "good-token",
+    stateStore: store,
+    runner,
+  });
+  const okd = await call(server, "run:Api:deploy", {
+    operatorToken: "good-token",
+    dryRun: true,
+  });
+  assertEquals(okd.isError, false);
+  const events = (await store.getRun("mcp-audit"))?.record.events ?? [];
+  const ran = events.find((e) => e.tool === "run:Api:deploy");
+  assertEquals(ran?.outcome, "ok");
+  // The safe control flag is recorded; the token is dropped entirely — and its
+  // value appears nowhere in the durable trail.
+  assertEquals(ran?.args.dryRun, "true");
+  assertEquals("operatorToken" in (ran?.args ?? {}), false);
+  assertEquals(JSON.stringify(events).includes("good-token"), false);
+});
+
+Deno.test("the HTTP banner names the registry mode, run state, and auth", async () => {
+  const registry = new FakeRegistry();
+  registry.add(descriptor("Api", ["deploy"]));
+  const banner: string[] = [];
+  const origErr = console.error;
+  console.error = (...a: unknown[]) => void banner.push(a.join(" "));
+  try {
+    // An injected registry (the `registry` option) and the CLI's `useRegistry`
+    // flag must both be reported as registry mode.
+    for (const mode of ["injected", "resolved"] as const) {
+      const ac = new AbortController();
+      let setPort = (_: number) => {};
+      const portReady = new Promise<number>((r) => (setPort = r));
+      const finished = serveMcp(new RegistryBuild(registry), {
+        ...(mode === "injected" ? { registry } : { useRegistry: true }),
+        allowRun: true,
+        runner: recordingRunner().runner,
+        http: { host: "127.0.0.1", port: 0 },
+        token: "shh",
+        signal: ac.signal,
+        onListen: (a) => setPort(a.port),
+      });
+      await portReady;
+      ac.abort();
+      assertEquals(await finished, 0);
+    }
+  } finally {
+    console.error = origErr;
+  }
+  const text = banner.join("\n");
+  assertStringIncludes(text, "registry, run enabled");
+  assertStringIncludes(text, "bearer token required");
+  assertStringIncludes(text, "http://127.0.0.1:");
+});
+
+Deno.test("a valid number default is carried; a malformed boolean default is dropped", async () => {
+  const registry = new FakeRegistry();
+  const base = descriptor("Api", ["deploy"]);
+  registry.add({
+    ...base,
+    surface: {
+      ...base.surface,
+      // A described target: the run tool's description must carry it through.
+      targets: base.surface.targets.map((t) => ({
+        ...t,
+        description: "Ship it to production",
+      })),
+      parameters: [
+        {
+          name: "workers",
+          flag: "workers",
+          description: "",
+          required: false,
+          kind: "number",
+          boolean: false,
+          array: false,
+          options: [],
+          default: "4",
+        },
+        // Only "true"/"false" are honest boolean defaults; anything else came
+        // from an untrusted descriptor and is dropped to keep the schema valid.
+        {
+          name: "force",
+          flag: "force",
+          description: "",
+          required: false,
+          kind: "boolean",
+          boolean: true,
+          array: false,
+          options: [],
+          default: "yes",
+        },
+      ],
+    },
+  });
+  const server = new RegistryMcpServer(registry, { allowRun: true });
+  const res = await server.handleMessage(req("tools/list"));
+  const schema = runToolSchema(res, "run:Api:deploy");
+  const props = schemaProps(schema);
+  assertEquals(props.workers, { type: "number", default: 4 });
+  assertEquals(props.force, { type: "boolean" });
+  const tool = toolDef(res, "run:Api:deploy");
+  assertEquals(
+    typeof tool.description === "string" &&
+      tool.description.includes("Ship it to production"),
+    true,
+  );
+});
+
+Deno.test("a protected dependency the surface does not declare still gates the run", async () => {
+  const registry = new FakeRegistry();
+  // `release` names a dependency with no target entry of its own — a partial
+  // surface from an out-of-date registration. The closure walk must neither
+  // crash on it nor let it slip past the protect list.
+  const base = descriptor("Api", ["release"]);
+  registry.add({
+    ...base,
+    surface: {
+      ...base.surface,
+      targets: base.surface.targets.map((t) => ({
+        ...t,
+        dependsOn: ["ghost"],
+      })),
+    },
+  });
+  const { runner, calls } = recordingRunner();
+  const server = new RegistryMcpServer(registry, {
+    allowRun: true,
+    protectPatterns: ["Api:ghost"],
+    operatorToken: "good-token",
+    runner,
+  });
+  const denied = await call(server, "run:Api:release");
+  assertEquals(denied.isError, true);
+  assertStringIncludes(denied.text, "missing_operator_token");
+  assertEquals(calls.length, 0);
+});
+
+Deno.test("a runner rejecting with a non-Error is still a structured failure", async () => {
+  const registry = new FakeRegistry();
+  registry.add(descriptor("Api", ["deploy"]));
+  // Not an Error instance: the message must fall back to a generic kind, and
+  // the raw rejection value must not leak into the result.
+  const runner: RegistryRunner = () =>
+    Promise.reject("exec fell over: token=abc");
+  const server = new RegistryMcpServer(registry, { allowRun: true, runner });
+  const result = await call(server, "run:Api:deploy");
+  assertEquals(result.isError, true);
+  assertStringIncludes(result.text, "Failed to spawn Api:deploy (Error)");
+  assertEquals(result.text.includes("token=abc"), false);
+});
+
+// ---- M15: the caller's kind and roles reach the child -----------------------
+
+/**
+ * A child program printing the three actor variables as `actor|kind|roles`.
+ * An unset variable prints `-`, but an empty role list prints `NONE`: Windows
+ * can drop an empty-valued variable from a spawned environment altogether, so
+ * "no roles" is asserted as unset-or-empty rather than exactly `""`.
+ */
+const ACTOR_ECHO = "const v = (n: string) => Deno.env.get(n) ?? '-'; " +
+  "console.log([v('ZUKE_ACTOR'), v('ZUKE_ACTOR_KIND'), " +
+  "Deno.env.get('ZUKE_ACTOR_ROLES') || 'NONE'].join('|'))";
+
+/** Run `fn` with `vars` set in this process's environment, restoring them after. */
+async function withEnv(
+  vars: Record<string, string>,
+  fn: () => Promise<void>,
+): Promise<void> {
+  const prev = Object.keys(vars).map((
+    k,
+  ): [string, string | undefined] => [k, Deno.env.get(k)]);
+  for (const [k, v] of Object.entries(vars)) Deno.env.set(k, v);
+  try {
+    await fn();
+  } finally {
+    for (const [k, v] of prev) {
+      if (v === undefined) Deno.env.delete(k);
+      else Deno.env.set(k, v);
+    }
+  }
+}
+
+Deno.test("an authenticated run passes the caller's kind and roles to the runner", async () => {
+  const registry = new FakeRegistry();
+  registry.add(descriptor("Api", ["deploy"]));
+  const { runner, calls } = recordingRunner();
+  const server = new RegistryMcpServer(registry, {
+    allowRun: true,
+    runner,
+    actor: "config-actor", // overridden by the authenticator, as for the actor
+    authenticator: authenticatorFromHook((ctx) => {
+      const sub = ctx.headers.get("x-user");
+      if (sub === null) throw new Error("no identity from proxy");
+      return sub === "scheduler"
+        ? { actor: sub, kind: "service", roles: ["deployer", "reader"] }
+        : { actor: sub };
+    }),
+  });
+
+  const res = await callWith(server, "run:Api:deploy", {
+    "x-user": "scheduler",
+  });
+  assertEquals(res?.result !== undefined, true);
+  assertEquals(calls.length, 1);
+  assertEquals(calls[0].actor, "scheduler");
+  assertEquals(calls[0].actorKind, "service");
+  assertEquals(calls[0].actorRoles, ["deployer", "reader"]);
+
+  // A bare `{ actor }` settles to the conservative defaults before the spawn:
+  // the runner never sees an unstated claim it would have to default itself.
+  await callWith(server, "run:Api:deploy", { "x-user": "engineer-a" });
+  assertEquals(calls.length, 2);
+  assertEquals(calls[1].actor, "engineer-a");
+  assertEquals(calls[1].actorKind, "human");
+  assertEquals(calls[1].actorRoles, []);
+});
+
+Deno.test("without an authenticator the runner gets the actor and no claim", async () => {
+  const registry = new FakeRegistry();
+  registry.add(descriptor("Api", ["deploy"]));
+  const { runner, calls } = recordingRunner();
+  const server = new RegistryMcpServer(registry, {
+    allowRun: true,
+    runner,
+    actor: "ci-bot",
+  });
+  assertEquals((await call(server, "run:Api:deploy")).isError, false);
+  assertEquals(calls.length, 1);
+  // The resolved actor still flows; kind and roles are left unstated, so the
+  // defaults are the runner's to apply rather than the server's to invent.
+  assertEquals(calls[0].actor, "ci-bot");
+  assertEquals(calls[0].actorKind, undefined);
+  assertEquals(calls[0].actorRoles, undefined);
+});
+
+Deno.test("defaultRegistryRunner exports the actor, kind and roles", async () => {
+  const withRoles = await defaultRegistryRunner(
+    [Deno.execPath(), "eval", ACTOR_ECHO],
+    Deno.cwd(),
+    {
+      actor: "scheduler",
+      actorKind: "service",
+      actorRoles: ["deployer", "reader"],
+    },
+  );
+  assertEquals(withRoles.code, 0);
+  assertEquals(withRoles.stdout.trim(), "scheduler|service|deployer,reader");
+
+  // A caller with no roles: the variable is still exported, and it is empty.
+  const noRoles = await defaultRegistryRunner(
+    [Deno.execPath(), "eval", ACTOR_ECHO],
+    Deno.cwd(),
+    { actor: "engineer-a", actorKind: "human", actorRoles: [] },
+  );
+  assertEquals(noRoles.code, 0);
+  assertEquals(noRoles.stdout.trim(), "engineer-a|human|NONE");
+});
+
+Deno.test("a fresh actor never inherits the parent's kind and roles", async () => {
+  // The privilege-inheritance case: the server process itself runs as a
+  // privileged service, and a spawn for an unprivileged human caller must not
+  // hand the child that actor beside the parent's entitlements.
+  await withEnv(
+    { ZUKE_ACTOR_KIND: "service", ZUKE_ACTOR_ROLES: "operator" },
+    async () => {
+      const result = await defaultRegistryRunner(
+        [Deno.execPath(), "eval", ACTOR_ECHO],
+        Deno.cwd(),
+        { actor: "engineer-a" },
+      );
+      assertEquals(result.code, 0);
+      // The three moved together: neither inherited value survived.
+      assertEquals(result.stdout.trim(), "engineer-a|human|NONE");
+    },
+  );
+});
+
+Deno.test("with no actor the inherited environment is left alone", async () => {
+  // No actor means no claim to overwrite the inherited one with — a local
+  // stdio server keeps attributing runs the way the environment already did.
+  await withEnv(
+    {
+      ZUKE_ACTOR: "inherited-actor",
+      ZUKE_ACTOR_KIND: "service",
+      ZUKE_ACTOR_ROLES: "operator",
+    },
+    async () => {
+      const result = await defaultRegistryRunner(
+        [Deno.execPath(), "eval", ACTOR_ECHO],
+        Deno.cwd(),
+      );
+      assertEquals(result.code, 0);
+      assertEquals(result.stdout.trim(), "inherited-actor|service|operator");
+    },
+  );
+});
+
+Deno.test("kind and roles without an actor change nothing", async () => {
+  // The three describe one caller, so they are written together or not at all.
+  // Honouring a supplied kind/roles here would pair one caller's entitlements
+  // with the *inherited* actor — exactly the mismatch the coupling exists to
+  // prevent — so they are ignored, and the inherited triple stays internally
+  // consistent. Unreachable from the server (its actor floors at "anonymous"),
+  // but `defaultRegistryRunner` is exported, so the contract is pinned here.
+  await withEnv(
+    {
+      ZUKE_ACTOR: "inherited-actor",
+      ZUKE_ACTOR_KIND: "service",
+      ZUKE_ACTOR_ROLES: "operator",
+    },
+    async () => {
+      for (
+        const options of [
+          { actorKind: "service" as const, actorRoles: ["admin"] },
+          { actor: "", actorKind: "service" as const, actorRoles: ["admin"] },
+        ]
+      ) {
+        const result = await defaultRegistryRunner(
+          [Deno.execPath(), "eval", ACTOR_ECHO],
+          Deno.cwd(),
+          options,
+        );
+        assertEquals(result.code, 0);
+        assertEquals(
+          result.stdout.trim(),
+          "inherited-actor|service|operator",
+          JSON.stringify(options),
+        );
+      }
+    },
+  );
+});
+
+Deno.test("the server's tokens are stripped beside the exported claim", async () => {
+  await withEnv(
+    { ZUKE_OPERATOR_TOKEN: "server-secret", ZUKE_MCP_TOKEN: "bearer-secret" },
+    async () => {
+      const result = await defaultRegistryRunner(
+        [
+          Deno.execPath(),
+          "eval",
+          "console.log(Deno.env.get('ZUKE_OPERATOR_TOKEN') ?? 'STRIPPED', " +
+          "Deno.env.get('ZUKE_MCP_TOKEN') ?? 'STRIPPED', " +
+          "Deno.env.get('ZUKE_ACTOR') ?? '-')",
+        ],
+        Deno.cwd(),
+        { actor: "engineer-a", actorKind: "service", actorRoles: ["ops"] },
+      );
+      assertEquals(result.code, 0);
+      // Exporting the caller's claim does not reopen the secrets it replaced.
+      assertStringIncludes(result.stdout, "STRIPPED STRIPPED engineer-a");
+    },
+  );
 });

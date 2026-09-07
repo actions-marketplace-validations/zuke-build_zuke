@@ -1,5 +1,41 @@
 # Changelog
 
+## [1.4.0](https://github.com/zuke-build/zuke/compare/deno-v1.3.0...deno-v1.4.0) (2026-09-02)
+
+
+### Features
+
+* linters and checkers report their findings on the build summary ([#460](https://github.com/zuke-build/zuke/issues/460)) ([dae6ebd](https://github.com/zuke-build/zuke/commit/dae6ebd33efb56c194e847265c56715bef83a6c1)), closes [#458](https://github.com/zuke-build/zuke/issues/458)
+* report test counts from every test-runner wrapper ([#461](https://github.com/zuke-build/zuke/issues/461)) ([2256d1e](https://github.com/zuke-build/zuke/commit/2256d1e41609067d42f40e3bc6107d3cec4fd379))
+
+## [1.3.0](https://github.com/zuke-build/zuke/compare/deno-v1.2.0...deno-v1.3.0) (2026-09-02)
+
+
+### Features
+
+* **deno:** report test counts and coverage percentages into the build summary ([#452](https://github.com/zuke-build/zuke/issues/452)) ([29b974d](https://github.com/zuke-build/zuke/commit/29b974d0be44f9ea5d7abc495a52714ab70880ef))
+
+## [1.2.0](https://github.com/zuke-build/zuke/compare/deno-v1.1.0...deno-v1.2.0) (2026-08-29)
+
+
+### Features
+
+* **deno:** complete the flags on the subcommands already wrapped ([#418](https://github.com/zuke-build/zuke/issues/418)) ([ca19e1c](https://github.com/zuke-build/zuke/commit/ca19e1c5fe13065837a6cb79faac3f51d6cafeff))
+
+## [1.1.0](https://github.com/zuke-build/zuke/compare/deno-v1.0.1...deno-v1.1.0) (2026-08-29)
+
+
+### Features
+
+* **deno:** wrap the subcommands the package was missing ([#417](https://github.com/zuke-build/zuke/issues/417)) ([e2c495c](https://github.com/zuke-build/zuke/commit/e2c495c7379aefb6b94f665100e598b58d0b8431))
+
+## [1.0.1](https://github.com/zuke-build/zuke/compare/deno-v1.0.0...deno-v1.0.1) (2026-08-13)
+
+
+### Bug Fixes
+
+* **cli:** escape line separators in generated literals; license headers and review docs ([#347](https://github.com/zuke-build/zuke/issues/347)) ([114f842](https://github.com/zuke-build/zuke/commit/114f84246e83fc6fb0bd12b55e8eb04192978074))
+
 ## [1.0.0](https://github.com/zuke-build/zuke/compare/deno-v0.8.0...deno-v1.0.0) (2026-07-30)
 
 

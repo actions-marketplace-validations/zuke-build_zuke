@@ -1,3 +1,6 @@
+// Copyright (c) 2026 the Zuke contributors
+// SPDX-License-Identifier: MIT
+
 /**
  * `NodeTasks` — typed task functions for the Node.js runtime `node`, in the
  * same settings-lambda style as the other Zuke tool wrappers: configure a
@@ -8,12 +11,15 @@
  * executes a script (`node [options] <script> [args]`),
  * {@link NodeTasks.eval} evaluates inline code (`node --eval <code>`), and
  * {@link NodeTasks.test} runs the built-in test runner (`node --test`).
+ * {@link NodeTasks.evaluate} is the one that is not a plain command: it imports
+ * a module and hands the target back its export's value.
  *
  * ```ts
  * import { NodeTasks } from "jsr:@zuke/node";
  * await NodeTasks.run((s) => s.script("server.js").enableSourceMaps());
  * await NodeTasks.eval((s) => s.code("console.log(process.version)"));
  * await NodeTasks.test((s) => s.paths("test/").experimentalTestCoverage());
+ * const spec = await NodeTasks.evaluate("tools/openapi.mjs");
  * ```
  *
  * Node runtime options always precede the script (or positional) arguments, as
@@ -23,21 +29,13 @@
  * @module
  */
 
-import {
-  type Configure,
-  type PathLike,
-  runSettings,
-  ToolSettings,
-} from "@zuke/core/tooling";
+import { type Configure, type PathLike, runSettings } from "@zuke/core/tooling";
 import type { CommandOutput } from "@zuke/core/shell";
-
-/** Shared base for every `node` task: it pins the binary to `node`. */
-export abstract class NodeSettings extends ToolSettings {
-  /** Pin the tool binary to `node`. */
-  protected override defaultTool(): string {
-    return "node";
-  }
-}
+import { reportTestCounts } from "@zuke/core";
+import { parseTestSummary } from "./test_summary.ts";
+import type { JsonValue } from "@zuke/core";
+import { NodeSettings } from "./settings.ts";
+import { evaluateModule, type NodeEvaluateSettings } from "./evaluate.ts";
 
 /** Settings for `node [options] <script> [args]`. */
 export class NodeRunSettings extends NodeSettings {
@@ -246,6 +244,12 @@ export class NodeTestSettings extends NodeSettings {
     return this;
   }
 
+  /** Report the run's counts onto the build summary (see the module docs). */
+  protected override onOutput(output: CommandOutput): void {
+    const counts = parseTestSummary(output);
+    if (counts !== undefined) reportTestCounts(counts);
+  }
+
   /** Assemble the `node --test [paths] [flags]` argv. */
   protected override buildArgs(): string[] {
     const argv = ["--test"];
@@ -276,6 +280,42 @@ export interface NodeTasksApi {
   eval(configure?: Configure<NodeEvalSettings>): Promise<CommandOutput>;
   /** Run the built-in test runner: `node --test`. */
   test(configure?: Configure<NodeTestSettings>): Promise<CommandOutput>;
+  /**
+   * Import a Node module and resolve to one of its exports' JSON value — the
+   * way a target reads something *out* of the Node side of a project (an
+   * OpenAPI document, a resolved config) instead of shelling out to a script
+   * that has to write it somewhere first.
+   *
+   * `module` is a path, resolved against the working directory. The export
+   * (`default` unless {@link NodeEvaluateSettings.export} names another) is
+   * awaited; when it is a function it is called with
+   * {@link NodeEvaluateSettings.callWith}'s arguments first.
+   *
+   * ```ts
+   * // tools/openapi.mjs: export default async () => document
+   * const spec = await NodeTasks.evaluate("tools/openapi.mjs");
+   * ```
+   *
+   * The evaluation waits for the Node process to exit, so a module that leaves
+   * a live handle on the event loop (a server, a pool, a timer) would block on
+   * a value it has already produced. {@link NodeEvaluateSettings.exitAfterResult}
+   * ends the process as soon as the result has been written, for modules in
+   * that shape.
+   *
+   * The module runs as a real Node process with the build's own permissions —
+   * the same trust level as a script handed to {@link NodeTasks.run}, and the
+   * reason this is a build-authoring API rather than an input-processing one.
+   * `module` is code: build it from a literal or from the project's own layout,
+   * never from an untrusted source (a pull request title, a webhook payload),
+   * exactly as for every other command a build spawns. Values passed through
+   * {@link NodeEvaluateSettings.callWith} cannot inject into the driver — they
+   * are embedded as JSON literals — but they do reach the module, so whatever
+   * the module does with them is the module's contract to uphold.
+   */
+  evaluate(
+    module: PathLike,
+    configure?: Configure<NodeEvaluateSettings>,
+  ): Promise<JsonValue>;
 }
 
 /** Typed task functions for the Node.js runtime `node`. */
@@ -291,5 +331,12 @@ export const NodeTasks: NodeTasksApi = {
   /** Run the built-in test runner: `node --test`. */
   test(configure?: Configure<NodeTestSettings>): Promise<CommandOutput> {
     return runSettings(new NodeTestSettings(), configure);
+  },
+  /** Import a module and resolve to one export's JSON value. */
+  evaluate(
+    module: PathLike,
+    configure?: Configure<NodeEvaluateSettings>,
+  ): Promise<JsonValue> {
+    return evaluateModule(module, configure);
   },
 };

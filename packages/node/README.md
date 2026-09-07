@@ -35,11 +35,14 @@ Every path argument accepts either a string or an `AbsolutePath` from
 Configure a fluent settings object in a lambda; the task builds the argv and
 runs it. The task names mirror common `node` invocations: `run` executes a
 script, `eval` evaluates inline code, and `test` runs the built-in test
-runner.
+runner. `evaluate` is the exception — it imports a module and resolves to one
+of its exports' JSON value, so a target can read something out of the Node
+side of a project instead of shelling out to a script.
 
 ```ts
 import { NodeTasks } from "jsr:@zuke/node";
 await NodeTasks.run((s) => s.script("server.js").enableSourceMaps());
+const spec = await NodeTasks.evaluate("tools/openapi.mjs");
 ```
 @module
 
@@ -59,6 +62,54 @@ class NodeEvalSettings extends NodeSettings
     Print the result of the evaluated code (`--print` instead of `--eval`).
   override protected buildArgs(): string[]
     Assemble the `node --eval <code>` (or `--print`) argv.
+
+class NodeEvaluateSettings extends NodeSettings
+  Settings for {@link "./node.ts".NodeTasks.evaluate} — which export of the
+  module to take, and what to call it with.
+
+  constructor(module: PathLike)
+    Evaluate `module`, a path resolved against the working directory.
+  export(name: string): this
+    The named export to take, instead of the default one.
+
+    The export is awaited; when it is a function it is called first, with
+    {@link callWith}'s arguments.
+  callWith(...values: JsonValue[]): this
+    Arguments for the exported function, in order. Each must be
+    JSON-serialisable — they cross a process boundary as JSON.
+
+    Named `callWith` rather than `args` because `ToolSettings.args` already
+    means "append raw arguments to the `node` command line", which is a
+    different thing.
+  exitAfterResult(): this
+    End the Node process as soon as the result has been written, instead of
+    waiting for the module to let Node exit on its own.
+
+    A module that leaves a live handle on the event loop — an HTTP server, a
+    database pool, a timer — never exits, and the evaluation then blocks
+    forever on a value it has already produced and written. This makes the
+    driver exit once that write has flushed, so such a module can be evaluated
+    as it is, without a `process.exit` of its own.
+
+    What the module does after handing back its value does not happen. The
+    process ends at the write, so anything it would still print is cut off,
+    anything it would still do — a `beforeExit` handler, a teardown scheduled
+    on the next tick, a flush that has not been awaited — does not run, and its
+    own exit code is no longer observed (the driver exits `0`). That is the
+    trade the option makes, and why it is opt-in rather than the default:
+    choose it for a module whose value is the whole point of running it, and
+    whose remaining work is process teardown the operating system is about to
+    do anyway. A module whose after-the-value work matters — one that writes
+    a file, commits a transaction, or reports its own failure through an exit
+    code — should keep the default and be given a way to exit on its own.
+
+    Two shapes are unaffected either way: a module that throws before producing
+    a result still rejects the evaluation, since the driver never reaches its
+    final write, and a module that exits on its own never notices the option.
+  get module(): string
+    The module being evaluated, for error messages.
+  override protected buildArgs(): string[]
+    Assemble the `node --input-type=module --eval <driver>` argv.
 
 class NodeRunSettings extends NodeSettings
   Settings for `node [options] <script> [args]`.
@@ -113,6 +164,8 @@ class NodeTestSettings extends NodeSettings
     Re-run tests on file changes (`--watch`).
   experimentalTestCoverage(): this
     Collect and report test coverage (`--experimental-test-coverage`).
+  override protected onOutput(output: CommandOutput): void
+    Report the run's counts onto the build summary (see the module docs).
   override protected buildArgs(): string[]
     Assemble the `node --test [paths] [flags]` argv.
 
@@ -125,6 +178,37 @@ interface NodeTasksApi
     Evaluate inline code: `node --eval <code>`.
   test(configure?: Configure<NodeTestSettings>): Promise<CommandOutput>
     Run the built-in test runner: `node --test`.
+  evaluate(module: PathLike, configure?: Configure<NodeEvaluateSettings>): Promise<JsonValue>
+    Import a Node module and resolve to one of its exports' JSON value — the
+    way a target reads something out of the Node side of a project (an
+    OpenAPI document, a resolved config) instead of shelling out to a script
+    that has to write it somewhere first.
+
+    `module` is a path, resolved against the working directory. The export
+    (`default` unless {@link NodeEvaluateSettings.export} names another) is
+    awaited; when it is a function it is called with
+    {@link NodeEvaluateSettings.callWith}'s arguments first.
+
+    ```ts
+    // tools/openapi.mjs: export default async () => document
+    const spec = await NodeTasks.evaluate("tools/openapi.mjs");
+    ```
+
+    The evaluation waits for the Node process to exit, so a module that leaves
+    a live handle on the event loop (a server, a pool, a timer) would block on
+    a value it has already produced. {@link NodeEvaluateSettings.exitAfterResult}
+    ends the process as soon as the result has been written, for modules in
+    that shape.
+
+    The module runs as a real Node process with the build's own permissions —
+    the same trust level as a script handed to {@link NodeTasks.run}, and the
+    reason this is a build-authoring API rather than an input-processing one.
+    `module` is code: build it from a literal or from the project's own layout,
+    never from an untrusted source (a pull request title, a webhook payload),
+    exactly as for every other command a build spawns. Values passed through
+    {@link NodeEvaluateSettings.callWith} cannot inject into the driver — they
+    are embedded as JSON literals — but they do reach the module, so whatever
+    the module does with them is the module's contract to uphold.
 ````
 
 </details>

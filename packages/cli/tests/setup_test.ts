@@ -1,4 +1,11 @@
-import { assertEquals, assertRejects } from "../../core/tests/_assert.ts";
+// Copyright (c) 2026 the Zuke contributors
+// SPDX-License-Identifier: MIT
+
+import {
+  assertEquals,
+  assertRejects,
+  assertStringIncludes,
+} from "../../core/tests/_assert.ts";
 import {
   defaultHost,
   isRecord,
@@ -11,6 +18,7 @@ import {
   zukeTaskState,
 } from "../src/setup.ts";
 import { FakeHost } from "./_fakes.ts";
+import { withTemp } from "../../core/tests/_temp.ts";
 
 Deno.test("isRecord distinguishes plain objects", () => {
   assertEquals(isRecord({}), true);
@@ -52,11 +60,9 @@ Deno.test("scaffolded launchers never pipe an unverified install script", () => 
     assertEquals(script.includes("| sh"), false);
     assertEquals(script.includes("Invoke-Expression"), false);
     assertEquals(script.includes("Deno not found on PATH"), true);
-    assertEquals(
-      script.includes(
-        "https://docs.deno.com/runtime/getting_started/installation/",
-      ),
-      true,
+    assertStringIncludes(
+      script,
+      "https://docs.deno.com/runtime/getting_started/installation/",
     );
   }
 });
@@ -333,8 +339,7 @@ Deno.test("runSetup leaves an unparseable deno.json alone", async () => {
 });
 
 Deno.test("runSetup writes to disk via the default host", async () => {
-  const dir = await Deno.makeTempDir();
-  try {
+  await withTemp(async (dir) => {
     const result = await runSetup({ dir, force: false, name: "Acme" });
     assertEquals(result.files.length, 6);
     const zukeTs = await Deno.readTextFile(`${dir}/zuke.ts`);
@@ -348,9 +353,7 @@ Deno.test("runSetup writes to disk via the default host", async () => {
     // Second pass: everything now exists and is left untouched.
     const again = await runSetup({ dir, force: false, name: "Acme" });
     assertEquals(again.files.every((f) => f.status === "skipped"), true);
-  } finally {
-    await Deno.remove(dir, { recursive: true });
-  }
+  });
 });
 
 Deno.test("defaultHost.exists rethrows non-NotFound errors", async () => {
@@ -365,8 +368,7 @@ Deno.test("defaultHost.exists rethrows non-NotFound errors", async () => {
 });
 
 Deno.test("defaultHost.isDirectory distinguishes dirs, files, and missing paths", async () => {
-  const dir = await Deno.makeTempDir();
-  try {
+  await withTemp(async (dir) => {
     assertEquals(await defaultHost.isDirectory(dir), true);
     const file = `${dir}/f.txt`;
     await Deno.writeTextFile(file, "x");
@@ -376,7 +378,5 @@ Deno.test("defaultHost.isDirectory distinguishes dirs, files, and missing paths"
       // A non-NotFound error (NotADirectory) must propagate, not be swallowed.
       await assertRejects(() => defaultHost.isDirectory(`${file}/child`));
     }
-  } finally {
-    await Deno.remove(dir, { recursive: true });
-  }
+  });
 });

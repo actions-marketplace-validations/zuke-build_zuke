@@ -1,3 +1,6 @@
+// Copyright (c) 2026 the Zuke contributors
+// SPDX-License-Identifier: MIT
+
 import { assertEquals, assertRejects } from "../../core/tests/_assert.ts";
 import { ToolNotFoundError } from "@zuke/core/tooling";
 import {
@@ -15,7 +18,7 @@ Deno.test("the default binary is vite", () => {
   assertEquals(new ViteDevSettings().argv()[0], "vite");
 });
 
-Deno.test("dev: bare and all options (shared config/mode + host/port/open)", () => {
+Deno.test("dev: bare and all options (shared config/mode + host/port/strictPort/open)", () => {
   assertEquals(new ViteDevSettings().argv().slice(1), ["dev"]);
   assertEquals(
     new ViteDevSettings()
@@ -23,6 +26,7 @@ Deno.test("dev: bare and all options (shared config/mode + host/port/open)", () 
       .mode("development")
       .host("0.0.0.0")
       .port(5173)
+      .strictPort()
       .open()
       .argv()
       .slice(1),
@@ -36,6 +40,7 @@ Deno.test("dev: bare and all options (shared config/mode + host/port/open)", () 
       "0.0.0.0",
       "--port",
       "5173",
+      "--strictPort",
       "--open",
     ],
   );
@@ -71,10 +76,17 @@ Deno.test("build: bare and all options", () => {
 Deno.test("preview: bare and all options", () => {
   assertEquals(new VitePreviewSettings().argv().slice(1), ["preview"]);
   assertEquals(
-    new VitePreviewSettings().host("localhost").port(4173).open().argv().slice(
-      1,
-    ),
-    ["preview", "--host", "localhost", "--port", "4173", "--open"],
+    new VitePreviewSettings().host("localhost").port(4173).strictPort().open()
+      .argv().slice(1),
+    [
+      "preview",
+      "--host",
+      "localhost",
+      "--port",
+      "4173",
+      "--strictPort",
+      "--open",
+    ],
   );
 });
 

@@ -1,11 +1,26 @@
+// Copyright (c) 2026 the Zuke contributors
+// SPDX-License-Identifier: MIT
+
 import { assertEquals, assertStringIncludes } from "./_assert.ts";
 import { Build, parameter, target } from "../mod.ts";
 import { McpServer, type McpServerOptions } from "../src/mcp/server.ts";
-import type { JsonRpcResponse } from "../src/mcp/jsonrpc.ts";
-import { FileSystemStateStore } from "../src/state/fs_store.ts";
-import { defaultStateHost } from "../src/state/store.ts";
+import {
+  authenticatorFromHook,
+  type McpAuthenticator,
+  UNAUTHORIZED,
+} from "../src/mcp/auth.ts";
+import type { McpTool } from "../src/mcp/protocol.ts";
+import {
+  EMPTY_CONTEXT,
+  INTERNAL_ERROR,
+  type JsonRpcResponse,
+} from "../src/mcp/jsonrpc.ts";
+import type { FileSystemStateStore } from "../src/state/fs_store.ts";
+import type { StateStore } from "../src/state/store.ts";
 import { AUDIT_RUN_ID } from "../src/mcp/audit.ts";
-import type { RunEvent, RunRecord } from "../src/state/types.ts";
+import type { RunEvent } from "../src/state/types.ts";
+import { runRecord } from "./_fakes.ts";
+import { withTempStore } from "./_store.ts";
 
 /** A build with a read-only, a plain, and a protected-worthy target, plus params. */
 class Demo extends Build {
@@ -59,18 +74,14 @@ async function toolList(
 }
 
 /** Run `fn` with a temp-dir store and a server built over it, then clean up. */
-async function withServer(
+function withServer(
   options: Omit<McpServerOptions, "stateStore">,
   fn: (server: McpServer, store: FileSystemStateStore) => Promise<void>,
 ): Promise<void> {
-  const dir = await Deno.makeTempDir();
-  try {
-    const store = new FileSystemStateStore(`${dir}/runs`, defaultStateHost);
+  return withTempStore((store) => {
     const server = new McpServer(new Demo(), { ...options, stateStore: store });
-    await fn(server, store);
-  } finally {
-    await Deno.remove(dir, { recursive: true });
-  }
+    return fn(server, store);
+  });
 }
 
 /** Read the audit trail from the store. */
@@ -295,7 +306,7 @@ async function seedSuspended(
   rootTarget: string,
 ): Promise<string> {
   const now = new Date().toISOString();
-  const record: RunRecord = {
+  const record = runRecord({
     id: `run-${rootTarget}`,
     build: "Demo",
     rootTarget,
@@ -304,11 +315,8 @@ async function seedSuspended(
     createdAt: now,
     updatedAt: now,
     graph: [{ name: rootTarget, dependsOn: [] }],
-    params: {},
     targets: { [rootTarget]: { status: "waiting", meta: {} } },
-    signals: {},
-    events: [],
-  };
+  });
   const put = await store.putRun(record, null);
   if (!put.ok) throw new Error("failed to seed suspended run");
   return record.id;
@@ -414,9 +422,7 @@ Deno.test("a thrown framework error returns a structured result, not a crash", a
     }
     go = target().executes(() => {});
   }
-  const dir = await Deno.makeTempDir();
-  try {
-    const store = new FileSystemStateStore(`${dir}/runs`, defaultStateHost);
+  await withTempStore(async (store) => {
     const server = new McpServer(new Boom(), {
       allowRun: true,
       stateStore: store,
@@ -429,9 +435,7 @@ Deno.test("a thrown framework error returns a structured result, not a crash", a
     // The failure is audited.
     const events = await auditEvents(store);
     assertEquals(events.find((e) => e.tool === "run:go")?.outcome, "error");
-  } finally {
-    await Deno.remove(dir, { recursive: true });
-  }
+  });
 });
 
 // ---- M13: trusted per-call identity ----------------------------------------
@@ -457,7 +461,11 @@ const xUser = (ctx: { headers: Headers }): { actor: string } => {
 };
 
 Deno.test("an identity hook overrides --actor and the client label", async () => {
-  await withServer({ allowRun: true, actor: "ci-bot", identity: xUser }, async (
+  await withServer({
+    allowRun: true,
+    actor: "ci-bot",
+    authenticator: authenticatorFromHook(xUser),
+  }, async (
     server,
     store,
   ) => {
@@ -478,7 +486,7 @@ Deno.test("an identity hook overrides --actor and the client label", async () =>
 
 Deno.test("a run and a later signal are attributed to their own callers", async () => {
   await withServer(
-    { allowRun: true, identity: xUser },
+    { allowRun: true, authenticator: authenticatorFromHook(xUser) },
     async (server, store) => {
       // Engineer A runs deploy…
       await callWith(server, "run:deploy", { "x-user": "engineer-a" }, {
@@ -505,7 +513,7 @@ Deno.test("a run and a later signal are attributed to their own callers", async 
 
 Deno.test("a throwing identity hook rejects the request and writes nothing", async () => {
   await withServer(
-    { allowRun: true, identity: xUser },
+    { allowRun: true, authenticator: authenticatorFromHook(xUser) },
     async (server, store) => {
       // No `x-user` header → the hook throws → a JSON-RPC auth error.
       const res = await callWith(server, "run:deploy", {}, {
@@ -527,7 +535,9 @@ Deno.test("a hook yielding an empty actor is rejected, never the static fallback
     {
       allowRun: true,
       actor: "ci-bot",
-      identity: (ctx) => ({ actor: ctx.headers.get("x-user") ?? "" }),
+      authenticator: authenticatorFromHook(
+        (ctx) => ({ actor: ctx.headers.get("x-user") ?? "" }),
+      ),
     },
     async (server, store) => {
       const res = await callWith(server, "run:deploy", {}, {
@@ -538,4 +548,520 @@ Deno.test("a hook yielding an empty actor is rejected, never the static fallback
       assertEquals((await auditEvents(store)).length, 0);
     },
   );
+});
+
+// ---- backstops, schemas, and audit resilience -------------------------------
+
+/** Whether a JSON value is a plain object (a string-keyed record). */
+function isRec(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/** One run tool's input schema from `tools/list`, navigated without casts. */
+async function toolSchema(
+  server: McpServer,
+  name: string,
+): Promise<{ properties: Record<string, unknown>; required: string[] }> {
+  const res = await server.handleMessage(req("tools/list"));
+  if (!isRec(res) || !isRec(res.result) || !Array.isArray(res.result.tools)) {
+    throw new Error("no tools");
+  }
+  for (const tool of res.result.tools) {
+    if (!isRec(tool) || tool.name !== name || !isRec(tool.inputSchema)) {
+      continue;
+    }
+    const properties = isRec(tool.inputSchema.properties)
+      ? tool.inputSchema.properties
+      : {};
+    const required = Array.isArray(tool.inputSchema.required)
+      ? tool.inputSchema.required.filter((r): r is string =>
+        typeof r === "string"
+      )
+      : [];
+    return { properties, required };
+  }
+  throw new Error(`no tool ${name}`);
+}
+
+Deno.test("an array parameter is advertised as an array-of-strings schema", async () => {
+  class WithTags extends Build {
+    tags = parameter("Image tags").array();
+    ship = target().executes(() => {});
+  }
+  const server = new McpServer(new WithTags(), { allowRun: true });
+  const { properties } = await toolSchema(server, "run:ship");
+  assertEquals(properties.tags, { type: "array", items: { type: "string" } });
+});
+
+Deno.test("confirm-destructive advertises confirm on destructive tools only", async () => {
+  await withServer(
+    { allowRun: true, confirmDestructive: true },
+    async (server) => {
+      const deploy = await toolSchema(server, "run:deploy");
+      assertEquals(isRec(deploy.properties.confirm), true);
+      // A read-only target is never gated, so it advertises no confirm.
+      const status = await toolSchema(server, "run:status");
+      assertEquals("confirm" in status.properties, false);
+    },
+  );
+});
+
+Deno.test("a mutating run tool without --allow-run is refused with guidance", async () => {
+  await withServer({ allowRun: false }, async (server) => {
+    for (const name of ["signal_run", "resume_check", "cancel_run"]) {
+      const refused = await call(server, name, { runId: "whatever" });
+      assertEquals(refused.isError, true, `${name} was not refused`);
+      assertStringIncludes(refused.text, name);
+      assertStringIncludes(refused.text, "--allow-run");
+    }
+  });
+});
+
+Deno.test("with a store, an unknown tool still gets the opaque unknown answer", async () => {
+  // The run-state dispatcher must decline a name it does not own (returning
+  // null), so the server falls through to the standard "Unknown tool" result.
+  await withServer({ allowRun: true }, async (server) => {
+    const unknown = await call(server, "definitely_not_a_tool");
+    assertEquals(unknown.isError, true);
+    assertStringIncludes(unknown.text, "Unknown tool: definitely_not_a_tool");
+  });
+});
+
+/** A store whose every operation rejects (a dead state backend). */
+class BrokenStore implements StateStore {
+  #die(): Promise<never> {
+    return Promise.reject(new Error("store down: confidential backend detail"));
+  }
+  getRun(): ReturnType<StateStore["getRun"]> {
+    return this.#die();
+  }
+  putRun(): ReturnType<StateStore["putRun"]> {
+    return this.#die();
+  }
+  listRuns(): ReturnType<StateStore["listRuns"]> {
+    return this.#die();
+  }
+  deleteRun(): Promise<void> {
+    return this.#die();
+  }
+  acquireLock(): ReturnType<StateStore["acquireLock"]> {
+    return this.#die();
+  }
+  renewLock(): Promise<boolean> {
+    return this.#die();
+  }
+  releaseLock(): Promise<void> {
+    return this.#die();
+  }
+}
+
+Deno.test("a dead audit store never blocks or fails the tool call", async () => {
+  // Auditing is best-effort: the run must succeed even though every audit
+  // write rejects.
+  const server = new McpServer(new Demo(), {
+    allowRun: true,
+    stateStore: new BrokenStore(),
+  });
+  const res = await call(server, "run:deploy", { environment: "dev" });
+  assertEquals(res.isError, false);
+  assertStringIncludes(res.text, "deploy succeeded");
+});
+
+Deno.test("a store fault in a read tool is a generic JSON-RPC error, detail withheld", async () => {
+  const server = new McpServer(new Demo(), {
+    allowRun: true,
+    stateStore: new BrokenStore(),
+  });
+  const res = await server.handleMessage(
+    req("tools/call", { name: "list_runs", arguments: {} }),
+  );
+  assertEquals(res?.error?.code, INTERNAL_ERROR);
+  // The raw store message never escapes to the client.
+  assertEquals(JSON.stringify(res).includes("confidential"), false);
+  // The transport survives: the next message is answered normally.
+  assertEquals((await server.handleMessage(req("ping")))?.result, {});
+});
+
+Deno.test("a throwing tools/list is a JSON-RPC error, not a transport crash", async () => {
+  class ExplodingServer extends McpServer {
+    override tools(): McpTool[] {
+      throw new Error("tool listing exploded");
+    }
+  }
+  const server = new ExplodingServer(new Demo());
+  const res = await server.handleMessage(req("tools/list"));
+  assertEquals(res?.error?.code, INTERNAL_ERROR);
+  assertEquals(JSON.stringify(res).includes("exploded"), false);
+  assertEquals((await server.handleMessage(req("ping")))?.result, {});
+});
+
+Deno.test("an explicitly-undefined secret argument never seeds redaction", async () => {
+  // The redactor is seeded from supplied secret values. An `undefined` one
+  // must be skipped — seeding from it would redact the literal word
+  // "undefined" out of every other recorded argument.
+  await withServer(
+    { allowRun: true, actor: "agent" },
+    async (server, store) => {
+      await call(server, "run:deploy", {
+        environment: "dev",
+        secret: undefined,
+        note: "undefined is a fine word",
+      });
+      const last = (await auditEvents(store)).at(-1);
+      assertEquals(last?.args.note, "undefined is a fine word");
+      assertEquals(last?.args.secret, "[redacted]");
+    },
+  );
+});
+
+Deno.test("a non-Error framework throw is reported by kind, generically", async () => {
+  // A framework failure that is not even an Error object must still produce
+  // the structured "errored during execution" result, not a crash — and the
+  // thrown value itself is never echoed (it bypassed the reporter's redaction).
+  class BoomString extends Build {
+    override onStart(): void {
+      throw "startup exploded: hunter2";
+    }
+    go = target().executes(() => {});
+  }
+  const server = new McpServer(new BoomString(), { allowRun: true });
+  const res = await call(server, "run:go");
+  assertEquals(res.isError, true);
+  assertStringIncludes(res.text, "errored during execution (Error)");
+  assertEquals(res.text.includes("hunter2"), false);
+});
+
+Deno.test("null and object argument values are recorded faithfully in the trail", async () => {
+  await withServer(
+    { allowRun: true, actor: "agent" },
+    async (server, store) => {
+      // Both are invalid for a scalar parameter, so the call errors — and the
+      // audit record must render them distinctly: a structure as JSON, a null as
+      // its string form, never "[object Object]".
+      const res = await call(server, "run:deploy", {
+        environment: null,
+        note: { nested: 1 },
+      });
+      assertEquals(res.isError, true);
+      const last = (await auditEvents(store)).at(-1);
+      assertEquals(last?.detail, "invalid_arguments");
+      assertEquals(last?.args.environment, "null");
+      assertEquals(last?.args.note, '{"nested":1}');
+    },
+  );
+});
+
+// ---- M15: the authenticator seam ------------------------------------------
+
+/**
+ * An authenticator that settles only on a later microtask — the shape a real
+ * one has (a token introspection call, a key-set lookup), and header-trusting,
+ * so it refuses wherever there are no headers.
+ */
+const asyncProxy: McpAuthenticator = {
+  authenticate: async (ctx) => {
+    const sub = await Promise.resolve(ctx.headers.get("x-user"));
+    return sub === null ? UNAUTHORIZED : {
+      actor: sub,
+      kind: "service",
+      roles: ["deployer"],
+      via: "oauth-proxy",
+    };
+  },
+};
+
+/** A build whose target records that it really ran. */
+class Recording extends Build {
+  readonly ran: string[] = [];
+  deploy = target().executes(() => void this.ran.push("deploy"));
+}
+
+Deno.test("an async authenticator attributes the run to its resolved actor", async () => {
+  await withServer(
+    { allowRun: true, actor: "ci-bot", authenticator: asyncProxy },
+    async (server, store) => {
+      await callWith(server, "run:deploy", { "x-user": "engineer-a" }, {
+        environment: "dev",
+      });
+      const deploy = (await auditEvents(store)).find((e) =>
+        e.tool === "run:deploy"
+      );
+      // Awaited, not dropped on the floor: the static --actor never applies.
+      assertEquals(deploy?.actor, "engineer-a");
+    },
+  );
+});
+
+Deno.test("a returned rejection refuses exactly as a throw does", async () => {
+  // The modern seam refuses by *returning* a reject; the older hook refuses by
+  // throwing. The *effect* must be identical — nothing executed, nothing
+  // audited, no result — while each still reports its own reason: a throw leaks
+  // nothing and collapses to the bare "Unauthorized", and an explicit reject
+  // says what it said. (Only the HTTP transport also carries the status and the
+  // challenge; JSON-RPC has nowhere to put them.)
+  const reject403: McpAuthenticator = {
+    authenticate: () => ({
+      status: 403,
+      error: "forbidden",
+      detail: "role missing",
+      challenge: 'Bearer realm="zuke"',
+    }),
+  };
+  const refusals: Array<JsonRpcResponse | null> = [];
+  for (const authenticator of [reject403, authenticatorFromHook(xUser)]) {
+    await withTempStore(async (store) => {
+      const build = new Recording();
+      const server = new McpServer(build, {
+        allowRun: true,
+        actor: "ci-bot",
+        stateStore: store,
+        authenticator,
+      });
+      refusals.push(
+        await server.handleMessage(
+          req("tools/call", { name: "run:deploy", arguments: {} }),
+        ),
+      );
+      assertEquals(build.ran, []); // nothing executed
+      assertEquals((await auditEvents(store)).length, 0); // nothing audited
+    });
+  }
+  assertEquals(refusals[0]?.result, undefined);
+  assertEquals(refusals[1]?.result, undefined);
+  assertEquals(refusals[0]?.error?.message, "forbidden: role missing");
+  assertEquals(refusals[1]?.error?.message, "Unauthorized");
+  assertEquals(refusals[0]?.error?.code, refusals[1]?.error?.code);
+});
+
+Deno.test("a transport-authenticated identity is used and skips the authenticator", async () => {
+  // The HTTP transport authenticates at its edge so a refusal can carry a real
+  // status; dispatch must then trust that caller and not authenticate twice.
+  let calls = 0;
+  const counting: McpAuthenticator = {
+    authenticate: () => {
+      calls += 1;
+      return { actor: "server-side" };
+    },
+  };
+  await withServer(
+    { allowRun: true, actor: "ci-bot", authenticator: counting },
+    async (server, store) => {
+      await server.handleMessage(
+        req("tools/call", {
+          name: "run:deploy",
+          arguments: { environment: "dev" },
+        }),
+        EMPTY_CONTEXT,
+        { actor: "edge-user", kind: "human", roles: [] },
+      );
+      assertEquals(calls, 0);
+      const deploy = (await auditEvents(store)).find((e) =>
+        e.tool === "run:deploy"
+      );
+      assertEquals(deploy?.actor, "edge-user");
+    },
+  );
+});
+
+Deno.test("without an authenticator, a transport identity still attributes the call", async () => {
+  await withServer(
+    { allowRun: true, actor: "ci-bot" },
+    async (server, store) => {
+      await server.handleMessage(
+        req("tools/call", {
+          name: "run:deploy",
+          arguments: { environment: "dev" },
+        }),
+        EMPTY_CONTEXT,
+        { actor: "edge-user", kind: "service", roles: ["deployer"] },
+      );
+      const deploy = (await auditEvents(store)).find((e) =>
+        e.tool === "run:deploy"
+      );
+      assertEquals(deploy?.actor, "edge-user");
+    },
+  );
+});
+
+Deno.test("on stdio the authenticator still runs, so a header-trusting one refuses", async () => {
+  // The stdio transport has no request to describe, so it hands the handler
+  // EMPTY_CONTEXT. Authentication is not skipped there: an authenticator that
+  // needs a header finds none and refuses, which is the fail-closed answer.
+  await withServer(
+    { allowRun: true, actor: "ci-bot", authenticator: asyncProxy },
+    async (server, store) => {
+      const res = await server.handleMessage(
+        req("tools/call", {
+          name: "run:deploy",
+          arguments: { environment: "dev" },
+        }),
+      );
+      assertEquals(res?.result, undefined);
+      assertEquals(res?.error?.message, "Unauthorized");
+      assertEquals((await auditEvents(store)).length, 0);
+    },
+  );
+});
+
+Deno.test("the authenticator gates initialize, ping and tools/list too", async () => {
+  await withServer(
+    { allowRun: true, authenticator: authenticatorFromHook(xUser) },
+    async (server) => {
+      for (const method of ["initialize", "ping", "tools/list"]) {
+        const refused = await server.handleMessage(req(method));
+        assertEquals(refused?.result, undefined, `${method} was answered`);
+        assertEquals(refused?.error?.message, "Unauthorized", method);
+      }
+      // With the header, every one of them answers normally.
+      const ctx = { headers: new Headers({ "x-user": "engineer-a" }) };
+      const init = (await server.handleMessage(req("initialize"), ctx))?.result;
+      assertEquals(
+        isRec(init) && typeof init.protocolVersion === "string",
+        true,
+      );
+      assertEquals((await server.handleMessage(req("ping"), ctx))?.result, {});
+      const listed = await server.handleMessage(req("tools/list"), ctx);
+      assertEquals(listed?.error, undefined);
+    },
+  );
+});
+
+Deno.test("an authenticator's kind, roles and via never reach the audit row", async () => {
+  // The claims exist to be authorized against, not to be persisted: the trail
+  // records the actor and the (redacted) arguments, and nothing else new.
+  await withServer(
+    { allowRun: true, authenticator: asyncProxy },
+    async (server, store) => {
+      await callWith(server, "run:deploy", { "x-user": "engineer-a" }, {
+        environment: "dev",
+      });
+      const deploy = (await auditEvents(store)).find((e) =>
+        e.tool === "run:deploy"
+      );
+      assertEquals(deploy?.actor, "engineer-a");
+      assertEquals(deploy?.args, { environment: "dev" });
+      const row = JSON.stringify(deploy);
+      assertEquals(row.includes("deployer"), false);
+      assertEquals(row.includes("oauth-proxy"), false);
+      assertEquals(row.includes("service"), false);
+    },
+  );
+});
+
+// ---- M15: the caller's kind reaches the run record -------------------------
+
+Deno.test("a run's initiator takes its kind from the caller, not the server", async () => {
+  // The kind travels with the actor. Without it the initiator would take its
+  // kind from the *server process's* environment — recording a service token as
+  // a person, or, on a host where ZUKE_ACTOR_KIND is set, every engineer as
+  // machinery. Both are wrong in a way a policy would act on.
+  const callers: Array<{ kind: "human" | "service"; env: string | undefined }> =
+    [
+      // A machine caller on a server whose own environment says nothing.
+      { kind: "service", env: undefined },
+      // A human caller on a server whose environment claims service.
+      { kind: "human", env: "service" },
+    ];
+  for (const caller of callers) {
+    await withTempStore(async (store, dir) => {
+      const build = new Recording();
+      const server = new McpServer(build, {
+        allowRun: true,
+        stateStore: store,
+        // The spawned run resolves its own store from the environment, so point
+        // it at the same directory the audit trail uses.
+        readEnv: (name) =>
+          name === "ZUKE_ACTOR_KIND"
+            ? caller.env
+            : name === "ZUKE_STATE_DIR"
+            ? `${dir}/runs`
+            : undefined,
+        authenticator: {
+          authenticate: () => ({ actor: "caller-a", kind: caller.kind }),
+        },
+      });
+      await server.handleMessage(
+        req("tools/call", { name: "run:deploy", arguments: {} }),
+      );
+      assertEquals(build.ran, ["deploy"]);
+
+      const runs = await store.listRuns({});
+      const run = runs.find((s) => s.id !== AUDIT_RUN_ID);
+      if (run === undefined) throw new Error("no run record");
+      assertEquals(run.initiator?.actor, "caller-a");
+      assertEquals(run.initiator?.kind, caller.kind, JSON.stringify(caller));
+    });
+  }
+});
+
+// ---- M16: force_target is gated exactly as cancel_run is -------------------
+
+Deno.test("force_target requires the operator token for a protected run", async () => {
+  // It routes through the same `runDenial` gate `cancel_run` uses, so the
+  // operator token in the call's arguments reaches `operatorTokenDenial` and a
+  // protected plan is refused without it.
+  await withServer(
+    {
+      allowRun: true,
+      protectPatterns: ["deploy"],
+      operatorToken: "operator-secret",
+      actor: "ops",
+    },
+    async (server, store) => {
+      const id = await seedSuspended(store, "deploy");
+
+      const noToken = await call(server, "force_target", {
+        runId: id,
+        target: "deploy",
+        outcome: "skipped",
+      });
+      assertEquals(noToken.isError, true);
+      assertEquals(JSON.parse(noToken.text).reason, "missing_operator_token");
+
+      const wrongToken = await call(server, "force_target", {
+        runId: id,
+        target: "deploy",
+        outcome: "skipped",
+        operatorToken: "guess",
+      });
+      assertEquals(wrongToken.isError, true);
+      assertEquals(
+        JSON.parse(wrongToken.text).reason,
+        "invalid_operator_token",
+      );
+
+      // Nothing was written by either refusal.
+      assertEquals((await store.getRun(id))?.record.overrides, undefined);
+
+      // With the token it gets past authorization and reaches the force itself.
+      const allowed = await call(server, "force_target", {
+        runId: id,
+        target: "deploy",
+        outcome: "skipped",
+        operatorToken: "operator-secret",
+      });
+      assertEquals(allowed.isError, false, allowed.text);
+      assertEquals(
+        (await store.getRun(id))?.record.overrides?.deploy.outcome,
+        "skipped",
+      );
+
+      // …and the call is audited, with the token dropped from the trail.
+      const audit = await auditEvents(store);
+      const event = audit.find((e) => e.tool === "force_target");
+      assertEquals(event?.actor, "ops");
+      assertEquals(
+        JSON.stringify(event?.args).includes("operator-secret"),
+        false,
+        JSON.stringify(event?.args),
+      );
+    },
+  );
+});
+
+Deno.test("force_target is not exposed without execution enabled", async () => {
+  await withServer({ allowRun: false }, async (server) => {
+    const names = (await server.tools()).map((t) => t.name);
+    assertEquals(names.includes("force_target"), false);
+  });
 });

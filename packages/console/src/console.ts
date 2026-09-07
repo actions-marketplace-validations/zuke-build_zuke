@@ -1,3 +1,6 @@
+// Copyright (c) 2026 the Zuke contributors
+// SPDX-License-Identifier: MIT
+
 /**
  * `ConsoleTasks` — task-shaped console output for Zuke builds, so a build never
  * reaches for `console.log`. It combines an NUKE-style levelled logger
@@ -43,6 +46,7 @@ import {
   themeTags,
 } from "./theme.ts";
 import { escapeMarkup, renderMarkup } from "./markup.ts";
+import { logoLines, type LogoOptions } from "./logo.ts";
 
 /** A destination for rendered lines. Overridable to capture output in tests. */
 export interface Sink {
@@ -246,6 +250,8 @@ export interface ConsoleTasksApi {
   ): void;
   /** Print the ruled banner Zuke opens a target's section with. */
   header(name: string): void;
+  /** Print the Zuke ASCII logo, two-tone when colour is on. */
+  logo(options?: LogoOptions): void;
   /** Print the end-of-build summary table and closing verdict. */
   summary(reports: TargetReport[], totalMs: number, ok: boolean): void;
   /** Open a collapsible group; close it with {@link ConsoleTasksApi.endGroup}. */
@@ -347,6 +353,11 @@ export const ConsoleTasks: ConsoleTasksApi = {
   header(name: string): void {
     if (muted()) return;
     emit(defaultRenderer.targetHeader(currentStyle(), name), "out");
+  },
+  /** Print the Zuke ASCII logo, two-tone when colour is on. */
+  logo(options?: LogoOptions): void {
+    if (muted()) return;
+    emit(logoLines(currentStyle().color, options), "out");
   },
   /** Print the end-of-build summary table and closing verdict. */
   summary(reports: TargetReport[], totalMs: number, ok: boolean): void {

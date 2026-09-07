@@ -1,3 +1,6 @@
+// Copyright (c) 2026 the Zuke contributors
+// SPDX-License-Identifier: MIT
+
 /**
  * {@link FileSystemStateStore} — a {@link StateStore} backed by one JSON file
  * per run under a directory (default `<repo root>/.zuke/runs`).
@@ -29,23 +32,20 @@ import {
   toSummary,
 } from "./types.ts";
 import {
+  type HeldLockEntry,
   type LockHolder,
   type LockRecord,
   parseLockRecord,
   stringifyLockRecord,
 } from "./lock.ts";
 import { withFileMutex } from "./mutex.ts";
+import {
+  assertSafeId,
+  casWriteJson,
+  publishFile,
+  sortNewestFirst,
+} from "./json_file_cas.ts";
 import { sha256Hex } from "../internal.ts";
-
-/**
- * Reject a run id that could escape the runs directory. Ids are UUIDs in
- * normal use; this guards the case where one arrives from the CLI or a query.
- */
-function assertSafeId(id: string): void {
-  if (!/^[A-Za-z0-9._-]+$/.test(id)) {
-    throw new Error(`state: unsafe run id "${id}"`);
-  }
-}
 
 /**
  * A {@link StateStore} that writes one `<id>.json` file per run under a
@@ -76,12 +76,12 @@ export class FileSystemStateStore implements StateStore {
   // validate the id — so a traversal can't slip in via a caller that forgets to
   // check (defence in depth, not a reliance on the boundary).
   #file(id: string): string {
-    assertSafeId(id);
+    assertSafeId("state", "run", id);
     return `${this.#dir}/${id}.json`;
   }
 
   #lock(id: string): string {
-    assertSafeId(id);
+    assertSafeId("state", "run", id);
     return `${this.#dir}/${id}.json.lock`;
   }
 
@@ -89,12 +89,12 @@ export class FileSystemStateStore implements StateStore {
   // record, `<key>.acq` the short-lived acquire mutex. The key is validated the
   // same way a run id is, so it is safe as a filename.
   #lockFile(key: string): string {
-    assertSafeId(key);
+    assertSafeId("state", "run", key);
     return `${this.#dir}/locks/${key}.json`;
   }
 
   #lockMarker(key: string): string {
-    assertSafeId(key);
+    assertSafeId("state", "run", key);
     return `${this.#dir}/locks/${key}.acq`;
   }
 
@@ -121,18 +121,13 @@ export class FileSystemStateStore implements StateStore {
   ): Promise<PutResult> {
     // #lock/#file validate record.id before any path is used below.
     await this.#ensureDir();
-    return await this.#withLock(record.id, async () => {
-      const current = await this.#host.readText(this.#file(record.id));
-      const currentVersion = current === null ? null : await sha256Hex(current);
-      if (currentVersion !== expectedVersion) {
-        return { ok: false, conflict: true };
-      }
-      const content = stringifyRunRecord(record);
-      const tmp = `${this.#file(record.id)}.tmp-${crypto.randomUUID()}`;
-      await this.#host.writeText(tmp, content);
-      await this.#host.rename(tmp, this.#file(record.id));
-      return { ok: true, version: await sha256Hex(content) };
-    });
+    return await this.#withLock(record.id, () =>
+      casWriteJson(
+        this.#host,
+        this.#file(record.id),
+        stringifyRunRecord(record),
+        expectedVersion,
+      ));
   }
 
   /** List runs matching `query`, newest first. Unreadable files are skipped. */
@@ -155,7 +150,25 @@ export class FileSystemStateStore implements StateStore {
     return query.limit === undefined ? sorted : sorted.slice(0, query.limit);
   }
 
-  /** Delete a run's file (under its lock); a missing run is a no-op. */
+  /**
+   * Delete a run's file (under its lock); a missing run is a no-op.
+   *
+   * The run's lock records are deliberately left alone. It is tempting to take
+   * them with the run — they are named after it, so once it is gone nothing can
+   * look them up again — but "expired" does not mean "abandoned" in this store:
+   * {@link renewLock} extends a lock whenever the token matches, whatever its
+   * expiry, so a lapsed claim is still the holder's until somebody *acquires*
+   * it. Deleting the record instead makes the next renewal answer `false`, which
+   * the holder reads as the lease being lost, and a run that is merely slow —
+   * the exact case the lease exists to tell apart from a dead one — stops.
+   * Pruning must never be able to do that.
+   *
+   * The litter is small and bounded in practice: {@link releaseLock} removes a
+   * lock's file, and a run releases its lease whenever it settles, so only a
+   * holder that dies without releasing leaves one behind. Clearing those safely
+   * belongs to whoever can prove the holder is gone — a reaping sweep, which
+   * proves it by acquiring — not to a command deleting old records.
+   */
   async deleteRun(id: string): Promise<void> {
     await this.#ensureDir();
     await this.#withLock(id, async () => {
@@ -215,6 +228,34 @@ export class FileSystemStateStore implements StateStore {
     });
   }
 
+  /**
+   * Every live lock in the `locks/` directory, ordered by key. `<key>.acq`
+   * mutex markers and anything else in there are skipped; a record that fails
+   * to parse is skipped too, since one corrupt file must not hide every other
+   * lock from someone trying to see who holds what.
+   */
+  async listLocks(): Promise<HeldLockEntry[]> {
+    await this.#ensureDir();
+    const entries: HeldLockEntry[] = [];
+    const now = this.#host.now();
+    for (const name of await this.#host.listDir(`${this.#dir}/locks`)) {
+      if (!name.endsWith(".json")) continue;
+      const key = name.slice(0, -".json".length);
+      const text = await this.#host.readText(`${this.#dir}/locks/${name}`);
+      if (text === null) continue; // released between the listing and the read
+      let record: LockRecord;
+      try {
+        record = parseLockRecord(text);
+      } catch {
+        continue;
+      }
+      // An expired record is not a held lock: the next acquirer takes it over.
+      if (record.expiresAt <= now) continue;
+      entries.push({ key, holder: record.holder, expiresAt: record.expiresAt });
+    }
+    return entries.sort((a, b) => a.key < b.key ? -1 : a.key > b.key ? 1 : 0);
+  }
+
   /** Read a lock record, or `null` when the lock is free. */
   async #readLock(key: string): Promise<LockRecord | null> {
     const text = await this.#host.readText(this.#lockFile(key));
@@ -226,7 +267,7 @@ export class FileSystemStateStore implements StateStore {
     const file = this.#lockFile(key);
     const tmp = `${file}.tmp-${crypto.randomUUID()}`;
     await this.#host.writeText(tmp, stringifyLockRecord(record));
-    await this.#host.rename(tmp, file);
+    await publishFile(this.#host, tmp, file);
   }
 
   /** Take the run's lock (spinning briefly on contention), run `fn`, release. */
@@ -265,13 +306,4 @@ function matches(record: RunRecord, query: RunQuery): boolean {
   }
   if (query.since !== undefined && record.createdAt < query.since) return false;
   return true;
-}
-
-/** Sort by `createdAt` descending, then `id` descending, for stable output. */
-function sortNewestFirst(summaries: RunSummary[]): RunSummary[] {
-  return summaries.sort((a, b) =>
-    a.createdAt !== b.createdAt
-      ? (a.createdAt < b.createdAt ? 1 : -1)
-      : (a.id < b.id ? 1 : a.id > b.id ? -1 : 0)
-  );
 }

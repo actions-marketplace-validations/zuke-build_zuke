@@ -1,3 +1,6 @@
+// Copyright (c) 2026 the Zuke contributors
+// SPDX-License-Identifier: MIT
+
 /**
  * The fluent {@link AiFixer} and the {@link aiFixer} factory — a
  * {@link "jsr:@zuke/core".Remediation} that diagnoses a failed target with an
@@ -12,20 +15,18 @@
  * @module
  */
 
-import {
-  type AnyParameter,
-  detectCiHost,
-  type Remediation,
-  type RemediationContext,
-  type RemediationResult,
+import type {
+  AnyParameter,
+  Remediation,
+  RemediationContext,
+  RemediationResult,
 } from "@zuke/core";
 import type { Configure } from "@zuke/core/tooling";
 import { Command } from "@zuke/core/shell";
-import type { Effort, Provider, Usage } from "./types.ts";
-import { type Fix, type FixLocation, parseFix } from "./fix.ts";
+import type { Effort, Provider } from "./types.ts";
+import { type Fix, parseFix } from "./fix.ts";
 import { FIX_GEMINI_SCHEMA, FIX_JSON_SCHEMA } from "./fix_schema.ts";
-import { resolveGithubContext } from "./hosts/github.ts";
-import { postSuggestions } from "./hosts/github_review.ts";
+import { suggestionBody } from "./hosts/github_review.ts";
 import {
   DEFAULT_EXCLUDES,
   DiffSettings,
@@ -33,41 +34,29 @@ import {
   filterDiff,
   truncate,
 } from "./diff.ts";
-import { callProvider, DEFAULT_MODELS, resolveKey } from "./provider.ts";
+import { DEFAULT_MODELS, resolveKey } from "./provider.ts";
+import { type BudgetExhausted, cachedCall, type CachedResult } from "./call.ts";
 import { fixSystemPrompt, fixUserPrompt } from "./prompts/fix.ts";
 import { applyEdits } from "./apply.ts";
 import { commitAndPush, type GitRunner } from "./commit.ts";
+import { fixConsoleLines, fixMarkdown, type FixReport } from "./fix_report.ts";
 import {
-  fixConsoleLines,
-  fixMarkdown,
-  type FixReport,
-  fixSkipConsoleLine,
-  fixSkipMarkdown,
-} from "./fix_report.ts";
-import { retryLine, writeStepSummary } from "./report.ts";
+  retryLine,
+  skipConsoleLine,
+  skipMarkdown,
+  writeStepSummary,
+} from "./report.ts";
 import { type EnvReader, readEnv } from "./hosts.ts";
 import {
   describeError,
   readTextOrUndefined,
   resolveConventions,
 } from "./context.ts";
-import { postComment } from "./comment.ts";
+import { postComment, postGithubSuggestions } from "./comment.ts";
 import type { RetryInfo, RetryOptions } from "./retry.ts";
 import type { Budget } from "./budget.ts";
 import type { AiCache } from "./cache.ts";
-
-/**
- * The body of an inline review comment for one location: the diagnosis plus a
- * committable `suggestion` block. An empty suggestion produces an empty
- * block, which GitHub renders as a deletion of the targeted lines.
- */
-function suggestionBody(diagnosis: string, loc: FixLocation): string {
-  const suggestion = loc.suggestion ?? "";
-  const block = suggestion === ""
-    ? ["```suggestion", "```"]
-    : ["```suggestion", suggestion, "```"];
-  return [diagnosis, "", ...block].join("\n");
-}
+import { outOfScope, type RunScope } from "./run_scope.ts";
 
 /**
  * A fluent AI fixer. Construct one via {@link aiFixer}, configure it, and attach
@@ -89,7 +78,7 @@ export class AiFixer implements Remediation {
   readonly #allow: string[] = [];
   readonly #excludePaths: string[] = [];
   #maxEdits = 10;
-  #onlyLocal = true;
+  #scope: RunScope = "local";
   #commitFixes = false;
   #commitMessage?: string;
   #push = true;
@@ -176,7 +165,7 @@ export class AiFixer implements Remediation {
    * Apply the proposed fix to the working tree and ask the executor to re-run
    * the target. Off by default (the fixer only diagnoses). Writes are confined
    * by {@link allowPaths}, the built-in exclusions, and {@link maxEdits}, and
-   * are refused on CI unless {@link allowCI} is set.
+   * are confined to the hosts {@link runOnly} permits.
    */
   autoApply(): this {
     this.#autoApply = true;
@@ -201,10 +190,41 @@ export class AiFixer implements Remediation {
     return this;
   }
 
-  /** Permit auto-apply (and committing) on CI; off by default. */
-  allowCI(): this {
-    this.#onlyLocal = false;
+  /**
+   * Where the fixer may run. Defaults to `"local"` — apply on a developer's
+   * machine, refuse on CI.
+   *
+   * `"ci"` is the inverse, and the shape a repository's own build wants:
+   * self-heal a pull request without ever rewriting a working tree someone is
+   * in the middle of editing. Off CI the fixer then returns before the model is
+   * called, so it costs no tokens and the underlying failure stands unchanged.
+   *
+   * That is a stronger refusal than the default scope makes on CI, where the
+   * fixer still diagnoses and only declines to write: a diagnosis on a pull
+   * request is worth reading, whereas one on a local run is an unasked-for
+   * charge against the developer's own key.
+   *
+   * `"both"` permits either host. One setter on one axis, so the effective
+   * scope never depends on the order two flags were called in.
+   *
+   * ```ts
+   * aiFixer((f) => f.provider("openai").apiKey(key).autoApply().runOnly("ci"));
+   * ```
+   */
+  runOnly(scope: RunScope): this {
+    this.#scope = scope;
     return this;
+  }
+
+  /**
+   * Permit auto-apply (and committing) on CI as well as locally.
+   *
+   * @deprecated Use `.runOnly("both")`, which says the same thing on the one
+   * axis that governs it — or `.runOnly("ci")`, which is what most builds
+   * attaching this to their own lint or test target actually want.
+   */
+  allowCI(): this {
+    return this.runOnly("both");
   }
 
   /**
@@ -386,8 +406,8 @@ export class AiFixer implements Remediation {
 
   /** Announce a skipped fix on the console, summary, and (if on) the PR. */
   async #reportSkip(target: string, reason: string): Promise<void> {
-    if (!this.#quiet) console.log(fixSkipConsoleLine(this.name, reason));
-    const markdown = fixSkipMarkdown(this.name, target, reason);
+    if (!this.#quiet) console.log(skipConsoleLine(this.name, reason));
+    const markdown = skipMarkdown(this.name, target, reason);
     writeStepSummary(markdown);
     if (this.#comment) await this.#postIssueComment(markdown);
   }
@@ -398,31 +418,25 @@ export class AiFixer implements Remediation {
    * overview comment can be skipped). A no-op off GitHub or without locations.
    */
   async #postSuggestions(report: FixReport): Promise<boolean> {
-    if (detectCiHost(this.#env) !== "github") return false;
     if (report.locations.length === 0) return false;
-    const token = this.#commentToken !== undefined
-      ? resolveKey(this.#commentToken)
-      : this.#env("GITHUB_TOKEN") ?? "";
-    const context = resolveGithubContext(token, this.#env);
-    if (context === undefined) return false;
     const suggestions = report.locations.map((loc) => ({
       path: loc.file,
       line: loc.endLine ?? loc.line,
       startLine: loc.line,
-      body: suggestionBody(report.diagnosis, loc),
+      // `[]`, not `[""]`: no replacement is the deletion form of the block.
+      body: suggestionBody(
+        report.diagnosis,
+        loc.suggestion !== undefined && loc.suggestion !== ""
+          ? [loc.suggestion]
+          : [],
+      ),
       key: `${loc.file}:${loc.line}`,
     }));
-    try {
-      return (await postSuggestions(
-        context,
-        suggestions,
-        this.#fetch ?? fetch,
-      )) > 0;
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      console.warn(`[${this.name}] could not post suggestions: ${message}`);
-      return false;
-    }
+    return (await postGithubSuggestions(this.name, suggestions, {
+      commentToken: this.#commentToken,
+      env: this.#env,
+      fetch: this.#fetch,
+    })) > 0;
   }
 
   /** Upsert the single overview comment via the active CI host. */
@@ -445,6 +459,18 @@ export class AiFixer implements Remediation {
    * the executor re-runs the target as the verifier.
    */
   async remediate(context: RemediationContext): Promise<RemediationResult> {
+    // A fixer restricted to CI does no work off it — not even a diagnosis, so
+    // a failing local build costs nothing against the developer's key. The
+    // default scope is deliberately not handled here: on CI it still diagnoses
+    // and declines only the write, which is checked once a fix exists.
+    const refusal = outOfScope(this.#scope, this.#env);
+    if (this.#scope === "ci" && refusal !== undefined) {
+      await this.#reportSkip(
+        context.target,
+        `disabled ${refusal.where} — ${refusal.hint}`,
+      );
+      return { retry: false };
+    }
     const provider = this.#provider;
     if (provider === undefined) {
       console.warn(`[${this.name}] no provider configured — skipping`);
@@ -484,60 +510,51 @@ export class AiFixer implements Remediation {
       },
     };
 
-    // Cost cache: an identical failure (same provider, model, effort, and prompt)
-    // reuses the prior fix instead of paying for another call. `effort` is part
-    // of the key because it changes the model's output — omitting it would serve
-    // a fix computed at a different reasoning effort.
-    const cacheKey = this.#cache?.enabled_()
-      ? this.#cache.key_([provider, model, this.#effort ?? "", system, user])
-      : undefined;
-    const cached = cacheKey !== undefined
-      ? await this.#cache?.get_(cacheKey)
-      : undefined;
-
-    let fix: Fix;
-    let usage: Usage | undefined;
-    if (cached !== undefined) {
-      fix = parseFix(cached.text);
-      usage = cached.usage;
-    } else if (this.#budget?.exhausted_()) {
+    // Cost cache: an identical failure (same provider, model, effort, and
+    // prompt) reuses the prior fix instead of paying for another call.
+    let call: CachedResult<Fix> | BudgetExhausted;
+    try {
+      call = await cachedCall({
+        provider,
+        key,
+        model,
+        system,
+        user,
+        parse: parseFix,
+        cache: this.#cache,
+        budget: this.#budget,
+        effort: this.#effort,
+        fetch: this.#fetch,
+        retry,
+        schema: { json: FIX_JSON_SCHEMA, gemini: FIX_GEMINI_SCHEMA },
+        schemaName: "fix",
+        maxTokens: 8192,
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      console.warn(`[${this.name}] could not produce a fix: ${message}`);
+      return { retry: false };
+    }
+    if ("exhausted" in call) {
       await this.#reportSkip(
         context.target,
-        `AI budget exhausted — ${this.#budget.describe_()}`,
+        `AI budget exhausted — ${call.exhausted}`,
       );
       return { retry: false };
-    } else {
-      try {
-        const result = await callProvider(provider, key, model, system, user, {
-          effort: this.#effort,
-          fetch: this.#fetch,
-          retry,
-          schema: { json: FIX_JSON_SCHEMA, gemini: FIX_GEMINI_SCHEMA },
-          schemaName: "fix",
-          maxTokens: 8192,
-        });
-        fix = parseFix(result.text);
-        usage = result.usage;
-        this.#budget?.record_(usage, model);
-        if (cacheKey !== undefined) {
-          await this.#cache?.put_(cacheKey, result.text, usage);
-        }
-      } catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
-        console.warn(`[${this.name}] could not produce a fix: ${message}`);
-        return { retry: false };
-      }
     }
+    const fix = call.value;
+    const usage = call.usage;
 
-    const ci = detectCiHost(this.#env) !== "local";
     const wantApply = this.#autoApply && fix.edits.length > 0;
-    const ciBlocked = wantApply && this.#onlyLocal && ci;
+    // Only a fix it actually wanted to apply can be blocked, so a diagnose-only
+    // fixer never claims auto-apply was refused.
+    const blockedBy = wantApply ? refusal : undefined;
 
-    if (!wantApply || ciBlocked) {
+    if (!wantApply || blockedBy !== undefined) {
       const action = fix.edits.length === 0
         ? "diagnosed (no fix proposed)"
-        : ciBlocked
-        ? `diagnosed (auto-apply disabled on CI; ${fix.edits.length} file(s) proposed)`
+        : blockedBy !== undefined
+        ? `diagnosed (auto-apply disabled ${blockedBy.where}; ${fix.edits.length} file(s) proposed)`
         : `diagnosed (${fix.edits.length} file(s) proposed)`;
       await this.#report(context.target, {
         ...fix,

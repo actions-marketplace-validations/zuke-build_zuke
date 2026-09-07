@@ -1,3 +1,6 @@
+// Copyright (c) 2026 the Zuke contributors
+// SPDX-License-Identifier: MIT
+
 /**
  * A real, runnable Zuke build used by the e2e cancellation suite. Run as a
  * subprocess (`deno run -A cancel_build.ts <target>`), it deploys (recording a
@@ -5,6 +8,10 @@
  * `cancel <run-id>` invocation stops it and runs the deploy's compensation — so
  * two genuine OS processes exercise cross-process cancellation. `run()` reads
  * `ZUKE_STATE_DIR` from the environment for its durable state.
+ *
+ * The `hold` target blocks forever instead of suspending, so the parent can
+ * signal a run that is genuinely *in flight* rather than parked at a gate — the
+ * difference matters for what a cancellation is required to release.
  *
  * @module
  */
@@ -33,6 +40,22 @@ class Cancelable extends Build {
   gate = target()
     .dependsOn(this.deploy)
     .waitsFor((s) => s.on(externalSignal("approved")));
+  /**
+   * Blocks forever after the deploy, printing a marker first so the parent knows
+   * the run is in flight (and its lease held) before it signals.
+   */
+  hold = target().dependsOn(this.deploy).executes(async (ctx) => {
+    console.log("HOLDING");
+    // Parked on the run's own cancellation signal — what a well-behaved
+    // long-running body does, and what makes the signal a *graceful* stop
+    // rather than a process that has to be killed.
+    await new Promise<void>((resolve) => {
+      if (ctx.signal.aborted) resolve();
+      else {ctx.signal.addEventListener("abort", () => resolve(), {
+          once: true,
+        });}
+    });
+  });
   /** Prints a marker; a cancelled run must never reach this. */
   promote = target().dependsOn(this.gate).executes(() =>
     console.log("PROMOTED")

@@ -1,3 +1,6 @@
+// Copyright (c) 2026 the Zuke contributors
+// SPDX-License-Identifier: MIT
+
 /**
  * Neutralizing model- and agent-controlled text before it is embedded in the
  * Markdown of a PR comment or CI job summary — the Markdown analogue of the
@@ -42,6 +45,32 @@ export function codeSpan(value: string): string {
   // space (CommonMark strips one space from each side), else the delimiters merge.
   const pad = clean.startsWith("`") || clean.endsWith("`") ? " " : "";
   return `${ticks}${pad}${clean}${pad}${ticks}`;
+}
+
+/**
+ * Neutralize a value for a plain inline Markdown context — a table cell, a
+ * blockquote, a list item: newlines collapse to a space (so model-controlled
+ * text cannot start a fresh line and inject block-level Markdown — a heading, a
+ * fake "approved" banner), the `|` cell separator is escaped, and the HTML
+ * comment delimiters are defanged. For an **inline code span** use
+ * {@link codeSpan} (backticks need neutralizing too); for a fenced code body use
+ * {@link fenceMarkdown}.
+ *
+ * The comment delimiters matter far beyond cosmetics. The reviewer's comment
+ * carries its durable state in a hidden `<!-- zuke-ai-state:… -->` block, and it
+ * trusts that block **because the comment is its own**. But its own comment also
+ * repeats model output — titles, files, summaries — and the model reads an
+ * attacker-controlled diff. Left raw, a finding titled with a forged state block
+ * would be published inside the reviewer's comment and read back next round as
+ * authoritative, letting a PR author mark real findings dismissed. Authorship of
+ * the comment is not authorship of every byte in it.
+ */
+export function cell(value: string): string {
+  return value
+    .replaceAll(/[\r\n]+/g, " ")
+    .replaceAll("|", "\\|")
+    .replaceAll("<!--", "&lt;!--")
+    .replaceAll("-->", "--&gt;");
 }
 
 /** The length of the longest run of consecutive backticks in `text` (0 if none). */

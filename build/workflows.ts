@@ -1,3 +1,6 @@
+// Copyright (c) 2026 the Zuke contributors
+// SPDX-License-Identifier: MIT
+
 /**
  * Zuke's own GitHub workflows, declared as targets to run.
  *
@@ -44,6 +47,8 @@ export interface WorkflowTargets {
   syncWebsite: TargetBuilder;
   /** The supply-chain scanners. */
   security: TargetBuilder;
+  /** CodeQL static analysis, run entirely by the marketplace actions. */
+  codeql: TargetBuilder;
   /** Uploads the Scorecard SARIF to code scanning. */
   scorecardSarif: TargetBuilder;
   /** The subprocess e2e suite, on an OS matrix. */
@@ -174,6 +179,10 @@ export function githubWorkflows(
             persistCredentials: true,
             ref:
               "${{ (github.event.pull_request.head.repo.full_name == github.repository) && github.head_ref || '' }}",
+            // Full history, because `pluginVersionCheck` compares against a base
+            // ref. A shallow checkout has no `origin/<base>` at all, so the check
+            // reported itself skipped on every run — honestly, and invisibly.
+            fetchDepth: 0,
           },
           env: {
             OPENAI_API_KEY: "${{ secrets.OPENAI_API_KEY }}",
@@ -184,6 +193,15 @@ export function githubWorkflows(
             // body cannot inject a command.
             PR_BODY:
               "${{ github.event_name == 'pull_request' && github.event.pull_request.body || '' }}",
+            // On a pull request the check compares against the base branch, which
+            // it resolves itself. On a push there is no base — and the push is
+            // the one moment a *collision* is visible: two branches that both
+            // bump the same version merge cleanly, because each side made the
+            // identical edit, and neither pull request's check ever saw the
+            // other. Comparing the merge commit against its parent catches it.
+            // Empty on a pull request, which leaves the default resolution.
+            ZUKE_PLUGIN_BASE_REF:
+              "${{ github.event_name == 'push' && 'HEAD^' || '' }}",
           },
         },
         {
@@ -370,6 +388,52 @@ export function githubWorkflows(
       invokes: [{
         target: targets.security,
         name: "Scan with Zuke (zuke/security)",
+      }],
+    }),
+
+    codeql: cicd({
+      pins: actionPin,
+      pipeline: {
+        name: "CodeQL",
+        triggers: {
+          push: ["master"],
+          pullRequest: [],
+          // Weekly besides the per-change runs, so a new CodeQL query pack
+          // surfaces findings in existing code without waiting for a PR.
+          schedule: [{ cron: "31 4 * * 4" }],
+        },
+        concurrency: {
+          group: "codeql-${{ github.ref }}",
+          cancelInProgress: true,
+        },
+      },
+      invokes: [{
+        target: targets.codeql,
+        name: "CodeQL analyze",
+        permissions: {
+          // Read the sources, write the analysis to the Security tab.
+          contents: "read",
+          "security-events": "write",
+        },
+        // The whole job is the marketplace init/analyze pair — the target has
+        // no local body to run (there is no CodeQL CLI in the toolchain), so
+        // these replace the generated `./zuke codeql` step rather than wrap it.
+        // Both languages are interpreted (`build-mode: none`): the TypeScript
+        // sources, and the `actions` pack over the workflow YAML itself.
+        steps: [
+          {
+            name: "Initialize CodeQL",
+            uses: actionPin("github/codeql-action/init"),
+            with: {
+              languages: "javascript-typescript,actions",
+              "build-mode": "none",
+            },
+          },
+          {
+            name: "Analyze",
+            uses: actionPin("github/codeql-action/analyze"),
+          },
+        ],
       }],
     }),
 

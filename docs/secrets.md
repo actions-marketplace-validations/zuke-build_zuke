@@ -8,6 +8,8 @@ treats a secret as a **parameter with two extra guarantees**:
 2. **Its resolved value is redacted from all of Zuke's output** — so a secret
    cannot leak into a log, a summary, or an error message, on any platform.
 
+<!-- check -->
+
 ```ts
 import { Build, execSecret, parameter, run, target } from "jsr:@zuke/core";
 
@@ -52,6 +54,17 @@ value wherever it prints:
 The mask is the literal text `[redacted]`. Matching is a plain substring
 replace, never a regular expression, so a secret containing regex-significant
 characters is masked literally and there is no injection surface.
+
+A **multi-line** secret — a PEM private key is the common one — is masked line
+by line as well as whole. Both sinks read a line at a time: Zuke's redactor
+rewrites one reporter line, and the Actions runner reads an `::add-mask::`
+directive to the end of *its* line. So a key registered only as one string would
+match no line of itself, and the whole of it after the header would print in the
+clear. Each of its lines is registered as its own pattern, and one directive is
+emitted per line rather than one carrying the whole key. Lines under eight
+characters are skipped, since a two-character fragment identifies nothing and
+would mask ordinary text wherever it appeared; the value as a whole stays
+registered regardless.
 
 ```ts
 token = parameter("Deploy token").secret().required();
@@ -180,6 +193,8 @@ command that reports failures on stderr without echoing the secret itself
 boundary as any subprocess a target spawns.
 
 ## A complete example
+
+<!-- check -->
 
 ```ts
 import {

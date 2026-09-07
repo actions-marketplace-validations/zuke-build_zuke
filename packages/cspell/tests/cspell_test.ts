@@ -1,3 +1,6 @@
+// Copyright (c) 2026 the Zuke contributors
+// SPDX-License-Identifier: MIT
+
 import { assertEquals, assertRejects } from "../../core/tests/_assert.ts";
 import { ToolNotFoundError } from "@zuke/core/tooling";
 import {
@@ -13,7 +16,8 @@ Deno.test("the default invocation is cspell lint", () => {
 Deno.test("cspell: every option renders, files last", () => {
   const argv = new CspellSettings()
     .config("cspell.json").noProgress().noSummary().showSuggestions()
-    .showContext().quietOutput().cache().dot().gitignore().unique()
+    .showContext().quietOutput().cache().dot().gitignore()
+    .gitignoreRoot(".").noMustFindFiles().unique()
     .locale("en,en-GB").exclude("dist/**").exclude("vendor/**")
     .maxDuplicateProblems(5).files("**", "docs/**").argv();
   assertEquals(argv, [
@@ -29,6 +33,9 @@ Deno.test("cspell: every option renders, files last", () => {
     "--cache",
     "--dot",
     "--gitignore",
+    "--gitignore-root",
+    ".",
+    "--no-must-find-files",
     "--unique",
     "--locale",
     "en,en-GB",

@@ -1,3 +1,6 @@
+// Copyright (c) 2026 the Zuke contributors
+// SPDX-License-Identifier: MIT
+
 /**
  * `YarnTasks` — typed task functions for the `yarn` CLI, in the settings-lambda
  * style: configure a fluent settings object in a lambda, and the task function
@@ -19,12 +22,20 @@
 
 import { type Configure, runSettings, ToolSettings } from "@zuke/core/tooling";
 import type { CommandOutput } from "@zuke/core/shell";
+import { reportSummary } from "@zuke/core";
+import { parseYarnSummary } from "./summary.ts";
 
 /** Base for all `yarn` subcommand settings: binary is `yarn` from PATH. */
 export abstract class YarnSettings extends ToolSettings {
   /** The default binary: `yarn` resolved from PATH. */
   protected override defaultTool(): string {
     return "yarn";
+  }
+
+  /** Report `Added` and `Removed` (Yarn Berry) onto the build summary. */
+  protected override onOutput(output: CommandOutput): void {
+    const pairs = parseYarnSummary(output);
+    if (pairs !== undefined) reportSummary(pairs);
   }
 }
 

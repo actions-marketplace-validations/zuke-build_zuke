@@ -1,3 +1,6 @@
+// Copyright (c) 2026 the Zuke contributors
+// SPDX-License-Identifier: MIT
+
 /**
  * The CLI surface: argument parsing, `--list`/`--help`/`graph`, and the public
  * {@link run} entry point that drives a build from `zuke.ts`.
@@ -7,8 +10,10 @@ import { type Build, discoverGroups, discoverTargets } from "./build.ts";
 import { discoverCiFiles, syncCiFiles } from "./ci.ts";
 import { isEntryModule } from "./entry.ts";
 import { messageOf } from "./internal.ts";
+import { forceTarget } from "./force.ts";
 import { isCI } from "./host.ts";
 import { GraphError, validateGraph } from "./graph.ts";
+import { InsecureBackendUrlError } from "./http.ts";
 import { execute } from "./executor.ts";
 import type { Renderer } from "./renderer.ts";
 import {
@@ -16,6 +21,11 @@ import {
   graphCommand,
   type GraphHost,
 } from "./graph_view.ts";
+import {
+  findOutdated,
+  formatOutdated,
+  type OutdatedOptions,
+} from "./outdated.ts";
 import { type AnyParameter, discoverParameters, flagName } from "./params.ts";
 import type { JsonValue, TargetBuilder } from "./target.ts";
 import type { Plugin } from "./plugin.ts";
@@ -31,9 +41,11 @@ import {
   COMPLETIONS_COMMAND,
   DEFAULT_TARGET,
   DOC_COMMAND,
+  FORCE_COMMAND,
   GENERATE_CI_COMMAND,
   GRAPH_COMMAND,
   MCP_COMMAND,
+  OUTDATED_COMMAND,
   REGISTER_COMMAND,
   RESUME_COMMAND,
   RUNS_COMMAND,
@@ -44,7 +56,13 @@ import { resumeCheck, resumeRun } from "./resume.ts";
 import { runsCommand } from "./runs.ts";
 import { parseDuration } from "./duration.ts";
 import { registerCommand } from "./registry/register.ts";
-import { isRunStatus, RUN_STATUS_NAMES, type RunQuery } from "./state/types.ts";
+import {
+  ACTOR_KINDS,
+  FORCED_OUTCOMES,
+  isRunStatus,
+  RUN_STATUS_NAMES,
+  type RunQuery,
+} from "./state/types.ts";
 import {
   installCompletions,
   type InstallOptions,
@@ -136,6 +154,10 @@ export interface ParsedArgs {
   state: boolean;
   /** Attribute the run to this actor in its state record (`--actor <name>`). */
   actor?: string;
+  /** Whether a person or a machine asked for the run (`--actor-kind <kind>`). */
+  actorKind?: string;
+  /** With `runs list`, keep only runs this actor started (`--initiator <name>`). */
+  initiator?: string;
   /** The `resume` command was requested (continue a suspended run). */
   resume: boolean;
   /** The run id to resume (the positional after `resume`). */
@@ -170,22 +192,38 @@ export interface ParsedArgs {
   keepLast?: string;
   /** The `cancel` command was requested (cancel a run and run its compensations). */
   cancel: boolean;
+  /** True when the `force` command was requested. */
+  force: boolean;
   /** The run id to cancel (the positional after `cancel`). */
   cancelRunId?: string;
+  /** `force`: the run to act on (first positional). */
+  forceRunId?: string;
+  /** `force`: the target to settle (second positional). */
+  forceTarget?: string;
+  /** `force`: a third positional, which the command does not take. */
+  forceExtra?: string;
+  /** `force`: what the target settles to (`--outcome`). */
+  outcome?: string;
+  /** `force`: why it was forced (`--reason`). */
+  reason?: string;
   /** The `register` command was requested (record this build in the registry). */
   register: boolean;
   /** The `doc` command was requested (print a package's API docs, isolated). */
   doc: boolean;
   /** The spec to document (the positional after `doc`): a `jsr:`/`npm:` URL or a path. */
   docSpec?: string;
+  /** The `outdated` command was requested (report JSR packages behind their latest). */
+  outdated: boolean;
+  /** Exit non-zero when `outdated` found something (`--exit-code`). */
+  exitCode: boolean;
   /** Raw parameter values from declared flags, keyed by property name. */
   values: Record<string, string>;
   help: boolean;
 }
 
-/** Parse a `--parallel`/`--parallel=N` value: a positive count, or `true`. */
-function parseParallel(value: string | undefined): boolean | number {
-  if (value === undefined || value === "") return true;
+/** Parse a `--parallel=N` value (the inline text after `=`): a positive count, or `true`. */
+function parseParallel(value: string): boolean | number {
+  if (value === "") return true;
   const n = Number(value);
   return Number.isFinite(n) && n > 0 ? Math.floor(n) : true;
 }
@@ -277,6 +315,67 @@ function unknownFlagError(
 }
 
 /**
+ * How a built-in flag that takes a value applies it to the parse result — the
+ * one axis that differs between otherwise identical `--flag value` /
+ * `--flag=value` branches.
+ */
+interface ValueFlag {
+  /** Apply the value taken from the next argument (`--flag value`). */
+  readonly set: (parsed: ParsedArgs, value: string) => void;
+  /**
+   * Apply an inline `--flag=value`, when that form does something else than
+   * {@link ValueFlag.set} — only `--allowed-origin`, whose inline form accepts a
+   * comma-list while its space form takes a single origin.
+   */
+  readonly setInline?: (parsed: ParsedArgs, value: string) => void;
+  /**
+   * Whether the space form applies an explicit empty value (`--flag ""`, e.g.
+   * from an unset CI variable) instead of dropping it as absent — so it reaches
+   * the flag's validator and is rejected rather than silently ignored. Only a
+   * missing token ever stays undefined. The inline form (`--flag=`) always
+   * applies, empty or not.
+   */
+  readonly keepEmpty?: boolean;
+}
+
+/**
+ * The built-in flags that take a value, mapped to how they store it: one table
+ * in place of a near-identical pair of branches per flag.
+ *
+ * `--skip` is deliberately absent — it takes a value but has never accepted an
+ * inline `--skip=lint`, which must keep reaching {@link unknownFlagError}.
+ */
+const VALUE_FLAGS: ReadonlyMap<string, ValueFlag> = new Map([
+  ["actor", { set: (p, v) => (p.actor = v) }],
+  ["actor-kind", { set: (p, v) => (p.actorKind = v) }],
+  ["initiator", { set: (p, v) => (p.initiator = v) }],
+  ["outcome", { set: (p, v) => (p.outcome = v) }],
+  ["reason", { set: (p, v) => (p.reason = v), keepEmpty: true }],
+  ["signal", { set: (p, v) => (p.signal = v) }],
+  ["data", { set: (p, v) => (p.data = v), keepEmpty: true }],
+  ["status", { set: (p, v) => (p.runStatus = v) }],
+  ["target", { set: (p, v) => (p.runTarget = v) }],
+  ["since", { set: (p, v) => (p.since = v) }],
+  ["limit", { set: (p, v) => (p.runLimit = v), keepEmpty: true }],
+  ["keep", { set: (p, v) => (p.keep = v), keepEmpty: true }],
+  ["keep-last", { set: (p, v) => (p.keepLast = v), keepEmpty: true }],
+  ["protect", { set: (p, v) => (p.protectPatterns = splitList(v)) }],
+  ["allowed-origin", {
+    set: (p, v) => (p.allowedOrigins = [...p.allowedOrigins ?? [], v]),
+    setInline: (p, v) => (p.allowedOrigins = [
+      ...p.allowedOrigins ?? [],
+      ...splitList(v),
+    ]),
+  }],
+  ["max-concurrent-runs", {
+    set: (p, v) => (p.maxConcurrentRuns = parsePositiveInt(v)),
+    keepEmpty: true,
+  }],
+  ["http", { set: (p, v) => (p.httpAddr = v) }],
+  ["output", { set: (p, v) => (p.output = parseOutput(v)) }],
+]);
+
+/**
  * Parse `zuke` arguments. Built-in flags are recognised first; `paramFlags`
  * lets the caller pass the build's declared parameter flags so their values are
  * collected. A `--flag` that is neither a built-in nor a declared parameter
@@ -311,8 +410,11 @@ export function parseArgs(
     resumeDegraded: false,
     runs: false,
     cancel: false,
+    force: false,
     register: false,
     doc: false,
+    outdated: false,
+    exitCode: false,
     confirmDestructive: false,
     mcpRegistry: false,
     help: false,
@@ -348,96 +450,25 @@ export function parseArgs(
       parsed.dryRun = true;
     } else if (arg === "--state") {
       parsed.state = true;
-    } else if (arg === "--actor") {
-      const who = args[++i];
-      if (who) parsed.actor = who;
-    } else if (arg.startsWith("--actor=")) {
-      parsed.actor = arg.slice("--actor=".length);
-    } else if (arg === "--signal") {
-      const name = args[++i];
-      if (name) parsed.signal = name;
-    } else if (arg.startsWith("--signal=")) {
-      parsed.signal = arg.slice("--signal=".length);
-    } else if (arg === "--data") {
-      const json = args[++i];
-      if (json !== undefined) parsed.data = json;
-    } else if (arg.startsWith("--data=")) {
-      parsed.data = arg.slice("--data=".length);
     } else if (arg === "--force-graph") {
       parsed.forceGraph = true;
     } else if (arg === "--resume-degraded") {
       parsed.resumeDegraded = true;
-    } else if (arg === "--status") {
-      const value = args[++i];
-      if (value) parsed.runStatus = value;
-    } else if (arg.startsWith("--status=")) {
-      parsed.runStatus = arg.slice("--status=".length);
-    } else if (arg === "--target") {
-      const value = args[++i];
-      if (value) parsed.runTarget = value;
-    } else if (arg.startsWith("--target=")) {
-      parsed.runTarget = arg.slice("--target=".length);
-    } else if (arg === "--since") {
-      const value = args[++i];
-      if (value) parsed.since = value;
-    } else if (arg.startsWith("--since=")) {
-      parsed.since = arg.slice("--since=".length);
     } else if (arg === "--counts") {
       parsed.runCounts = true;
-    } else if (arg === "--limit") {
-      // Capture an explicit empty value (`--limit ""`) so it is validated and
-      // rejected, not silently dropped — only a missing token stays undefined.
-      const value = args[++i];
-      if (value !== undefined) parsed.runLimit = value;
-    } else if (arg.startsWith("--limit=")) {
-      parsed.runLimit = arg.slice("--limit=".length);
-    } else if (arg === "--keep") {
-      const value = args[++i];
-      if (value !== undefined) parsed.keep = value;
-    } else if (arg.startsWith("--keep=")) {
-      parsed.keep = arg.slice("--keep=".length);
-    } else if (arg === "--keep-last") {
-      const value = args[++i];
-      if (value !== undefined) parsed.keepLast = value;
-    } else if (arg.startsWith("--keep-last=")) {
-      parsed.keepLast = arg.slice("--keep-last=".length);
     } else if (arg === "--check") {
       parsed.check = true;
+    } else if (arg === "--exit-code") {
+      parsed.exitCode = true;
     } else if (arg === "--allow-run") {
       parsed.allowRun = true;
     } else if (arg.startsWith("--allow-run=")) {
       parsed.allowRun = true;
       parsed.allowRunPatterns = splitList(arg.slice("--allow-run=".length));
-    } else if (arg === "--protect") {
-      const value = args[++i];
-      if (value) parsed.protectPatterns = splitList(value);
-    } else if (arg.startsWith("--protect=")) {
-      parsed.protectPatterns = splitList(arg.slice("--protect=".length));
-    } else if (arg === "--allowed-origin") {
-      const value = args[++i];
-      if (value) {
-        parsed.allowedOrigins = [...parsed.allowedOrigins ?? [], value];
-      }
-    } else if (arg.startsWith("--allowed-origin=")) {
-      parsed.allowedOrigins = [
-        ...parsed.allowedOrigins ?? [],
-        ...splitList(arg.slice("--allowed-origin=".length)),
-      ];
     } else if (arg === "--confirm-destructive") {
       parsed.confirmDestructive = true;
     } else if (arg === "--registry") {
       parsed.mcpRegistry = true;
-    } else if (arg.startsWith("--max-concurrent-runs=")) {
-      parsed.maxConcurrentRuns = parsePositiveInt(
-        arg.slice("--max-concurrent-runs=".length),
-      );
-    } else if (arg === "--max-concurrent-runs") {
-      parsed.maxConcurrentRuns = parsePositiveInt(args[++i]);
-    } else if (arg === "--http") {
-      const value = args[++i];
-      if (value) parsed.httpAddr = value;
-    } else if (arg.startsWith("--http=")) {
-      parsed.httpAddr = arg.slice("--http=".length);
     } else if (arg === "--parallel") {
       parsed.parallel = true;
     } else if (arg.startsWith("--parallel=")) {
@@ -445,13 +476,10 @@ export function parseArgs(
     } else if (arg === "--help" || arg === "-h") {
       parsed.help = true;
     } else if (arg === "--skip") {
+      // Not in VALUE_FLAGS on purpose: `--skip=dep` has never parsed, and must
+      // keep falling through to unknownFlagError rather than gaining a form.
       const dep = args[++i];
       if (dep) parsed.skip.push(dep);
-    } else if (arg === "--output") {
-      const value = args[++i];
-      if (value) parsed.output = parseOutput(value);
-    } else if (arg.startsWith("--output=")) {
-      parsed.output = parseOutput(arg.slice("--output=".length));
     } else if (arg === "--") {
       // A bare `--` is the conventional argument separator, and wrappers insert
       // one on their own (`deno run -A zuke.ts -- ci` passes it straight
@@ -460,8 +488,25 @@ export function parseArgs(
     } else if (arg.startsWith("--")) {
       const eq = arg.indexOf("=");
       const flag = eq === -1 ? arg.slice(2) : arg.slice(2, eq);
+      const builtin = VALUE_FLAGS.get(flag);
       const pf = byFlag.get(flag);
-      if (pf !== undefined) {
+      if (builtin !== undefined) {
+        // A built-in flag that takes a value: consumed the same way for all of
+        // them, with the flag's own setter deciding where the value lands. This
+        // is checked before `byFlag`, so a built-in still wins over a declared
+        // parameter of the same name.
+        if (eq !== -1) {
+          (builtin.setInline ?? builtin.set)(parsed, arg.slice(eq + 1));
+        } else {
+          const value = args[++i];
+          if (
+            value !== undefined &&
+            (value !== "" || builtin.keepEmpty === true)
+          ) {
+            builtin.set(parsed, value);
+          }
+        }
+      } else if (pf !== undefined) {
         let value: string | undefined;
         if (eq !== -1) value = arg.slice(eq + 1);
         else if (pf.boolean) value = "true";
@@ -495,13 +540,23 @@ export function parseArgs(
     } else if (parsed.cancel && parsed.cancelRunId === undefined) {
       // `cancel` takes the run id as its positional.
       parsed.cancelRunId = arg;
+    } else if (parsed.force && parsed.forceRunId === undefined) {
+      // `force` takes the run id, then the target.
+      parsed.forceRunId = arg;
+    } else if (parsed.force && parsed.forceTarget === undefined) {
+      parsed.forceTarget = arg;
+    } else if (parsed.force && parsed.forceExtra === undefined) {
+      // Kept rather than ignored, so a third positional is an error naming
+      // itself instead of silently changing what the command does.
+      parsed.forceExtra = arg;
     } else if (parsed.doc && parsed.docSpec === undefined) {
       // `doc` takes the spec to document as its positional.
       parsed.docSpec = arg;
     } else if (
       parsed.target === undefined && !parsed.graph && !parsed.generateCi &&
       !parsed.completions && !parsed.mcp && !parsed.resume && !parsed.runs &&
-      !parsed.cancel && !parsed.register && !parsed.doc
+      !parsed.cancel && !parsed.force && !parsed.register && !parsed.doc &&
+      !parsed.outdated
     ) {
       if (arg === GRAPH_COMMAND) parsed.graph = true;
       else if (arg === GENERATE_CI_COMMAND) parsed.generateCi = true;
@@ -510,8 +565,10 @@ export function parseArgs(
       else if (arg === RESUME_COMMAND) parsed.resume = true;
       else if (arg === RUNS_COMMAND) parsed.runs = true;
       else if (arg === CANCEL_COMMAND) parsed.cancel = true;
+      else if (arg === FORCE_COMMAND) parsed.force = true;
       else if (arg === REGISTER_COMMAND) parsed.register = true;
       else if (arg === DOC_COMMAND) parsed.doc = true;
+      else if (arg === OUTDATED_COMMAND) parsed.outdated = true;
       else parsed.target = arg;
     }
   }
@@ -535,12 +592,14 @@ Usage:
   deno run -A zuke.ts mcp [--allow-run] [--registry] [--http <host:port>]
   deno run -A zuke.ts resume <run-id> [--signal <name>] [--data <json>]
   deno run -A zuke.ts resume --check [<run-id>]
-  deno run -A zuke.ts runs list [--status <s>] [--target <t>] [--since <iso>] [--limit <n>] [--counts] [--json]
+  deno run -A zuke.ts runs list [--status <s>] [--target <t>] [--since <iso>] [--initiator <n>] [--limit <n>] [--counts] [--json]
   deno run -A zuke.ts runs show <run-id> [--json]
   deno run -A zuke.ts runs prune [--keep <age>] [--keep-last <n>] [--dry-run]
   deno run -A zuke.ts cancel <run-id> [--actor <name>]
+  deno run -A zuke.ts force <run-id> <target> --outcome skipped|succeeded [--reason <why>]
   deno run -A zuke.ts register [--actor <name>] [--json]
   deno run -A zuke.ts doc <spec>
+  deno run -A zuke.ts outdated [--exit-code]
 
 Options:
   <target>          Run the target and its transitive dependencies.
@@ -561,7 +620,12 @@ Options:
                     already configured via ZUKE_STATE_URL/ZUKE_STATE_DIR or the
                     build's stateStore(). See docs/state.md.
   --actor <name>    Attribute the run to <name> in its state record (else
-                    ZUKE_ACTOR, the CI actor, or "anonymous").
+                    ZUKE_ACTOR, the CI actor, or "anonymous"). Every resume
+                    rewrites it with whoever picked the run up.
+  --actor-kind <k>  Whether a person or a machine asked: human (default) or
+                    service (else ZUKE_ACTOR_KIND). Recorded on the run's
+                    initiator, which — unlike --actor — is stamped once at
+                    creation and never rewritten.
   --list, -l        List all targets with descriptions and dependencies.
   --json            With --list, print the build surface (commands, flags,
                     targets, parameters) as JSON for tools and agents.
@@ -605,8 +669,9 @@ Options:
   --http <host:port>
                     With mcp, serve the streamable-HTTP transport on the given
                     address instead of stdio. Just <port> binds 127.0.0.1. A
-                    non-loopback host requires a bearer token (ZUKE_MCP_TOKEN);
-                    put real TLS/authn in front for production. See docs/mcp.md.
+                    non-loopback host must authenticate its callers: a bearer
+                    token (ZUKE_MCP_TOKEN) or an mcpAuth() authenticator on the
+                    build. Put real TLS in front for production. See docs/mcp.md.
   --allowed-origin <origin>
                     With mcp --http, permit this browser Origin (repeatable). By
                     default a loopback bind accepts only loopback origins (the
@@ -644,12 +709,28 @@ Options:
                     and buries the API under type-resolution warnings; the empty
                     cwd has nothing to resolve. A relative path (./mod.ts) is
                     resolved against the real working directory first.
+  outdated          Report the JSR packages the lock resolves to a version
+                    older than the registry's latest. Needs the network, which
+                    is why it is a command rather than a line in --list: a
+                    build whose specifiers are written inline (jsr:@zuke/x@^1)
+                    gets no signal from deno outdated, which reads manifests.
+  --exit-code       With outdated, exit non-zero when a package is behind or
+                    could not be checked, so a gate can fail on either — a run
+                    that reached nothing has not answered the question.
   --status <s>      With runs list, keep only runs with this status (running,
                     suspended, succeeded, failed, cancelled).
   --target <t>      With runs list, keep only runs whose graph contains this
                     target.
   --since <iso>     With runs list, keep only runs created at or after this
                     ISO-8601 timestamp.
+  --initiator <n>   With runs list, keep only runs <n> started. Matches the
+                    recorded initiator, falling back to the actor on a run
+                    recorded before initiators existed.
+  --outcome <o>     With force, what the target settles to without running:
+                    skipped (take the step off the plan) or succeeded (a person
+                    did it by hand — a later cancel compensates it).
+  --reason <why>    With force, why — recorded on the run beside who forced it,
+                    and shown by runs show.
   --limit <n>       With runs list, return at most this many runs (the newest).
   --counts          With runs list, print aggregate counts (total + per status).
   --keep <age>      With runs prune, keep runs newer than this age (e.g. 90d);
@@ -774,6 +855,11 @@ export interface MainOptions {
   graphHost?: GraphHost;
   /** Runner for the `doc` command's `deno doc` spawn (injected in tests). */
   docRunner?: DocRunner;
+  /**
+   * Lock path, registry origin and `fetch` for the `outdated` command
+   * (injected in tests, which have neither a lock nor a network).
+   */
+  outdatedOptions?: OutdatedOptions;
   /** Lifecycle observers to run alongside the build's own hooks. */
   plugins?: Plugin[];
   /** Overrides for `completions install` (home/config dir), injected in tests. */
@@ -827,7 +913,7 @@ async function installCompletionScript(
     }
     return 0;
   } catch (error) {
-    console.error(error instanceof Error ? error.message : String(error));
+    console.error(messageOf(error));
     return 1;
   }
 }
@@ -903,7 +989,7 @@ async function runResume(
     });
     return result.ok ? 0 : 1;
   } catch (error) {
-    console.error(error instanceof Error ? error.message : String(error));
+    console.error(messageOf(error));
     // A lost resume race (AlreadyResumedError) and any other failure both exit
     // non-zero; the message tells the operator what happened.
     return 1;
@@ -937,7 +1023,7 @@ async function runMcp(build: Build, parsed: ParsedArgs): Promise<number> {
     try {
       http = parseHttpAddress(parsed.httpAddr);
     } catch (error) {
-      console.error(error instanceof Error ? error.message : String(error));
+      console.error(messageOf(error));
       return 1;
     }
   }
@@ -969,7 +1055,58 @@ async function runCancel(build: Build, parsed: ParsedArgs): Promise<number> {
     // a compensation that threw surfaces non-zero so the operator notices.
     return result.failures.length > 0 ? 1 : 0;
   } catch (error) {
-    console.error(error instanceof Error ? error.message : String(error));
+    console.error(messageOf(error));
+    return 1;
+  }
+}
+
+/**
+ * Run the `force` command: settle one target of a live run without running it.
+ *
+ * Validation lives in {@link forceTarget}, which re-checks it against a
+ * freshly-read record on every compare-and-swap attempt; this layer only turns
+ * the flags into options and the result into an exit code.
+ */
+async function runForce(build: Build, parsed: ParsedArgs): Promise<number> {
+  if (parsed.forceExtra !== undefined) {
+    console.error(
+      `force: unexpected argument "${parsed.forceExtra}". ` +
+        `Usage: zuke force <run-id> <target> --outcome skipped|succeeded ` +
+        `[--reason <why>] [--actor <name>]`,
+    );
+    return 1;
+  }
+  if (parsed.forceRunId === undefined || parsed.forceTarget === undefined) {
+    console.error(
+      "Usage: zuke force <run-id> <target> --outcome skipped|succeeded " +
+        "[--reason <why>] [--actor <name>]",
+    );
+    return 1;
+  }
+  const outcome = FORCED_OUTCOMES.find((o) => o === parsed.outcome);
+  if (outcome === undefined) {
+    console.error(
+      `force: --outcome must be one of: ${FORCED_OUTCOMES.join(", ")}` +
+        (parsed.outcome === undefined ? "." : ` (got "${parsed.outcome}").`),
+    );
+    return 1;
+  }
+  try {
+    const result = await forceTarget(build, {
+      runId: parsed.forceRunId,
+      target: parsed.forceTarget,
+      outcome,
+      ...(parsed.reason === undefined ? {} : { reason: parsed.reason }),
+      actor: parsed.actor,
+    });
+    if (!result.ok) {
+      console.error(result.message);
+      return 1;
+    }
+    console.log(result.message);
+    return 0;
+  } catch (error) {
+    console.error(messageOf(error));
     return 1;
   }
 }
@@ -982,7 +1119,7 @@ async function runRegister(build: Build, parsed: ParsedArgs): Promise<number> {
       json: parsed.json,
     });
   } catch (error) {
-    console.error(error instanceof Error ? error.message : String(error));
+    console.error(messageOf(error));
     return 1;
   }
 }
@@ -1055,7 +1192,37 @@ async function runDoc(
   try {
     return await runner(spec);
   } catch (error) {
-    console.error(error instanceof Error ? error.message : String(error));
+    console.error(messageOf(error));
+    return 1;
+  }
+}
+
+/**
+ * Run the `outdated` command: compare the versions the lock resolves against
+ * the registry's latest, print the report, and — with `--exit-code` — report a
+ * finding as a non-zero exit so a gate can fail on one.
+ *
+ * A failure to read the lock is an exit 1 with the reason, matching the other
+ * commands. Being unable to reach the registry for a package is not: the
+ * report still speaks for the rest, and names the ones it could not check —
+ * which `--exit-code` also treats as a finding, since an unanswered question
+ * is not a "yes".
+ */
+async function runOutdated(
+  parsed: ParsedArgs,
+  options: OutdatedOptions = {},
+): Promise<number> {
+  try {
+    const report = await findOutdated(options);
+    console.log(formatOutdated(report));
+    // A package that could not be checked counts as a failure under
+    // --exit-code: a gate asking "are we current?" has not been told yes, and
+    // an offline runner passing quietly is the silence this command exists to
+    // break. Without the flag it stays a report and exits 0.
+    const unresolved = report.behind.length + report.unchecked.length;
+    return parsed.exitCode && unresolved > 0 ? 1 : 0;
+  } catch (error) {
+    console.error(messageOf(error));
     return 1;
   }
 }
@@ -1091,11 +1258,7 @@ async function runRuns(build: Build, parsed: ParsedArgs): Promise<number> {
     try {
       keepMs = parseDuration(parsed.keep);
     } catch (error) {
-      console.error(
-        `runs: --keep is ${
-          error instanceof Error ? error.message : String(error)
-        }`,
-      );
+      console.error(`runs: --keep is ${messageOf(error)}`);
       return 1;
     }
   }
@@ -1116,13 +1279,37 @@ async function runRuns(build: Build, parsed: ParsedArgs): Promise<number> {
     json: parsed.json,
     counts: parsed.runCounts,
     query,
+    ...(parsed.initiator === undefined ? {} : { initiator: parsed.initiator }),
     keepMs,
     keepLast,
     dryRun: parsed.dryRun,
   });
 }
 
+/**
+ * Run one CLI invocation, reporting a misconfigured backend URL as the
+ * configuration mistake it is. A plaintext `ZUKE_*_URL` is refused wherever it
+ * is resolved — a build run, `runs`, `resume`, `register` — so the report is
+ * here, around every command, rather than at each resolution site.
+ */
 export async function main(
+  BuildClass: new () => Build,
+  args: string[],
+  options: MainOptions = {},
+): Promise<number> {
+  try {
+    return await runCommand(BuildClass, args, options);
+  } catch (error) {
+    if (error instanceof InsecureBackendUrlError) {
+      console.error(error.message);
+      return 1;
+    }
+    throw error;
+  }
+}
+
+/** The body of {@link main}: parse the arguments and dispatch to the command. */
+async function runCommand(
   BuildClass: new () => Build,
   args: string[],
   options: MainOptions = {},
@@ -1213,11 +1400,17 @@ export async function main(
   if (parsed.cancel) {
     return await runCancel(build, parsed);
   }
+  if (parsed.force) {
+    return await runForce(build, parsed);
+  }
   if (parsed.register) {
     return await runRegister(build, parsed);
   }
   if (parsed.doc) {
     return await runDoc(parsed, options.docRunner);
+  }
+  if (parsed.outdated) {
+    return await runOutdated(parsed, options.outdatedOptions);
   }
 
   let name = parsed.target;
@@ -1240,6 +1433,21 @@ export async function main(
       : ` Did you mean "${suggestion}"?`;
     console.error(`Unknown target: ${name}.${hint}\n`);
     console.error(formatList(targets, params));
+    return 1;
+  }
+
+  // A typo in an explicit flag is an error, not a silent default. The
+  // environment fallback stays lenient — an unrecognised ZUKE_ACTOR_KIND reads
+  // as unstated — because that value can arrive from anywhere, while this one
+  // was typed by someone who meant something by it.
+  // `find` both validates and narrows, so the value handed to `execute` is the
+  // union rather than a string the type system has to be told about.
+  const actorKind = ACTOR_KINDS.find((kind) => kind === parsed.actorKind);
+  if (parsed.actorKind !== undefined && actorKind === undefined) {
+    console.error(
+      `--actor-kind must be one of: ${ACTOR_KINDS.join(", ")} ` +
+        `(got "${parsed.actorKind}").`,
+    );
     return 1;
   }
 
@@ -1274,6 +1482,7 @@ export async function main(
       dryRun: parsed.dryRun,
       state: parsed.state,
       actor: parsed.actor,
+      actorKind,
       plugins: options.plugins,
       renderer: options.renderer,
       signal: cleanupSignals ? controller.signal : options.signal,

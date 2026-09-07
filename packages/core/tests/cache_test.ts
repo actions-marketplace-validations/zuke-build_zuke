@@ -1,3 +1,6 @@
+// Copyright (c) 2026 the Zuke contributors
+// SPDX-License-Identifier: MIT
+
 import { assertEquals, assertStringIncludes } from "./_assert.ts";
 import { target } from "../src/target.ts";
 import {
@@ -6,11 +9,10 @@ import {
   fingerprint,
   openCache,
 } from "../src/cache.ts";
-import {
-  archiveOutputs,
-  remoteCacheKey,
-  type RemoteCacheStore,
-} from "../src/remote_cache.ts";
+import { archiveOutputs, remoteCacheKey } from "../src/remote_cache.ts";
+import { gzip, tar } from "../src/compression.ts";
+import { withTemp } from "./_temp.ts";
+import { MemCacheStore } from "./_fakes.ts";
 
 const enc = (text: string) => new TextEncoder().encode(text);
 const dec = (bytes: Uint8Array) => new TextDecoder().decode(bytes);
@@ -135,8 +137,7 @@ Deno.test("a target without inputs is never cached", async () => {
 });
 
 Deno.test("defaultCacheHost hashes a real directory and tolerates missing paths", async () => {
-  const dir = await Deno.makeTempDir();
-  try {
+  await withTemp(async (dir) => {
     await Deno.mkdir(`${dir}/src`);
     await Deno.writeTextFile(`${dir}/src/a.ts`, "a");
     const t = target().inputs(`${dir}/src`, `${dir}/missing.ts`);
@@ -144,9 +145,7 @@ Deno.test("defaultCacheHost hashes a real directory and tolerates missing paths"
     await Deno.writeTextFile(`${dir}/src/a.ts`, "changed");
     const after = await fingerprint(t, defaultCacheHost);
     assertEquals(before === after, false);
-  } finally {
-    await Deno.remove(dir, { recursive: true });
-  }
+  });
 });
 
 Deno.test("a corrupt or non-object store is treated as empty", async () => {
@@ -168,26 +167,6 @@ Deno.test("a corrupt or non-object store is treated as empty", async () => {
   assertEquals(await mixed.upToDate(t), false);
 });
 
-/** A recording in-memory {@link RemoteCacheStore}. */
-class MemStore implements RemoteCacheStore {
-  readonly map = new Map<string, Uint8Array>();
-  readonly gets: string[] = [];
-  readonly puts: string[] = [];
-  failGet = false;
-  failPut = false;
-  get(key: string): Promise<Uint8Array | null> {
-    this.gets.push(key);
-    if (this.failGet) return Promise.reject(new Error("network down"));
-    return Promise.resolve(this.map.get(key) ?? null);
-  }
-  put(key: string, artifact: Uint8Array): Promise<void> {
-    this.puts.push(key);
-    if (this.failPut) return Promise.reject(new Error("network down"));
-    this.map.set(key, artifact);
-    return Promise.resolve();
-  }
-}
-
 /** A cacheable target with one input and one output directory, named `build`. */
 function buildTarget(): ReturnType<typeof target> {
   const t = target().inputs("in.txt").outputs("dist");
@@ -205,7 +184,7 @@ Deno.test("the remote store restores outputs on a local miss", async () => {
   // Pre-seed the store with an archive keyed by the current fingerprint, then
   // simulate a fresh checkout by dropping the local output.
   const fp = await fingerprint(t, host);
-  const store = new MemStore();
+  const store = new MemCacheStore();
   store.map.set(
     remoteCacheKey("build", fp),
     await archiveOutputs(["dist"], host),
@@ -225,7 +204,7 @@ Deno.test("a successful run uploads outputs to the remote store", async () => {
   host.dirs.set("dist", ["app.js"]);
   host.files.set("dist/app.js", enc("built"));
   const t = buildTarget();
-  const store = new MemStore();
+  const store = new MemCacheStore();
 
   const cache = await openCache(STORE, host, { remote: store });
   await cache.record(t);
@@ -241,7 +220,7 @@ Deno.test("outputs just restored are not re-uploaded", async () => {
   host.files.set("dist/app.js", enc("built"));
   const t = buildTarget();
   const fp = await fingerprint(t, host);
-  const store = new MemStore();
+  const store = new MemCacheStore();
   store.map.set(
     remoteCacheKey("build", fp),
     await archiveOutputs(["dist"], host),
@@ -261,7 +240,7 @@ Deno.test("a remote lookup failure warns and falls back to a rebuild", async () 
   host.dirs.set("dist", ["app.js"]);
   host.files.set("dist/app.js", enc("built"));
   const t = buildTarget();
-  const store = new MemStore();
+  const store = new MemCacheStore();
   store.failGet = true;
   const warnings: string[] = [];
 
@@ -279,7 +258,7 @@ Deno.test("a remote upload failure warns but never fails the build", async () =>
   host.dirs.set("dist", ["app.js"]);
   host.files.set("dist/app.js", enc("built"));
   const t = buildTarget();
-  const store = new MemStore();
+  const store = new MemCacheStore();
   store.failPut = true;
   const warnings: string[] = [];
 
@@ -296,11 +275,43 @@ Deno.test("targets without outputs never touch the remote store", async () => {
   host.files.set("in.txt", enc("v1"));
   const t = target().inputs("in.txt"); // no outputs
   t.name_ = "lint";
-  const store = new MemStore();
+  const store = new MemCacheStore();
 
   const cache = await openCache(STORE, host, { remote: store });
   assertEquals(await cache.upToDate(t), false);
   await cache.record(t);
   assertEquals(store.gets, []);
   assertEquals(store.puts, []);
+});
+
+Deno.test("a poisoned remote archive is a cache miss and a warning, never a restore", async () => {
+  const host = new MemHost();
+  host.files.set("in.txt", enc("v1"));
+  const t = buildTarget(); // declares `dist` as its only output
+  const fp = await fingerprint(t, host);
+
+  // Whoever can write the store put a `deno.json` in the artifact. Restoring it
+  // would let them choose a file every later target reads.
+  const store = new MemCacheStore();
+  store.map.set(
+    remoteCacheKey("build", fp),
+    await gzip(tar([
+      { name: "dist/app.js", data: enc("built") },
+      { name: "deno.json", data: enc('{ "tasks": { "x": "curl evil" } }') },
+    ])),
+  );
+
+  const warnings: string[] = [];
+  const cache = await openCache(STORE, host, {
+    remote: store,
+    warn: (m) => warnings.push(m),
+  });
+
+  // A miss, so the target rebuilds — the store cannot halt the build either.
+  assertEquals(await cache.upToDate(t), false);
+  assertStringIncludes(warnings.join("\n"), "refused");
+  assertStringIncludes(warnings.join("\n"), "declared outputs");
+  // Nothing from the archive landed, not even the entry that was in scope.
+  assertEquals(host.files.has("deno.json"), false);
+  assertEquals(host.files.has("dist/app.js"), false);
 });

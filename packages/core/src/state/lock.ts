@@ -1,3 +1,6 @@
+// Copyright (c) 2026 the Zuke contributors
+// SPDX-License-Identifier: MIT
+
 /**
  * Cross-run locks: the {@link LockHolder} identity, the typed
  * {@link LockConflictError}, the {@link lockKey} joiner, and the stored lock
@@ -10,6 +13,11 @@
  *
  * @module
  */
+
+import { asObject, fields } from "../json_shape.ts";
+
+/** The field readers for a lock record's fields. */
+const { str, optionalStr } = fields("state: lock field");
 
 /** Who holds a lock — surfaced to the loser of a conflict so it can act. */
 export interface LockHolder {
@@ -55,6 +63,22 @@ export function lockKey(...parts: Array<string | number>): string {
     .join("-");
 }
 
+/**
+ * One live lock, as reported by {@link "./store.ts".StateStore.listLocks} — the
+ * key, who holds it, and when it lapses if the holder disappears.
+ *
+ * Deliberately not the stored record: the acquisition token is the holder's
+ * proof of ownership, and a read-only listing has no business handing it out.
+ */
+export interface HeldLockEntry {
+  /** The lock key, as it was acquired. */
+  key: string;
+  /** Who holds it. */
+  holder: LockHolder;
+  /** Epoch-millisecond expiry: when it frees itself if the holder is gone. */
+  expiresAt: number;
+}
+
 /** A stored lock: its holder, the acquisition token, and its expiry. */
 export interface LockRecord {
   /** The current holder's identity. */
@@ -65,33 +89,11 @@ export interface LockRecord {
   expiresAt: number;
 }
 
-/** Narrow an unknown value to a plain object without casting, else `null`. */
-function asObject(value: unknown): Record<string, unknown> | null {
-  if (typeof value !== "object" || value === null || Array.isArray(value)) {
-    return null;
-  }
-  const out: Record<string, unknown> = {};
-  for (const [key, val] of Object.entries(value)) out[key] = val;
-  return out;
-}
-
-/** Read a required string field, throwing a descriptive error otherwise. */
-function str(object: Record<string, unknown>, field: string): string {
-  const value = object[field];
-  if (typeof value !== "string") {
-    throw new Error(`state: lock field "${field}" is not a string`);
-  }
-  return value;
-}
-
 /** Parse and validate a {@link LockHolder} from an untrusted value. */
 export function parseLockHolder(value: unknown): LockHolder {
   const object = asObject(value);
   if (object === null) throw new Error("state: lock holder is not an object");
-  const runUrl = object.runUrl;
-  if (runUrl !== undefined && typeof runUrl !== "string") {
-    throw new Error(`state: lock field "runUrl" is not a string`);
-  }
+  const runUrl = optionalStr(object, "runUrl");
   const holder: LockHolder = {
     actor: str(object, "actor"),
     runId: str(object, "runId"),

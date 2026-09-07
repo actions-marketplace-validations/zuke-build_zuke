@@ -1,3 +1,6 @@
+// Copyright (c) 2026 the Zuke contributors
+// SPDX-License-Identifier: MIT
+
 /**
  * The effectful side of `zuke graph`: write the rendered HTML under the
  * repository's `.zuke/` directory and open it in the default browser.
@@ -10,22 +13,13 @@
  */
 
 import { graphData, renderGraphHtml } from "./graph_html.ts";
-import { findConfigDir, pathExists } from "./config.ts";
+import { ARTIFACT_DIR, findConfigDir, pathExists } from "./config.ts";
 import { absolutePath } from "./path.ts";
 import type { TargetBuilder } from "./target.ts";
+import { browserCommand } from "./browser.ts";
 
 /** Spawn a detached command (binary + args); used to launch a browser. */
 export type Spawn = (cmd: string, args: string[]) => Promise<void>;
-
-/** The platform-appropriate command to open `target` in the default app. */
-export function browserCommand(
-  os: typeof Deno.build.os,
-  target: string,
-): [string, string[]] {
-  if (os === "windows") return ["cmd", ["/c", "start", "", target]];
-  if (os === "darwin") return ["open", [target]];
-  return ["xdg-open", [target]];
-}
 
 /** The real spawner: run the opener, discarding its output. */
 const denoSpawn: Spawn = async (cmd, args) => {
@@ -82,8 +76,6 @@ export interface GraphCommandOptions {
   open: boolean;
 }
 
-/** The directory under the repo root where Zuke writes generated artifacts. */
-const ARTIFACT_DIR = ".zuke";
 /** The graph file name within {@link ARTIFACT_DIR}. */
 const GRAPH_FILE = "graph.html";
 

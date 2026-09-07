@@ -1,3 +1,6 @@
+// Copyright (c) 2026 the Zuke contributors
+// SPDX-License-Identifier: MIT
+
 import { assertEquals, assertThrows } from "./_assert.ts";
 import { absolutePath } from "../src/path.ts";
 import {
@@ -7,6 +10,7 @@ import {
   repoRoot,
   repoRootFrom,
 } from "../src/config.ts";
+import { withTempCwd } from "./_temp.ts";
 
 Deno.test("findConfigDir returns the directory holding zuke.json", () => {
   const dir = findConfigDir(
@@ -74,13 +78,7 @@ Deno.test("repoRoot resolves from the current working directory", async () => {
 });
 
 Deno.test("repoRoot throws when no config exists above the cwd", async () => {
-  const dir = await Deno.makeTempDir();
-  const original = Deno.cwd();
-  try {
-    Deno.chdir(dir);
+  await withTempCwd(() => {
     assertThrows(() => repoRoot(), Error, "could not find zuke.json");
-  } finally {
-    Deno.chdir(original);
-    await Deno.remove(dir, { recursive: true });
-  }
+  });
 });

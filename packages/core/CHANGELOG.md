@@ -1,5 +1,114 @@
 # Changelog
 
+## [1.46.0](https://github.com/zuke-build/zuke/compare/core-v1.45.0...core-v1.46.0) (2026-09-02)
+
+
+### Features
+
+* summary notes in the run record, on the check target, and from the remaining wrappers ([#465](https://github.com/zuke-build/zuke/issues/465)) ([cb25d83](https://github.com/zuke-build/zuke/commit/cb25d8303ac12bbb31335bfc8ef55082a4c7c71f))
+
+## [1.45.0](https://github.com/zuke-build/zuke/compare/core-v1.44.0...core-v1.45.0) (2026-09-02)
+
+
+### Features
+
+* **core:** reportTestCounts, one summary shape for every test-runner wrapper ([#459](https://github.com/zuke-build/zuke/issues/459)) ([22c1c1b](https://github.com/zuke-build/zuke/commit/22c1c1beef91207412acfbcb1aeed4ba4696ed92)), closes [#456](https://github.com/zuke-build/zuke/issues/456)
+
+## [1.44.0](https://github.com/zuke-build/zuke/compare/core-v1.43.0...core-v1.44.0) (2026-09-02)
+
+
+### Features
+
+* **core:** per-target summary notes in the build summary ([#450](https://github.com/zuke-build/zuke/issues/450)) ([7882f14](https://github.com/zuke-build/zuke/commit/7882f14967b9109aa391b214d3206a7f5388e027))
+
+## [1.43.0](https://github.com/zuke-build/zuke/compare/core-v1.42.1...core-v1.43.0) (2026-09-02)
+
+
+### Features
+
+* **core:** `FileTasks.symlink` and `readLink`, with a force mode ([#438](https://github.com/zuke-build/zuke/issues/438)) ([6ce3bd0](https://github.com/zuke-build/zuke/commit/6ce3bd0763a093e4ed039d6fefd47e31b323ee9e))
+* **core:** a `zuke outdated` command for stale JSR pins ([#441](https://github.com/zuke-build/zuke/issues/441)) ([4d53db2](https://github.com/zuke-build/zuke/commit/4d53db2c2eb739c59c77b1119c3653b7fad821ed))
+
+## [1.42.1](https://github.com/zuke-build/zuke/compare/core-v1.42.0...core-v1.42.1) (2026-08-26)
+
+
+### Bug Fixes
+
+* **core:** retry a record publish that loses to a concurrent reader ([#395](https://github.com/zuke-build/zuke/issues/395)) ([77b468b](https://github.com/zuke-build/zuke/commit/77b468b504977cb33fa385fe3912c0feb0fa9470)), closes [#394](https://github.com/zuke-build/zuke/issues/394)
+
+## [1.42.0](https://github.com/zuke-build/zuke/compare/core-v1.41.0...core-v1.42.0) (2026-08-26)
+
+
+### Features
+
+* **core:** list the locks a state store holds ([#392](https://github.com/zuke-build/zuke/issues/392)) ([1f6c7ed](https://github.com/zuke-build/zuke/commit/1f6c7edfc1cbe1dfa2935adbb0c0044e16e9d570)), closes [#391](https://github.com/zuke-build/zuke/issues/391)
+
+## [1.41.0](https://github.com/zuke-build/zuke/compare/core-v1.40.0...core-v1.41.0) (2026-08-25)
+
+
+### Features
+
+* **core:** wait for a contended target lock ([#379](https://github.com/zuke-build/zuke/issues/379)) ([67a78b8](https://github.com/zuke-build/zuke/commit/67a78b89067482039c111a1823a38043c1b5358b))
+
+
+### Bug Fixes
+
+* **core:** match absolute glob patterns ([#375](https://github.com/zuke-build/zuke/issues/375)) ([d57ba82](https://github.com/zuke-build/zuke/commit/d57ba8246db85c103d79632fe9118fd5e8e0ed8a)), closes [#374](https://github.com/zuke-build/zuke/issues/374)
+
+## [1.40.0](https://github.com/zuke-build/zuke/compare/core-v1.39.0...core-v1.40.0) (2026-08-22)
+
+
+### Features
+
+* **console:** Zuke logo task, gh api task, and a browser opener in core ([#366](https://github.com/zuke-build/zuke/issues/366)) ([2b1453d](https://github.com/zuke-build/zuke/commit/2b1453ddaa3bd6b77437b4b39369ddc224393b8a))
+
+## [1.39.0](https://github.com/zuke-build/zuke/compare/core-v1.38.3...core-v1.39.0) (2026-08-13)
+
+
+### Features
+
+* **gh:** release-asset uploads, the Gemini extension archive, and a coverage push to 98% ([#352](https://github.com/zuke-build/zuke/issues/352)) ([a678f35](https://github.com/zuke-build/zuke/commit/a678f35c3baea51ebb837dbf2cc0e100760ff0ae))
+
+## [1.38.3](https://github.com/zuke-build/zuke/compare/core-v1.38.2...core-v1.38.3) (2026-08-13)
+
+
+### Bug Fixes
+
+* **cli:** escape line separators in generated literals; license headers and review docs ([#347](https://github.com/zuke-build/zuke/issues/347)) ([114f842](https://github.com/zuke-build/zuke/commit/114f84246e83fc6fb0bd12b55e8eb04192978074))
+
+## [1.38.2](https://github.com/zuke-build/zuke/compare/core-v1.38.1...core-v1.38.2) (2026-08-11)
+
+
+### Bug Fixes
+
+* **core:** stop a lost lease from rolling back a run another process owns ([#332](https://github.com/zuke-build/zuke/issues/332)) ([c15aab2](https://github.com/zuke-build/zuke/commit/c15aab2984f4a9b85a36b244a6e2e9c0d243b55a))
+
+## [1.38.1](https://github.com/zuke-build/zuke/compare/core-v1.38.0...core-v1.38.1) (2026-08-11)
+
+
+### Bug Fixes
+
+* **core:** close three trust gaps at the backend, registry and cache boundaries ([#330](https://github.com/zuke-build/zuke/issues/330)) ([37fbf34](https://github.com/zuke-build/zuke/commit/37fbf3469316dd5e95243d6ea7bb1cdd1b114c3b))
+
+## [1.38.0](https://github.com/zuke-build/zuke/compare/core-v1.37.0...core-v1.38.0) (2026-08-11)
+
+
+### Features
+
+* **core:** scope run recovery to the build that owns the run ([#328](https://github.com/zuke-build/zuke/issues/328)) ([0aabb2b](https://github.com/zuke-build/zuke/commit/0aabb2b9c0d5149c17201ce755d1b62d1106a68f))
+
+## [1.37.0](https://github.com/zuke-build/zuke/compare/core-v1.36.0...core-v1.37.0) (2026-08-11)
+
+
+### Features
+
+* **core:** enforce operator token over whole run plan ([#324](https://github.com/zuke-build/zuke/issues/324)) ([4b44379](https://github.com/zuke-build/zuke/commit/4b443799cb11f5e216fdc1be44cf7cc659956677))
+
+
+### Bug Fixes
+
+* **core:** redact a multi-line secret line by line ([#326](https://github.com/zuke-build/zuke/issues/326)) ([7bbb75a](https://github.com/zuke-build/zuke/commit/7bbb75af025f18d0a4582b8ae514efead72924de))
+
 ## [1.36.0](https://github.com/zuke-build/zuke/compare/core-v1.35.0...core-v1.36.0) (2026-08-10)
 
 

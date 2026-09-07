@@ -1,5 +1,60 @@
 # Changelog
 
+## [2.3.0](https://github.com/zuke-build/zuke/compare/ai-v2.2.1...ai-v2.3.0) (2026-08-30)
+
+
+### Features
+
+* **ai:** a single runOnly scope for where a fixer may run ([#430](https://github.com/zuke-build/zuke/issues/430)) ([6d0ff7f](https://github.com/zuke-build/zuke/commit/6d0ff7f6e11d141ac049027300340880020b2df8)), closes [#429](https://github.com/zuke-build/zuke/issues/429)
+
+## [2.2.1](https://github.com/zuke-build/zuke/compare/ai-v2.2.0...ai-v2.2.1) (2026-08-14)
+
+
+### Bug Fixes
+
+* **ai:** let verify remove only what it can disprove ([#360](https://github.com/zuke-build/zuke/issues/360)) ([8760e0d](https://github.com/zuke-build/zuke/commit/8760e0d9d393198c791c41b18218e6cd80f267a4))
+
+## [2.2.0](https://github.com/zuke-build/zuke/compare/ai-v2.1.1...ai-v2.2.0) (2026-08-13)
+
+
+### Features
+
+* **gh:** release-asset uploads, the Gemini extension archive, and a coverage push to 98% ([#352](https://github.com/zuke-build/zuke/issues/352)) ([a678f35](https://github.com/zuke-build/zuke/commit/a678f35c3baea51ebb837dbf2cc0e100760ff0ae))
+
+## [2.1.1](https://github.com/zuke-build/zuke/compare/ai-v2.1.0...ai-v2.1.1) (2026-08-13)
+
+
+### Bug Fixes
+
+* **cli:** escape line separators in generated literals; license headers and review docs ([#347](https://github.com/zuke-build/zuke/issues/347)) ([114f842](https://github.com/zuke-build/zuke/commit/114f84246e83fc6fb0bd12b55e8eb04192978074))
+
+## [2.1.0](https://github.com/zuke-build/zuke/compare/ai-v2.0.0...ai-v2.1.0) (2026-08-13)
+
+
+### Features
+
+* **ai:** drive review discussions on GitLab, Azure and Bitbucket ([#336](https://github.com/zuke-build/zuke/issues/336)) ([f92f929](https://github.com/zuke-build/zuke/commit/f92f929250e6c8411f6790ad1043794b9477bdab))
+* **ai:** findings as inline review threads on GitHub ([#343](https://github.com/zuke-build/zuke/issues/343)) ([0f39ce9](https://github.com/zuke-build/zuke/commit/0f39ce9f103b1d38ca560e0e4ef55c4fcae70077))
+* **ai:** point a dismissal at the suppress list as the cross-PR override ([#345](https://github.com/zuke-build/zuke/issues/345)) ([11a2b55](https://github.com/zuke-build/zuke/commit/11a2b55880da50bef1a71a1cf60b69b2209fd08c))
+* **ai:** resolve a reworded finding onto the identity it already has ([#338](https://github.com/zuke-build/zuke/issues/338)) ([1533b88](https://github.com/zuke-build/zuke/commit/1533b887a8b2e0954092dee5859280cf08600b3c))
+
+
+### Bug Fixes
+
+* **ai:** compare a reworded finding against still-open findings too ([#341](https://github.com/zuke-build/zuke/issues/341)) ([5b65329](https://github.com/zuke-build/zuke/commit/5b65329e1514a22a3ad63da1a3be54b8952ba508))
+* **ai:** stop model text from forging the review state block ([#340](https://github.com/zuke-build/zuke/issues/340)) ([c6b7115](https://github.com/zuke-build/zuke/commit/c6b71157ddd6f1457bb56d296c473bf6ee68f0b7))
+
+## [2.0.0](https://github.com/zuke-build/zuke/compare/ai-v1.8.1...ai-v2.0.0) (2026-08-12)
+
+
+### ⚠ BREAKING CHANGES
+
+* **ai:** discussion-driven review with adversarial verify and deeper context ([#334](https://github.com/zuke-build/zuke/issues/334))
+
+### Features
+
+* **ai:** discussion-driven review with adversarial verify and deeper context ([#334](https://github.com/zuke-build/zuke/issues/334)) ([3002b69](https://github.com/zuke-build/zuke/commit/3002b69831f8df2cdf8805cf7f8e6dcfadbda3f8))
+
 ## [1.8.1](https://github.com/zuke-build/zuke/compare/ai-v1.8.0...ai-v1.8.1) (2026-08-08)
 
 

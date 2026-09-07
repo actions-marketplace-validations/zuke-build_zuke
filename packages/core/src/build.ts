@@ -1,3 +1,6 @@
+// Copyright (c) 2026 the Zuke contributors
+// SPDX-License-Identifier: MIT
+
 /**
  * The {@link Build} base class and target discovery.
  *
@@ -14,7 +17,7 @@ import type { OrderingEdge } from "./graph.ts";
 import type { RemoteCacheStore } from "./remote_cache.ts";
 import type { StateStore } from "./state/store.ts";
 import type { BuildRegistry } from "./registry/registry.ts";
-import type { McpIdentityHook } from "./mcp/jsonrpc.ts";
+import type { McpAuthenticator, McpIdentityHook } from "./mcp/auth.ts";
 
 /** Whether a value is a plain object (a component bundle), not a class instance. */
 function isPlainObject(value: unknown): value is Record<string, unknown> {
@@ -308,6 +311,71 @@ export class Build {
    */
   mcpIdentity(): McpIdentityHook | undefined {
     return undefined;
+  }
+
+  /**
+   * An authenticator for `zuke mcp` — the general form of
+   * {@link Build.mcpIdentity}, for a server callers reach directly rather than
+   * through a proxy that has already identified them.
+   *
+   * It runs before any dispatch, may be asynchronous (verifying a signature is),
+   * and refuses by returning an {@link McpAuthReject} rather than by throwing —
+   * so over HTTP the refusal is answered with its own status and
+   * `WWW-Authenticate` challenge, which is how an MCP client discovers where to
+   * authenticate. The identity it resolves overrides `--actor`, the environment,
+   * and the client label for that call, and flows to the audit trail, run
+   * records, lock holders, and (for a registry-spawned build) the child's
+   * `ZUKE_ACTOR`, `ZUKE_ACTOR_KIND` and `ZUKE_ACTOR_ROLES`. Throwing still
+   * refuses the request: the seam is fail-closed. Default: none.
+   *
+   * Declare **either** this or {@link Build.mcpIdentity}; declaring both is
+   * refused when the server starts, rather than letting one silently win.
+   *
+   * ```ts
+   * class ControlPlane extends Build {
+   *   override mcpAuth(): McpAuthenticator {
+   *     return {
+   *       authenticate: async (ctx: McpRequestContext) => {
+   *         const claims = await verifyBearer(ctx.headers.get("authorization"));
+   *         if (claims === null) {
+   *           return { status: 401, error: "invalid_token", challenge: "Bearer" };
+   *         }
+   *         return { actor: claims.sub, kind: "human", roles: claims.roles };
+   *       },
+   *     };
+   *   }
+   * }
+   * ```
+   */
+  mcpAuth(): McpAuthenticator | undefined {
+    return undefined;
+  }
+
+  /**
+   * Targets an operator may **not** force with `zuke force` — the steps whose
+   * body must actually run, whatever a live incident looks like.
+   *
+   * Forcing settles a target without executing it: `skipped` takes a step off
+   * the plan, `succeeded` records that a person did it by hand. That is the
+   * right tool for a step that cannot succeed and the wrong one for a step
+   * whose whole purpose is to be the thing that happened — a production apply,
+   * a signing step, a migration. Naming those here refuses the force rather
+   * than trusting an operator under pressure to remember which is which.
+   *
+   * Returns target **references**, not names, so renaming a target keeps the
+   * list correct instead of silently emptying it.
+   *
+   * ```ts
+   * class CD extends Build {
+   *   applyProduction = target().executes(() => applyTerraform());
+   *   override unforceable() {
+   *     return [this.applyProduction];
+   *   }
+   * }
+   * ```
+   */
+  unforceable(): TargetBuilder[] {
+    return [];
   }
 }
 

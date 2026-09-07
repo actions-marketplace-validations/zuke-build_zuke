@@ -1,5 +1,26 @@
 # Changelog
 
+## [1.2.0](https://github.com/zuke-build/zuke/compare/gcloud-v1.1.0...gcloud-v1.2.0) (2026-09-01)
+
+
+### Features
+
+* **gcloud:** type `gcloud run services update` ([#437](https://github.com/zuke-build/zuke/issues/437)) ([f8449b8](https://github.com/zuke-build/zuke/commit/f8449b8e66a35be3c9f0ce05e211d45eef9f9c51)), closes [#432](https://github.com/zuke-build/zuke/issues/432)
+
+## [1.1.0](https://github.com/zuke-build/zuke/compare/gcloud-v1.0.1...gcloud-v1.1.0) (2026-08-30)
+
+
+### Features
+
+* **gcloud:** type the commands a build drives, with scalar readers ([#427](https://github.com/zuke-build/zuke/issues/427)) ([02d8dc9](https://github.com/zuke-build/zuke/commit/02d8dc9b9bebb44f92d13153f1859923a9dfdc8f))
+
+## [1.0.1](https://github.com/zuke-build/zuke/compare/gcloud-v1.0.0...gcloud-v1.0.1) (2026-08-13)
+
+
+### Bug Fixes
+
+* **cli:** escape line separators in generated literals; license headers and review docs ([#347](https://github.com/zuke-build/zuke/issues/347)) ([114f842](https://github.com/zuke-build/zuke/commit/114f84246e83fc6fb0bd12b55e8eb04192978074))
+
 ## [1.0.0](https://github.com/zuke-build/zuke/compare/gcloud-v0.3.1...gcloud-v1.0.0) (2026-07-30)
 
 

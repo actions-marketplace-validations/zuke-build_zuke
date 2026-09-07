@@ -1,5 +1,33 @@
 # Changelog
 
+## [1.3.0](https://github.com/zuke-build/zuke/compare/node-v1.2.0...node-v1.3.0) (2026-09-02)
+
+
+### Features
+
+* report test counts from every test-runner wrapper ([#461](https://github.com/zuke-build/zuke/issues/461)) ([2256d1e](https://github.com/zuke-build/zuke/commit/2256d1e41609067d42f40e3bc6107d3cec4fd379))
+
+## [1.2.0](https://github.com/zuke-build/zuke/compare/node-v1.1.0...node-v1.2.0) (2026-08-25)
+
+
+### Features
+
+* **node:** exit the evaluate child once its result is written ([#373](https://github.com/zuke-build/zuke/issues/373)) ([2f4ecb9](https://github.com/zuke-build/zuke/commit/2f4ecb914d00b3c5dbe6cc82c88ac4dff8cf75cf))
+
+## [1.1.0](https://github.com/zuke-build/zuke/compare/node-v1.0.1...node-v1.1.0) (2026-08-14)
+
+
+### Features
+
+* add lint-staged, storybook and redocly wrappers plus NodeTasks.evaluate ([#359](https://github.com/zuke-build/zuke/issues/359)) ([f93ed15](https://github.com/zuke-build/zuke/commit/f93ed15db719877472fa4a91083f8f0f61a7b5b2))
+
+## [1.0.1](https://github.com/zuke-build/zuke/compare/node-v1.0.0...node-v1.0.1) (2026-08-13)
+
+
+### Bug Fixes
+
+* **cli:** escape line separators in generated literals; license headers and review docs ([#347](https://github.com/zuke-build/zuke/issues/347)) ([114f842](https://github.com/zuke-build/zuke/commit/114f84246e83fc6fb0bd12b55e8eb04192978074))
+
 ## [1.0.0](https://github.com/zuke-build/zuke/compare/node-v0.2.2...node-v1.0.0) (2026-07-30)
 
 

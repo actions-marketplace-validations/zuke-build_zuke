@@ -1,6 +1,12 @@
+// Copyright (c) 2026 the Zuke contributors
+// SPDX-License-Identifier: MIT
+
 import { assertEquals, assertRejects } from "../../core/tests/_assert.ts";
 import { ToolNotFoundError } from "@zuke/core/tooling";
-import { missingTool } from "@zuke/core/tooling/conformance";
+import {
+  assertWrapperConformance,
+  missingTool,
+} from "@zuke/core/tooling/conformance";
 import {
   TerraformApplySettings,
   TerraformDestroySettings,
@@ -142,5 +148,15 @@ Deno.test("every TerraformTasks function reaches execution", async () => {
   await assertRejects(
     () => TerraformTasks.output(missingTool),
     ToolNotFoundError,
+  );
+});
+
+Deno.test("terraform: conforms to the wrapper contract", async () => {
+  await assertWrapperConformance(
+    () => new TerraformInitSettings(),
+    "terraform",
+    {
+      resolution: "path",
+    },
   );
 });

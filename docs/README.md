@@ -50,7 +50,13 @@
   compiled to UTC cron with a daylight-saving wall-clock guard.
 - [CLI reference](./cli.md) — commands and flags.
 - [Programmatic API](./programmatic-api.md) — drive Zuke from your own code.
-- [Versioning & compatibility](./versioning.md) — core semver vs. 0.x wrappers,
-  the `@zuke/core` floor, and pinning guidance.
-- [How Zuke compares](./comparison.md) — a capability matrix against `deno task`,
-  npm scripts, Make, Nx, Turborepo, and Dagger, on the capabilities Zuke provides.
+- [Versioning & compatibility](./versioning.md) — one semver tier across every
+  package, the `@zuke/core` floor, and pinning guidance.
+- [Security assurance case](./assurance-case.md) — the threat model, trust
+  boundaries, and why the security requirements in
+  [`SECURITY.md`](../SECURITY.md) are met.
+- [Security review](./security-review.md) — the performed security reviews:
+  scope, method, findings, and outcomes.
+- [How Zuke compares](./comparison.md) — a capability matrix against
+  `deno task`, npm scripts, Make, Nx, Turborepo, and Dagger, on the capabilities
+  Zuke provides.

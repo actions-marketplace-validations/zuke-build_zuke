@@ -1,3 +1,6 @@
+// Copyright (c) 2026 the Zuke contributors
+// SPDX-License-Identifier: MIT
+
 /**
  * Git-aware execution: restrict a run to the targets *affected* by the files
  * that changed since a base git revision. Pairs with the incremental
@@ -19,6 +22,7 @@
  * @module
  */
 
+import { messageOf } from "./internal.ts";
 import type { TargetBuilder } from "./target.ts";
 
 /**
@@ -112,7 +116,7 @@ export async function runGitProcess(
       stderr: "piped",
     }).output();
   } catch (error) {
-    const detail = error instanceof Error ? error.message : String(error);
+    const detail = messageOf(error);
     throw new Error(
       `could not run \`${bin}\`: ${detail}. Is git installed and on your PATH?`,
     );

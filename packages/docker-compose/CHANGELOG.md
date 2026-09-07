@@ -1,5 +1,27 @@
 # Changelog
 
+## [1.2.0](https://github.com/zuke-build/zuke/compare/docker-compose-v1.1.0...docker-compose-v1.2.0) (2026-08-30)
+
+
+### Features
+
+* **docker-compose:** wrap the commands the package was missing, with readers ([#421](https://github.com/zuke-build/zuke/issues/421)) ([0aa9f75](https://github.com/zuke-build/zuke/commit/0aa9f75beca237d05523dfc335b92f4e055e24f2))
+
+## [1.1.0](https://github.com/zuke-build/zuke/compare/docker-compose-v1.0.1...docker-compose-v1.1.0) (2026-08-26)
+
+
+### Features
+
+* **docker-compose:** set a pull policy on compose up ([#389](https://github.com/zuke-build/zuke/issues/389)) ([42a99ad](https://github.com/zuke-build/zuke/commit/42a99ad23c56674602acecc095382d64102a9681))
+* **docker-compose:** start compose services without their dependencies ([#387](https://github.com/zuke-build/zuke/issues/387)) ([fd7d37b](https://github.com/zuke-build/zuke/commit/fd7d37bf79cf24466545a7bae76ac2b9a111e10a))
+
+## [1.0.1](https://github.com/zuke-build/zuke/compare/docker-compose-v1.0.0...docker-compose-v1.0.1) (2026-08-13)
+
+
+### Bug Fixes
+
+* **cli:** escape line separators in generated literals; license headers and review docs ([#347](https://github.com/zuke-build/zuke/issues/347)) ([114f842](https://github.com/zuke-build/zuke/commit/114f84246e83fc6fb0bd12b55e8eb04192978074))
+
 ## [1.0.0](https://github.com/zuke-build/zuke/compare/docker-compose-v0.4.0...docker-compose-v1.0.0) (2026-07-30)
 
 

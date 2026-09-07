@@ -1,3 +1,6 @@
+// Copyright (c) 2026 the Zuke contributors
+// SPDX-License-Identifier: MIT
+
 /**
  * The Zuke project config file and repository-root resolution.
  *
@@ -19,6 +22,14 @@ import { type AbsolutePath, absolutePath } from "./path.ts";
 
 /** The Zuke config file name; its presence marks a repository root. */
 export const CONFIG_FILE = "zuke.json";
+
+/**
+ * The directory under the repository root where Zuke writes its own artifacts —
+ * the run state (`runs/`), the cache index, the rendered graph. One constant so
+ * every module that composes a path under it agrees on the name. Module-internal:
+ * deliberately not re-exported from `mod.ts`.
+ */
+export const ARTIFACT_DIR = ".zuke";
 
 /**
  * Whether a filesystem entry exists. A `NotFound` error maps to `false`; any

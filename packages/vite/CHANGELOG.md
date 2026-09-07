@@ -1,5 +1,19 @@
 # Changelog
 
+## [1.1.0](https://github.com/zuke-build/zuke/compare/vite-v1.0.1...vite-v1.1.0) (2026-08-14)
+
+
+### Features
+
+* add lint-staged, storybook and redocly wrappers plus NodeTasks.evaluate ([#359](https://github.com/zuke-build/zuke/issues/359)) ([f93ed15](https://github.com/zuke-build/zuke/commit/f93ed15db719877472fa4a91083f8f0f61a7b5b2))
+
+## [1.0.1](https://github.com/zuke-build/zuke/compare/vite-v1.0.0...vite-v1.0.1) (2026-08-13)
+
+
+### Bug Fixes
+
+* **cli:** escape line separators in generated literals; license headers and review docs ([#347](https://github.com/zuke-build/zuke/issues/347)) ([114f842](https://github.com/zuke-build/zuke/commit/114f84246e83fc6fb0bd12b55e8eb04192978074))
+
 ## [1.0.0](https://github.com/zuke-build/zuke/compare/vite-v0.1.3...vite-v1.0.0) (2026-07-30)
 
 

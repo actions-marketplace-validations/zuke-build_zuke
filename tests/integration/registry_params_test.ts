@@ -1,3 +1,6 @@
+// Copyright (c) 2026 the Zuke contributors
+// SPDX-License-Identifier: MIT
+
 /**
  * Integration: a build's declared parameters flow all the way from
  * `zuke register` through a real {@link FileSystemBuildRegistry} (descriptor
@@ -18,6 +21,8 @@ import {
   RegistryMcpServer,
   type RegistryRunner,
 } from "../../packages/core/src/mcp/registry_server.ts";
+import { withTemp } from "../../packages/core/tests/_temp.ts";
+import { silence } from "../../packages/core/tests/_console.ts";
 
 /** A parameterized deploy build, including a secret that must never surface. */
 class Deploy extends Build {
@@ -26,17 +31,6 @@ class Deploy extends Build {
   sit = parameter("SIT slot");
   apiToken = parameter("deploy API token").secret();
   deploy = target().description("Deploy the repos").executes(() => {});
-}
-
-/** Run `fn` with console output suppressed (registerCommand prints a line). */
-async function quietly(fn: () => Promise<void>): Promise<void> {
-  const log = console.log;
-  console.log = () => {};
-  try {
-    await fn();
-  } finally {
-    console.log = log;
-  }
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -69,10 +63,9 @@ function callResult(reply: unknown): { text: string; isError: boolean } {
 }
 
 Deno.test("a registered build's parameters flow into the registry run tool", async () => {
-  const dir = await Deno.makeTempDir({ prefix: "zuke-it-registry-params-" });
-  try {
+  await withTemp(async (dir) => {
     const registry = new FileSystemBuildRegistry(dir);
-    await quietly(async () => {
+    await silence(async () => {
       const code = await registerCommand(new Deploy(), {
         registry,
         location: { kind: "module", module: "file:///r/deploy.ts", cwd: "/r" },
@@ -137,7 +130,69 @@ Deno.test("a registered build's parameters flow into the registry run tool", asy
     assertEquals(rejected.isError, true);
     assertStringIncludes(rejected.text, "apiToken");
     assertEquals(calls.length, 1);
-  } finally {
-    await Deno.remove(dir, { recursive: true });
-  }
+  }, { prefix: "zuke-it-registry-params-" });
+});
+
+Deno.test("a registered remote entry module is refused by the run tool, not spawned", async () => {
+  await withTemp(async (dir) => {
+    const registry = new FileSystemBuildRegistry(dir);
+    // Whoever can write the registry names where the build lives. Here that is
+    // a URL — the descriptor is serialized to JSON and parsed back before the
+    // server ever sees it, so this proves the location survives the round trip
+    // and is still refused.
+    await silence(async () => {
+      const code = await registerCommand(new Deploy(), {
+        registry,
+        location: {
+          kind: "module",
+          module: "https://attacker.example/x.ts",
+          cwd: "/r",
+        },
+        readEnv: () => undefined,
+        now: () => "2026-01-01T00:00:00.000Z",
+      });
+      assertEquals(code, 0);
+    });
+
+    const calls: string[][] = [];
+    const runner: RegistryRunner = (argv) => {
+      calls.push([...argv]);
+      return Promise.resolve({ code: 0, stdout: "ok", stderr: "" });
+    };
+
+    const denied = callResult(
+      await new RegistryMcpServer(registry, {
+        allowRun: true,
+        runner,
+        readEnv: () => undefined,
+      }).handleMessage({
+        jsonrpc: "2.0",
+        id: 1,
+        method: "tools/call",
+        params: { name: "run:Deploy:deploy", arguments: {} },
+      }),
+    );
+    assertEquals(denied.isError, true);
+    assertStringIncludes(denied.text, "launch_origin_not_allowed");
+    assertEquals(calls.length, 0);
+
+    // The same descriptor runs once the operator names the origin.
+    const allowed = callResult(
+      await new RegistryMcpServer(registry, {
+        allowRun: true,
+        runner,
+        readEnv: (name) =>
+          name === "ZUKE_REGISTRY_LAUNCH_HOSTS"
+            ? "attacker.example"
+            : undefined,
+      }).handleMessage({
+        jsonrpc: "2.0",
+        id: 2,
+        method: "tools/call",
+        params: { name: "run:Deploy:deploy", arguments: {} },
+      }),
+    );
+    assertEquals(allowed.isError, false);
+    assertEquals(calls.length, 1);
+  }, { prefix: "zuke-it-registry-launch-" });
 });

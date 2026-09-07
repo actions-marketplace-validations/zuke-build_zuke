@@ -1,10 +1,16 @@
+// Copyright (c) 2026 the Zuke contributors
+// SPDX-License-Identifier: MIT
+
 import {
   assertEquals,
   assertRejects,
   assertThrows,
 } from "../../core/tests/_assert.ts";
 import { ToolNotFoundError } from "@zuke/core/tooling";
-import { missingTool } from "@zuke/core/tooling/conformance";
+import {
+  assertWrapperConformance,
+  missingTool,
+} from "@zuke/core/tooling/conformance";
 import {
   YarnAddSettings,
   YarnDlxSettings,
@@ -104,4 +110,10 @@ Deno.test("every YarnTasks function reaches execution", async () => {
     () => YarnTasks.dlx((s) => missingTool(s).command("x")),
     ToolNotFoundError,
   );
+});
+
+Deno.test("yarn: conforms to the wrapper contract", async () => {
+  await assertWrapperConformance(() => new YarnInstallSettings(), "yarn", {
+    resolution: "path",
+  });
 });

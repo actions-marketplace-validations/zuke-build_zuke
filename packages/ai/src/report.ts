@@ -1,3 +1,6 @@
+// Copyright (c) 2026 the Zuke contributors
+// SPDX-License-Identifier: MIT
+
 /**
  * Rendering a review {@link "./types.ts".Assessment} — to the console and to
  * the GitHub Actions job summary.
@@ -12,6 +15,8 @@ import type {
   Usage,
 } from "./types.ts";
 import type { RetryInfo } from "./retry.ts";
+import type { StoredFinding } from "./state.ts";
+import { cell } from "./markdown.ts";
 
 /** The settings echoed when a review starts, so the run shows what it's doing. */
 export interface ReviewStart {
@@ -46,10 +51,6 @@ export function retryLine(name: string, info: RetryInfo): string {
 }
 
 /** The location suffix for a finding (`file:line`, `file`, or empty). */
-function location(file?: string, line?: number): string {
-  if (file === undefined) return "";
-  return line !== undefined ? `${file}:${line}` : file;
-}
 
 /**
  * A human token-usage line (`123 in · 45 out · 168 total`), or `undefined` when
@@ -64,9 +65,21 @@ export function formatUsage(usage?: Usage): string | undefined {
   return parts.length > 0 ? parts.join(" · ") : undefined;
 }
 
-/** Escape `|` so a value is safe inside a Markdown table cell. */
-function cell(value: string): string {
-  return value.replaceAll("|", "\\|");
+/** A model-supplied `file:line`, neutralised like any other untrusted value. */
+function location(file?: string, line?: number): string {
+  if (file === undefined) return "";
+  return cell(line !== undefined ? `${file}:${line}` : file);
+}
+
+/**
+ * The severity label for a finding, carrying the verify pass's verdict when it
+ * answered for the finding (`high · confirmed`), so a report shows which
+ * findings survived verification on evidence and which merely went unresolved.
+ */
+function severityLabel(f: AssessmentFinding): string {
+  return f.verification === undefined
+    ? f.severity
+    : `${f.severity} · ${f.verification}`;
 }
 
 /**
@@ -85,6 +98,61 @@ export interface ReportExtras {
   fromCache?: boolean;
   /** A one-line budget summary (see {@link "./budget.ts".Budget.describe_}). */
   budget?: string;
+  /**
+   * Candidate findings the verify pass refuted, with the verifier's reason —
+   * listed so the narrowing is auditable, exactly like suppression.
+   */
+  refuted?: RefutedFinding[];
+  /**
+   * Findings dismissed through the PR discussion (a trusted rebuttal the
+   * adjudication accepted), with who refuted them and why. Auditable, not
+   * gating.
+   */
+  dismissed?: DismissedFinding[];
+  /**
+   * Whether the discussion feature is active — switches the finding-id hint
+   * from "add to the suppress list" to "reply on the PR quoting the id".
+   */
+  discussion?: boolean;
+  /**
+   * Findings from earlier rounds that no longer reproduce against the current
+   * diff — the PR's progress. Cumulative: every fixed finding stays listed, so
+   * each report shows how far the PR has come.
+   */
+  fixed?: StoredFinding[];
+  /**
+   * Operational notes about the run itself — a bounded pass that did not
+   * compare everything, a pass skipped for budget, a pass that failed, a
+   * reopened finding. Rendered in both the console output and the PR comment:
+   * a cap or a skipped check that only reaches the log reads, in the comment,
+   * as "nothing matched".
+   */
+  notes?: string[];
+}
+
+/** A candidate finding the verify pass refuted, and why. */
+export interface RefutedFinding {
+  /** The refuted finding. */
+  finding: AssessmentFinding;
+  /** The verifier's one-line reason. */
+  reason?: string;
+}
+
+/** A finding dismissed through the PR discussion. */
+export interface DismissedFinding {
+  /** The dismissed finding. */
+  finding: AssessmentFinding;
+  /** The login of the maintainer whose rebuttal was accepted. */
+  author?: string;
+  /** The adjudicator's one-line reason for accepting the dismissal. */
+  reason?: string;
+  /**
+   * The earlier title this finding restates, when the dedup pass resolved it
+   * onto an identity the state already held. Shown so an inherited dismissal
+   * is never mistaken for a fresh one — the maintainer can see which earlier
+   * decision is doing the silencing.
+   */
+  rewordedFrom?: string;
 }
 
 /** The console lines for an assessment. */
@@ -101,10 +169,14 @@ export function consoleLines(
     const where = location(f.file, f.line);
     const id = f.id !== undefined ? ` · ${f.id}` : "";
     lines.push(
-      `  - [${f.severity}] ${f.title}${where === "" ? "" : ` (${where})`}${id}`,
+      `  - [${severityLabel(f)}] ${f.title}${
+        where === "" ? "" : ` (${where})`
+      }${id}`,
     );
   }
-  if (assessment.summary !== "") lines.push(`  ${assessment.summary}`);
+  if (assessment.summary !== "") {
+    lines.push(`  ${summaryLabel(extras)}${assessment.summary}`);
+  }
   const tokens = formatUsage(usage);
   if (tokens !== undefined) lines.push(`  tokens: ${tokens}`);
   if (extras.fromCache) lines.push("  (cached — no API call)");
@@ -122,6 +194,31 @@ export function consoleLines(
       }${id}`,
     );
   }
+  for (const r of extras.refuted ?? []) {
+    lines.push(
+      `    refuted by verify: ${r.finding.title}${
+        r.reason !== undefined ? ` — ${r.reason}` : ""
+      }`,
+    );
+  }
+  for (const d of extras.dismissed ?? []) {
+    const by = d.author !== undefined ? ` by ${d.author}` : "";
+    const reworded = d.rewordedFrom !== undefined
+      ? ` (reworded from "${d.rewordedFrom}")`
+      : "";
+    lines.push(
+      `    dismissed via discussion${by}: ${d.finding.title}${reworded}${
+        d.reason !== undefined ? ` — ${d.reason}` : ""
+      }`,
+    );
+  }
+  for (const f of extras.fixed ?? []) {
+    const where = location(f.file);
+    lines.push(
+      `    fixed: ${f.title}${where === "" ? "" : ` (${where})`} · ${f.id}`,
+    );
+  }
+  for (const note of extras.notes ?? []) lines.push(`  note: ${note}`);
   if (extras.budget !== undefined) lines.push(`  budget: ${extras.budget}`);
   return lines;
 }
@@ -157,17 +254,140 @@ export function toMarkdown(
     for (const f of assessment.findings) {
       const where = location(f.file, f.line);
       parts.push(
-        `| ${f.severity} | ${cell(f.title)} | ${where === "" ? "—" : where} |`,
+        `| ${severityLabel(f)} | ${cell(f.title)} | ${
+          where === "" ? "—" : where
+        } |`,
       );
     }
     parts.push("");
-    parts.push(...idHint(assessment.findings));
+    parts.push(...idHint(assessment.findings, extras.discussion === true));
   }
+  parts.push(...fixedSection(extras.fixed ?? []));
   parts.push(...suppressedSection(extras.suppressedFindings ?? []));
+  parts.push(...refutedSection(extras.refuted ?? []));
+  parts.push(...dismissedSection(extras.dismissed ?? []));
+  parts.push(...notesSection(extras.notes ?? []));
   if (assessment.summary !== "") {
-    parts.push(`> ${cell(assessment.summary)}`, "");
+    const label = summaryLabel(extras);
+    const prefix = label === "" ? "" : `_${label.trimEnd()}_ `;
+    parts.push(`> ${prefix}${cell(assessment.summary)}`, "");
   }
   return parts.join("\n");
+}
+
+/**
+ * The label prefixed to the model's summary when the verify pass removed
+ * findings after it was written: the score and finding count above reflect the
+ * narrowing, the prose does not, and an unlabelled summary next to a lowered
+ * score reads as the report contradicting itself. Empty when nothing was
+ * refuted — the summary then describes exactly what is reported.
+ */
+function summaryLabel(extras: ReportExtras): string {
+  return (extras.refuted ?? []).length > 0
+    ? "Reviewer summary, written before verification: "
+    : "";
+}
+
+/**
+ * The run's operational notes — a bounded check that did not compare
+ * everything, a pass skipped or failed, a reopened finding. Empty when the run
+ * had nothing to report about itself.
+ */
+function notesSection(notes: string[]): string[] {
+  if (notes.length === 0) return [];
+  return [
+    "**Notes:**",
+    "",
+    ...notes.map((note) => `- ${cell(note)}`),
+    "",
+  ];
+}
+
+/**
+ * A table of the candidates the verify pass refuted, with the verifier's
+ * reason — so the narrowing is auditable rather than silent. Empty when the
+ * verify pass ran clean or did not run.
+ */
+function refutedSection(refuted: RefutedFinding[]): string[] {
+  if (refuted.length === 0) return [];
+  const parts = [
+    "**Refuted by verification (not reported):**",
+    "",
+    "| Finding | Reason |",
+    "| --- | --- |",
+  ];
+  for (const r of refuted) {
+    parts.push(`| ${cell(r.finding.title)} | ${cell(r.reason ?? "—")} |`);
+  }
+  parts.push("");
+  return parts;
+}
+
+/**
+ * The line closing the dismissed section: a dismissal holds for this pull
+ * request only — the committed suppress list is the cross-PR override, and it
+ * stays a deliberate, reviewed edit. So the report points at it rather than
+ * promoting anything itself: a finding that keeps being re-argued on PR after
+ * PR is a repo-wide false positive, and its ID (in the table above) is what
+ * mutes it. Exported so a test can pin the wording the docs quote.
+ */
+export const SUPPRESS_HINT =
+  "_Dismissals apply to this pull request only. If one of these keeps coming " +
+  "back on other PRs, add its ID to the suppress list in your build file " +
+  '(`.suppress(suppressions((s) => s.add("…")))`) to mute it repo-wide._';
+
+/**
+ * A table of the findings dismissed through the PR discussion — who refuted
+ * each one and the adjudicator's reason. Dismissal mutes the gate; this
+ * section keeps the record visible so it never silently buries a finding, and
+ * closes with {@link SUPPRESS_HINT} pointing at the cross-PR override.
+ */
+function dismissedSection(dismissed: DismissedFinding[]): string[] {
+  if (dismissed.length === 0) return [];
+  const parts = [
+    "**Dismissed via discussion (not gating):**",
+    "",
+    "| Finding | Refuted by | Reason | ID |",
+    "| --- | --- | --- | --- |",
+  ];
+  for (const d of dismissed) {
+    const title = d.rewordedFrom === undefined
+      ? cell(d.finding.title)
+      : `${cell(d.finding.title)} _(reworded from "${cell(d.rewordedFrom)}")_`;
+    parts.push(
+      `| ${title} | ${cell(d.author ?? "—")} | ${cell(d.reason ?? "—")} | ${
+        d.finding.id ?? "—"
+      } |`,
+    );
+  }
+  parts.push("", SUPPRESS_HINT, "");
+  return parts;
+}
+
+/**
+ * The PR's progress: findings from earlier rounds that no longer reproduce.
+ * Cumulative across rounds, so each report shows everything resolved so far —
+ * alongside the open-findings table, the thread reads as a progress log.
+ * Empty when nothing has been fixed (or the discussion feature is off).
+ */
+function fixedSection(fixed: StoredFinding[]): string[] {
+  if (fixed.length === 0) return [];
+  const parts = [
+    "**✅ Fixed since first review:**",
+    "",
+    "| Severity | Finding | Location | ID |",
+    "| --- | --- | --- | --- |",
+  ];
+  for (const f of fixed) {
+    const where = location(f.file);
+    parts.push(
+      `| ${f.severity} | ${cell(f.title)} | ${
+        where === "" ? "—" : where
+      } | ${f.id} |`,
+    );
+  }
+  parts.push("");
+  return parts;
 }
 
 /**
@@ -197,16 +417,24 @@ function suppressedSection(findings: AssessmentFinding[]): string[] {
 
 /**
  * A collapsible hint listing each finding's stable ID, so a reader can copy a
- * false positive's ID into the suppress list. Empty when no finding carries an
- * ID (e.g. an older reviewer that did not fingerprint).
+ * false positive's ID into the suppress list — or, when the discussion feature
+ * is on, contest it by replying on the PR with the ID quoted. Empty when no
+ * finding carries an ID (e.g. an older reviewer that did not fingerprint).
  */
-function idHint(findings: Assessment["findings"]): string[] {
+function idHint(
+  findings: Assessment["findings"],
+  discussion: boolean,
+): string[] {
   const withId = findings.filter((f) => f.id !== undefined);
   if (withId.length === 0) return [];
   const lines = [
     "<details><summary>Dismiss a false positive</summary>",
     "",
-    "Add a finding's ID to the suppress list to hide it next time:",
+    discussion
+      ? "Reply on this PR quoting a finding's ID to contest it — the reviewer " +
+        "reads maintainer replies, re-checks the finding, and dismisses it when " +
+        "the rebuttal holds. The suppress list still works as a hard override:"
+      : "Add a finding's ID to the suppress list to hide it next time:",
     "",
   ];
   for (const f of withId) lines.push(`- \`${f.id}\` — ${cell(f.title)}`);
@@ -214,12 +442,15 @@ function idHint(findings: Assessment["findings"]): string[] {
   return lines;
 }
 
-/** The console line announcing a skipped review. */
+/** The console line announcing a skipped review (or fix). */
 export function skipConsoleLine(name: string, reason: string): string {
   return `[${name}] skipped — ${reason}`;
 }
 
-/** A Markdown section announcing a skipped review, for the job summary. */
+/**
+ * A Markdown section announcing a skipped review (or fix), for the job summary
+ * and the PR comment.
+ */
 export function skipMarkdown(
   name: string,
   target: string,

@@ -1,3 +1,6 @@
+// Copyright (c) 2026 the Zuke contributors
+// SPDX-License-Identifier: MIT
+
 /**
  * `@zuke/deno` — typed `DenoTasks` wrappers for the `deno` CLI, for use in
  * Zuke build targets.
@@ -13,24 +16,65 @@
  * @module
  */
 
+export { DenoTasks, type DenoTasksApi } from "./src/deno.ts";
 export {
-  DenoCacheSettings,
-  DenoCheckSettings,
-  DenoCoverageSettings,
-  DenoDocSettings,
-  DenoFmtSettings,
-  DenoInstallSettings,
-  DenoLintSettings,
   type DenoPermission,
   DenoPermissionSettings,
-  DenoPublishSettings,
-  DenoRunSettings,
   DenoSettings,
-  DenoTasks,
-  type DenoTasksApi,
+} from "./src/settings.ts";
+export {
+  DenoEvalSettings,
+  DenoRunSettings,
+  DenoServeSettings,
+  type DenoSourceExt,
   DenoTaskSettings,
+} from "./src/execution.ts";
+export {
+  DenoBenchSettings,
+  DenoCoverageSettings,
+  type DenoTestReporter,
   DenoTestSettings,
-} from "./src/deno.ts";
+} from "./src/testing.ts";
+export {
+  DenoCheckSettings,
+  DenoDocSettings,
+  DenoFmtSettings,
+  DenoLintSettings,
+  type DenoProseWrap,
+} from "./src/quality.ts";
+export { type NodeModulesLinker, type NodeModulesMode } from "./src/flags.ts";
+export {
+  DenoAddSettings,
+  DenoApproveScriptsSettings,
+  DenoBumpVersionSettings,
+  DenoCacheSettings,
+  DenoCiSettings,
+  DenoInstallSettings,
+  DenoLockSettings,
+  DenoOutdatedSettings,
+  DenoPackSettings,
+  DenoPublishSettings,
+  DenoRemoveSettings,
+  DenoUninstallSettings,
+  type DenoVersionIncrement,
+  DenoWhySettings,
+} from "./src/dependencies.ts";
+export {
+  DenoCleanSettings,
+  DenoCompileSettings,
+  type DenoCompileTarget,
+  DenoInfoSettings,
+  DenoInitSettings,
+  DenoUpgradeSettings,
+} from "./src/toolchain.ts";
+export {
+  type DenoCacheInfo,
+  type DenoModule,
+  type DenoModuleDependency,
+  type DenoModuleGraph,
+  parseCacheInfo,
+  parseModuleGraph,
+} from "./src/module_json.ts";
 export {
   CoverageThresholdError,
   type CoverageThresholds,

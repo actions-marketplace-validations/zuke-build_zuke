@@ -1,3 +1,6 @@
+// Copyright (c) 2026 the Zuke contributors
+// SPDX-License-Identifier: MIT
+
 /**
  * `BunTasks` — typed task functions for the `bun` CLI, in the settings-lambda
  * style: configure a fluent settings object in a lambda, and the task function
@@ -15,6 +18,9 @@
 
 import { type Configure, runSettings, ToolSettings } from "@zuke/core/tooling";
 import type { CommandOutput } from "@zuke/core/shell";
+import { reportSummary, reportTestCounts } from "@zuke/core";
+import { parseTestSummary } from "./test_summary.ts";
+import { parseBunInstallSummary } from "./install_summary.ts";
 
 /** Base for all `bun` subcommand settings: binary is `bun` from PATH. */
 export abstract class BunSettings extends ToolSettings {
@@ -39,6 +45,12 @@ export class BunInstallSettings extends BunSettings {
   frozenLockfile(): this {
     this.#frozenLockfile = true;
     return this;
+  }
+
+  /** Report `Installed` and `Removed` onto the build summary. */
+  protected override onOutput(output: CommandOutput): void {
+    const pairs = parseBunInstallSummary(output);
+    if (pairs !== undefined) reportSummary(pairs);
   }
 
   /** Assemble the `bun install` argv. */
@@ -88,6 +100,12 @@ export class BunAddSettings extends BunSettings {
     return this;
   }
 
+  /** Report `Installed` and `Removed` onto the build summary. */
+  protected override onOutput(output: CommandOutput): void {
+    const pairs = parseBunInstallSummary(output);
+    if (pairs !== undefined) reportSummary(pairs);
+  }
+
   /** Assemble the `bun add` argv. */
   protected override buildArgs(): string[] {
     if (this.#packages.length === 0) {
@@ -111,6 +129,12 @@ export class BunRemoveSettings extends BunSettings {
   packages(...names: string[]): this {
     this.#packages.push(...names);
     return this;
+  }
+
+  /** Report `Installed` and `Removed` onto the build summary. */
+  protected override onOutput(output: CommandOutput): void {
+    const pairs = parseBunInstallSummary(output);
+    if (pairs !== undefined) reportSummary(pairs);
   }
 
   /** Assemble the `bun remove` argv. */
@@ -198,6 +222,12 @@ export class BunTestSettings extends BunSettings {
   bail(): this {
     this.#bail = true;
     return this;
+  }
+
+  /** Report the run's counts onto the build summary (see the module docs). */
+  protected override onOutput(output: CommandOutput): void {
+    const counts = parseTestSummary(output);
+    if (counts !== undefined) reportTestCounts(counts);
   }
 
   /** Assemble the `bun test` argv. */

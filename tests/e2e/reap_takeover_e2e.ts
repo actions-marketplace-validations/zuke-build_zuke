@@ -1,3 +1,6 @@
+// Copyright (c) 2026 the Zuke contributors
+// SPDX-License-Identifier: MIT
+
 /**
  * End-to-end: two real sweeper processes racing to reap the same abandoned run.
  *
@@ -15,35 +18,16 @@ import {
   defaultStateHost,
   FileSystemStateStore,
 } from "../../packages/core/mod.ts";
+import { markerLines, runFixture } from "./_harness.ts";
 
 const FIXTURE = new URL("./fixtures/effect_build.ts", import.meta.url);
 
-/** Run the fixture as a real `deno` subprocess against `dir`. */
-async function run(
-  args: string[],
-  dir: string,
-  marker: string,
-): Promise<{ code: number; out: string }> {
-  const command = new Deno.Command(Deno.execPath(), {
-    // A `file://` URL rather than URL.pathname, which is `/C:/…` on Windows.
-    args: ["run", "-A", FIXTURE.href, ...args],
-    env: { ZUKE_STATE_DIR: dir, ZUKE_E2E_MARKER: marker },
-    stdout: "piped",
-    stderr: "piped",
+/** Run the fixture against state dir `dir`, writing its progress to `marker`. */
+const run = (args: string[], dir: string, marker: string) =>
+  runFixture(FIXTURE, args, {
+    ZUKE_STATE_DIR: dir,
+    ZUKE_E2E_MARKER: marker,
   });
-  const { code, stdout } = await command.output();
-  return { code, out: new TextDecoder().decode(stdout) };
-}
-
-/** The marker file's lines, or an empty list if it does not exist yet. */
-async function markerLines(marker: string): Promise<string[]> {
-  try {
-    const text = await Deno.readTextFile(marker);
-    return text.split("\n").filter((line) => line !== "");
-  } catch {
-    return [];
-  }
-}
 
 Deno.test("two sweepers race an abandoned run; exactly one reaps it", async () => {
   const dir = await Deno.makeTempDir({ prefix: "zuke-e2e-" });
@@ -80,7 +64,16 @@ Deno.test("two sweepers race an abandoned run; exactly one reaps it", async () =
       run(["resume", "--check"], dir, marker),
       run(["resume", "--check"], dir, marker),
     ]);
-    assertEquals([a.code, b.code], [0, 0]);
+    // Both sweepers must exit clean. The loser has not failed — it either could
+    // not take the lease, or found the run already finished — and a sweep that
+    // reported either as a failure would put a false alarm in a cron's exit code.
+    assertEquals(
+      [a.code, b.code],
+      [0, 0],
+      `a sweeper exited non-zero: [${a.code}, ${b.code}]\n` +
+        `--- a stdout ---\n${a.out}\n--- a stderr ---\n${a.err}\n` +
+        `--- b stdout ---\n${b.out}\n--- b stderr ---\n${b.err}`,
+    );
 
     // Driven exactly once more, by exactly one of them. Two would mean both
     // sweepers took the run over, which the lease exists to prevent.

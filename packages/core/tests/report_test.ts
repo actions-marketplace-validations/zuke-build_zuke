@@ -1,4 +1,7 @@
-import { assertEquals } from "./_assert.ts";
+// Copyright (c) 2026 the Zuke contributors
+// SPDX-License-Identifier: MIT
+
+import { assertEquals, assertStringIncludes } from "./_assert.ts";
 import {
   closingLine,
   formatDuration,
@@ -171,4 +174,145 @@ Deno.test("jobSummaryMarkdown uses ✅ on a successful build", () => {
     true,
   );
   assertEquals(md.startsWith("## ✅ Zuke build — 1/1 targets in 0.0s"), true);
+});
+
+// A workflow command ends at its line break, so any value interpolated into one
+// must not be able to introduce a second. A target's failure message embeds a
+// subprocess's stderr verbatim (see CommandError), which is not ours to trust.
+Deno.test("a failure annotation cannot be broken out of with a newline", () => {
+  const hostile = new Error(
+    "build failed\n::stop-commands::abc\n::error::forged annotation",
+  );
+  const out = targetFailFooter(GITHUB, "deploy", 100, hostile);
+  const annotation = out.error.find((l) => l.startsWith("::error "));
+  assertEquals(annotation !== undefined, true);
+  // Exactly one physical line: nothing the message carried became a command.
+  // The `::stop-commands::` text itself is still there and is meant to be — a
+  // workflow command is only a command at the start of its own line, so once
+  // the newlines are encoded it is inert prose the reader can still see.
+  assertEquals(annotation?.includes("\n"), false);
+  assertEquals(annotation?.split("\n").length, 1);
+  // The text survives, percent-encoded per the Actions spec.
+  assertStringIncludes(annotation ?? "", "%0A");
+  assertStringIncludes(annotation ?? "", "stop-commands");
+});
+
+Deno.test("a percent in a failure message cannot spoof an escape", () => {
+  // `%` is encoded first, so a literal `%0A` in the input stays literal rather
+  // than being handed to the runner as an encoded newline.
+  const out = targetFailFooter(GITHUB, "deploy", 100, new Error("done 100%0A"));
+  const annotation = out.error.find((l) => l.startsWith("::error "));
+  assertStringIncludes(annotation ?? "", "100%250A");
+});
+
+Deno.test("an annotation title escapes the property separators too", () => {
+  // A property list is comma-separated and colon-terminated, so a name carrying
+  // either would otherwise end the title early and inject another property.
+  const out = targetFailFooter(GITHUB, "deploy:1,2", 100, new Error("nope"));
+  const annotation = out.error.find((l) => l.startsWith("::error "));
+  assertStringIncludes(annotation ?? "", "title=deploy%3A1%2C2::");
+});
+
+Deno.test("a group header cannot be broken out of either", () => {
+  // A fan-out child's name is derived from a runtime list, so it is not
+  // guaranteed to be an identifier.
+  const [header] = targetHeader(GITHUB, "deploy[a\n::error::forged]");
+  assertEquals(header.includes("\n"), false);
+  assertStringIncludes(header, "%0A");
+});
+
+Deno.test("summaryBlock trails a row's notes after its duration, NUKE-style", () => {
+  const reports = [
+    {
+      name: "test",
+      status: "passed" as const,
+      ms: 8_100,
+      summary: [
+        { key: "Tests", value: "837" },
+        { key: "Passed", value: "837" },
+        { key: "Failed", value: "0" },
+      ],
+    },
+    { name: "pack", status: "passed" as const, ms: 100 },
+    { name: "empty", status: "passed" as const, ms: 100, summary: [] },
+  ];
+  const lines = summaryBlock(PLAIN, reports, 8_300, true, NOW);
+  const test = lines.find((l) => l.startsWith("test"));
+  assertEquals(
+    test?.endsWith("8.1s  // Tests: 837 · Passed: 837 · Failed: 0"),
+    true,
+  );
+  // Rows without notes are unchanged — and the notes do not widen the table.
+  const pack = lines.find((l) => l.startsWith("pack"));
+  assertEquals(pack?.trimEnd().endsWith("0.1s"), true);
+  const empty = lines.find((l) => l.startsWith("empty"));
+  assertEquals(empty?.trimEnd().endsWith("0.1s"), true);
+  // Target (6) + Succeeded (9) + Duration (8), two spaces between columns.
+  assertEquals(lines[2], "─".repeat(6 + 2 + 9 + 2 + 8));
+});
+
+Deno.test("summaryBlock dims a row's notes when colour is on", () => {
+  const lines = summaryBlock(
+    COLOR,
+    [{
+      name: "test",
+      status: "failed",
+      ms: 100,
+      summary: [{ key: "Failed", value: "1" }],
+    }],
+    100,
+    false,
+    NOW,
+  );
+  const row = lines.find((l) => l.startsWith("test"));
+  assertStringIncludes(row ?? "", "\x1b[2m// Failed: 1\x1b[0m");
+});
+
+Deno.test("jobSummaryMarkdown adds a Notes column only when some row has notes", () => {
+  const md = jobSummaryMarkdown(
+    [
+      {
+        name: "test",
+        status: "passed",
+        ms: 100,
+        summary: [{ key: "Tests", value: "3" }, { key: "Passed", value: "3" }],
+      },
+      { name: "pack", status: "passed", ms: 200 },
+    ],
+    300,
+    true,
+  );
+  assertStringIncludes(md, "| Target | Result | Time | Notes |\n");
+  assertStringIncludes(md, "| --- | --- | --- | --- |\n");
+  assertStringIncludes(
+    md,
+    "| test | ✔ Succeeded | 0.1s | Tests: 3 · Passed: 3 |",
+  );
+  assertStringIncludes(md, "| pack | ✔ Succeeded | 0.2s |  |");
+  assertStringIncludes(md, "| **Total** | | **0.3s** | |");
+
+  const plain = jobSummaryMarkdown(
+    [{ name: "pack", status: "passed", ms: 200 }],
+    200,
+    true,
+  );
+  assertEquals(plain.includes("Notes"), false);
+  assertStringIncludes(
+    plain,
+    "| Target | Result | Time |\n| --- | --- | --- |\n",
+  );
+});
+
+Deno.test("jobSummaryMarkdown escapes a pipe in a note so it cannot add a cell", () => {
+  const md = jobSummaryMarkdown(
+    [{
+      name: "t",
+      status: "passed",
+      ms: 0,
+      summary: [{ key: "Ratio", value: "a | b" }],
+    }],
+    0,
+    true,
+  );
+  assertStringIncludes(md, "| t | ✔ Succeeded | 0.0s | Ratio: a \\| b |");
 });

@@ -1,10 +1,16 @@
+// Copyright (c) 2026 the Zuke contributors
+// SPDX-License-Identifier: MIT
+
 import {
   assertEquals,
   assertRejects,
   assertThrows,
 } from "../../core/tests/_assert.ts";
 import { ToolNotFoundError } from "@zuke/core/tooling";
-import { missingTool } from "@zuke/core/tooling/conformance";
+import {
+  assertWrapperConformance,
+  missingTool,
+} from "@zuke/core/tooling/conformance";
 import {
   defaultComposeProbe,
   DockerComposeBuildSettings,
@@ -24,7 +30,7 @@ import {
   DockerComposeUpSettings,
   resetComposeInvocationCache_,
   resolveComposeInvocation,
-} from "../src/docker_compose.ts";
+} from "../mod.ts";
 
 Deno.test("the default invocation is the v2 plugin", () => {
   assertEquals(new DockerComposePsSettings().argv(), [
@@ -67,6 +73,37 @@ Deno.test("global options precede the subcommand", () => {
     ".env",
     "up",
     "-d",
+  ]);
+});
+
+Deno.test("up: no-deps starts the named services alone", () => {
+  assertEquals(
+    new DockerComposeUpSettings().services("api").build().noDeps().argv(),
+    ["docker", "compose", "up", "--build", "--no-deps", "api"],
+  );
+  // Without it the argv is what it was before the option existed.
+  assertEquals(
+    new DockerComposeUpSettings().services("api").build().argv(),
+    ["docker", "compose", "up", "--build", "api"],
+  );
+});
+
+Deno.test("up: a pull policy reaches compose as its argument", () => {
+  assertEquals(
+    new DockerComposeUpSettings().file("base.yml").pull("always").argv(),
+    ["docker", "compose", "-f", "base.yml", "up", "--pull", "always"],
+  );
+  assertEquals(
+    new DockerComposeUpSettings().pull("never").argv(),
+    ["docker", "compose", "up", "--pull", "never"],
+  );
+  // Without one, compose keeps its own default and the argv is unchanged.
+  assertEquals(new DockerComposeUpSettings().file("base.yml").argv(), [
+    "docker",
+    "compose",
+    "-f",
+    "base.yml",
+    "up",
   ]);
 });
 
@@ -448,5 +485,15 @@ Deno.test("a pinned invocation skips detection", async () => {
   await assertRejects(
     () => DockerComposeTasks.down((s) => missingTool(s).useStandalone()),
     ToolNotFoundError,
+  );
+});
+
+Deno.test("compose: conforms to the wrapper contract", async () => {
+  await assertWrapperConformance(
+    () => new DockerComposeUpSettings().usePlugin(),
+    "docker",
+    {
+      resolution: "path",
+    },
   );
 });

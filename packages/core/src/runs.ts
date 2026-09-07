@@ -1,3 +1,6 @@
+// Copyright (c) 2026 the Zuke contributors
+// SPDX-License-Identifier: MIT
+
 /**
  * The `zuke runs` command: list persisted run records and show one run's full
  * detail from a {@link "./state/store.ts".StateStore}, reconstructing a run's
@@ -9,19 +12,19 @@
 
 import type { Build } from "./build.ts";
 import { defaultReadEnv } from "./internal.ts";
-import { absolutePath } from "./path.ts";
-import { findConfigDir, pathExists } from "./config.ts";
-import { defaultStateHost, type StateStore } from "./state/store.ts";
-import { resolveStateStore } from "./state/resolve.ts";
-import type {
-  RunQuery,
-  RunRecord,
-  RunStatus,
-  RunSummary,
-  TargetRunState,
-  TargetRunStatus,
+import type { StateStore } from "./state/store.ts";
+import { resolveRunStore } from "./run_store.ts";
+import {
+  initiatorOf,
+  isTerminalRunStatus,
+  type RunQuery,
+  type RunRecord,
+  type RunSummary,
+  type TargetRunState,
+  type TargetRunStatus,
 } from "./state/types.ts";
-import { formatDuration } from "./render.ts";
+import { formatDuration, table } from "./render.ts";
+import { formatSummary } from "./report.ts";
 
 /** Inputs for {@link runsCommand}. */
 export interface RunsOptions {
@@ -35,6 +38,15 @@ export interface RunsOptions {
   counts?: boolean;
   /** Filters for `list` — status, a target in the run, a creation time, a limit. */
   query?: RunQuery;
+  /**
+   * With `list`, keep only runs this actor started (`--initiator <name>`).
+   *
+   * Applied here rather than in {@link RunQuery} deliberately: the query goes to
+   * the store, and a store that does not know the field would answer an
+   * unfiltered list that reads exactly like a filtered one. Filtering after the
+   * list costs a little more traffic and cannot silently return the wrong runs.
+   */
+  initiator?: string;
   /**
    * `prune`: keep runs created within this many milliseconds of now; older
    * terminal runs become eligible. Omitted means no age rule.
@@ -53,18 +65,6 @@ export interface RunsOptions {
   stateStore?: StateStore | false;
   /** Reads an environment variable (injectable for tests). */
   readEnv?: (name: string) => string | undefined;
-}
-
-/** The run statuses past which nothing more happens — the only prunable ones. */
-const TERMINAL_STATUSES: readonly RunStatus[] = [
-  "succeeded",
-  "failed",
-  "cancelled",
-];
-
-/** Whether a run has reached a terminal (prunable) status. */
-function isTerminalStatus(status: RunStatus): boolean {
-  return TERMINAL_STATUSES.includes(status);
 }
 
 /** Options for {@link selectRunsToPrune}. */
@@ -89,7 +89,7 @@ export function selectRunsToPrune(
   nowMs: number,
 ): string[] {
   const cutoff = rules.keepMs === undefined ? undefined : nowMs - rules.keepMs;
-  const terminal = summaries.filter((s) => isTerminalStatus(s.status));
+  const terminal = summaries.filter((s) => isTerminalRunStatus(s.status));
   const toPrune: string[] = [];
   terminal.forEach((s, index) => {
     if (rules.keepLast !== undefined && index < rules.keepLast) return;
@@ -103,22 +103,6 @@ export function selectRunsToPrune(
   return toPrune;
 }
 
-/** Resolve the store for a `runs` query — like a run, but always defaulting on. */
-function resolveRunsStore(
-  option: StateStore | false | undefined,
-  build: Build,
-  readEnv: (name: string) => string | undefined,
-): StateStore | undefined {
-  return resolveStateStore(option, build.stateStore(), {
-    readEnv,
-    host: defaultStateHost,
-    defaultDir: absolutePath(
-      findConfigDir(Deno.cwd(), pathExists) ?? Deno.cwd(),
-    )(".zuke", "runs").path,
-    enableDefault: true,
-  });
-}
-
 /**
  * Run `zuke runs list`/`show`, printing to the console and resolving to a
  * process exit code (0 success, 1 on a misuse or missing run/store).
@@ -128,7 +112,11 @@ export async function runsCommand(
   options: RunsOptions,
 ): Promise<number> {
   const readEnv = options.readEnv ?? defaultReadEnv;
-  const store = resolveRunsStore(options.stateStore, build, readEnv);
+  const store = resolveRunStore(
+    options.stateStore,
+    build.stateStore(),
+    readEnv,
+  );
   if (store === undefined) {
     console.error(
       "runs: no state store is configured. Set ZUKE_STATE_DIR / " +
@@ -139,7 +127,20 @@ export async function runsCommand(
 
   const action = options.action ?? "list";
   if (action === "list") {
-    const summaries = await store.listRuns(options.query ?? {});
+    const query = options.query ?? {};
+    // `--limit` is applied by the store, and the initiator filter runs here, so
+    // letting the store truncate first would answer "whose runs are among the
+    // newest N" — usually none of them — when the question was "this actor's
+    // newest N". List unbounded, filter, then take N.
+    const listed = await store.listRuns(
+      options.initiator === undefined ? query : { ...query, limit: undefined },
+    );
+    // Matched against the initiator *or* the actor it falls back to, so a run
+    // recorded before the field existed is still findable by the person who
+    // started it.
+    const summaries = options.initiator === undefined ? listed : listed
+      .filter((s) => initiatorOf(s) === options.initiator)
+      .slice(0, query.limit ?? listed.length);
     if (options.counts) {
       const counts = aggregateRunCounts(summaries);
       console.log(
@@ -283,12 +284,14 @@ export function formatRunList(summaries: readonly RunSummary[]): string {
     s.createdAt,
   ]);
   const headers = ["ID", "STATUS", "TARGET", "ACTOR", "CREATED"];
-  const widths = headers.map((h, col) =>
-    Math.max(h.length, ...rows.map((r) => r[col].length))
-  );
-  const line = (cells: string[]) =>
-    cells.map((c, col) => c.padEnd(widths[col])).join("  ").trimEnd();
-  return [line(headers), ...rows.map(line)].join("\n");
+  // Plain text, no rule: `runs list` output is parsed by scripts as often as it
+  // is read, so it keeps the bare aligned columns it has always had.
+  return table(
+    { color: false, github: false, width: 0 },
+    headers.map((header) => ({ header })),
+    rows,
+    { divider: false },
+  ).join("\n");
 }
 
 /** The elapsed time of a target, when both timestamps are present and parse. */
@@ -300,10 +303,16 @@ function targetDuration(state: TargetRunState): string | undefined {
   return Number.isFinite(ms) && ms >= 0 ? formatDuration(ms) : undefined;
 }
 
-/** The trailing note for one target line: a duration, error, or wait descriptor. */
+/**
+ * The trailing note for one target line: a duration, error, or wait
+ * descriptor, then the notes the target reported into its summary row, in the
+ * same `// key: value` form the build summary prints them.
+ */
 function targetNote(state: TargetRunState): string {
+  const notes = formatSummary(state.summary);
+  const trailing = notes === "" ? "" : `  // ${notes}`;
   if (state.status === "failed" && state.error !== undefined) {
-    return `  ${state.error}`;
+    return `  ${state.error}${trailing}`;
   }
   if (state.status === "waiting" && state.waitingFor !== undefined) {
     const { trigger, deadline } = state.waitingFor;
@@ -311,7 +320,7 @@ function targetNote(state: TargetRunState): string {
     return `  waiting for ${trigger}${until}`;
   }
   const duration = targetDuration(state);
-  return duration !== undefined ? `  ${duration}` : "";
+  return (duration !== undefined ? `  ${duration}` : "") + trailing;
 }
 
 /** Render `runs show <id>`: the run header, parameters, targets, and signals. */
@@ -322,9 +331,22 @@ export function formatRunDetail(record: RunRecord): string {
     `  target:   ${record.rootTarget}`,
     `  status:   ${record.status}`,
     `  actor:    ${record.actor}`,
+    ...(record.initiator === undefined ? [] : [
+      // Only worth a line when it says something `actor` does not: on a run
+      // nobody has resumed the two are the same string.
+      `  started:  ${record.initiator.actor} (${record.initiator.kind})`,
+    ]),
     `  created:  ${record.createdAt}`,
     `  updated:  ${record.updatedAt}`,
   ];
+  const overrides = Object.entries(record.overrides ?? {});
+  if (overrides.length > 0) {
+    lines.push("  forced:");
+    for (const [name, o] of overrides) {
+      const why = o.reason === undefined ? "" : ` — ${o.reason}`;
+      lines.push(`    ${name}: ${o.outcome} by ${o.actor} at ${o.at}${why}`);
+    }
+  }
   if (record.degraded) {
     // The one thing an operator asked to override a refused resume needs to see.
     lines.push(

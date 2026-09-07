@@ -1,3 +1,6 @@
+// Copyright (c) 2026 the Zuke contributors
+// SPDX-License-Identifier: MIT
+
 /**
  * The JSON schema for an {@link "./types.ts".Assessment}, in the dialects each
  * provider's structured-output mode expects. Sending it on the request makes
@@ -39,6 +42,66 @@ export const ASSESSMENT_JSON_SCHEMA: Record<string, unknown> = {
   },
   required: ["score", "severity", "summary", "findings"],
 };
+
+/**
+ * Strict JSON Schema for a verdict list — the response shape of the verify and
+ * adjudication passes: `{"verdicts": [{"id", "verdict", "reason"}]}` with
+ * `verdict` restricted to the pass's `allowed` values (e.g.
+ * `["confirmed", "refuted"]` for verification). `reason` is optional, so — as
+ * everywhere else in strict mode — it is nullable and still listed in
+ * `required`; the parser treats `null` as "absent".
+ */
+export function verdictsJsonSchema(
+  allowed: string[],
+): Record<string, unknown> {
+  return {
+    type: "object",
+    additionalProperties: false,
+    properties: {
+      verdicts: {
+        type: "array",
+        items: {
+          type: "object",
+          additionalProperties: false,
+          properties: {
+            id: { type: "string" },
+            verdict: { type: "string", enum: allowed },
+            reason: { type: ["string", "null"] },
+          },
+          required: ["id", "verdict", "reason"],
+        },
+      },
+    },
+    required: ["verdicts"],
+  };
+}
+
+/**
+ * The Gemini (OpenAPI-subset) dialect of {@link verdictsJsonSchema} — no
+ * `additionalProperties`, `nullable` for optionals.
+ */
+export function verdictsGeminiSchema(
+  allowed: string[],
+): Record<string, unknown> {
+  return {
+    type: "object",
+    properties: {
+      verdicts: {
+        type: "array",
+        items: {
+          type: "object",
+          properties: {
+            id: { type: "string" },
+            verdict: { type: "string", enum: allowed },
+            reason: { type: "string", nullable: true },
+          },
+          required: ["id", "verdict"],
+        },
+      },
+    },
+    required: ["verdicts"],
+  };
+}
 
 /**
  * OpenAPI-subset schema for Gemini's `responseSchema`: `additionalProperties`

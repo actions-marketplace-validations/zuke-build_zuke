@@ -1,3 +1,6 @@
+// Copyright (c) 2026 the Zuke contributors
+// SPDX-License-Identifier: MIT
+
 /**
  * The execution engine: running one target (conditions, cache, service, wait
  * gate, lock, body with timeout/retry/remediation) and the two schedulers that
@@ -17,12 +20,18 @@ import { acquireTargetLock, type HeldLock } from "./lock.ts";
 import { resolveWait, type WaitResolution } from "./wait_resolution.ts";
 import {
   errorMessage,
+  outcomesFromRecord,
   outcomeView,
   type RunEnv,
   type RunOutcome,
   type TargetOutcome,
 } from "./run_support.ts";
 import { withAmbientEcho } from "./ambient_echo.ts";
+import {
+  type SummaryEntry,
+  TargetSummary,
+  withAmbientSummary,
+} from "./summary_note.ts";
 import { type Style, type TargetReport, targetWaitFooter } from "./report.ts";
 import type { Renderer } from "./renderer.ts";
 import {
@@ -204,6 +213,7 @@ function targetContextFor(
   name: string,
   env: RunEnv,
   dryRun: boolean,
+  summary: TargetSummary,
 ): TargetContext {
   // One own-state handle, reused for `stateOf(this target)` so the documented
   // `stateOf(self) === state` invariant holds even store-less (a fresh
@@ -213,6 +223,7 @@ function targetContextFor(
     : inMemoryStateHandle();
   return {
     runId: env.runId,
+    ...(env.initiator === undefined ? {} : { initiator: env.initiator }),
     target: name,
     signal: env.signal,
     state: ownState,
@@ -224,7 +235,24 @@ function targetContextFor(
     outcomes: () => allOutcomes(env),
     signals: env.signals,
     dryRun,
+    reportSummary: (pairs) => summary.add(pairs),
   };
+}
+
+/**
+ * Attach the notes a target reported to its outcome — only when it reported
+ * any, so a note-less outcome stays a plain `{ status, ms }`.
+ */
+function noted(outcome: TargetOutcome, summary: TargetSummary): TargetOutcome {
+  const entries = summary.entries();
+  return entries.length === 0 ? outcome : { ...outcome, summary: entries };
+}
+
+/** The summary row for one target's outcome, carrying its notes when it has any. */
+function reportOf(name: string, outcome: TargetOutcome): TargetReport {
+  const report: TargetReport = { name, status: outcome.status, ms: outcome.ms };
+  if (outcome.summary !== undefined) report.summary = outcome.summary;
+  return report;
 }
 
 /**
@@ -336,12 +364,8 @@ function outcomeOf(
 
 /** Every settled outcome in this run, this process's map over the record's. */
 function allOutcomes(env: RunEnv): ReadonlyMap<string, TargetOutcomeView> {
-  const all = new Map<string, TargetOutcomeView>();
   const rows = env.writer?.snapshot().targets ?? {};
-  for (const [name, row] of Object.entries(rows)) {
-    if (row.status === "pending") continue; // no outcome yet, so not an entry
-    all.set(name, outcomeView({ status: row.status }, row));
-  }
+  const all = outcomesFromRecord(rows);
   for (const [name, settled] of env.statuses) {
     all.set(name, outcomeView(settled, rows[name]));
   }
@@ -364,6 +388,23 @@ async function runTarget(
     ctx;
   const { services, env } = ctx;
   const name = t.name_ ?? "<unnamed>";
+
+  // An operator's forced outcome outranks everything the build would decide:
+  // the point of forcing a target is to settle it without running, so its
+  // conditions and cache are not consulted either. Read from the record the run
+  // is executing against, so a force lands for any target this process has not
+  // started yet.
+  const forced = env.writer?.snapshot().overrides?.[name];
+  if (forced !== undefined) {
+    reporter.info(
+      `${name}: forced ${forced.outcome} by ${forced.actor}` +
+        (forced.reason === undefined ? "" : ` — ${forced.reason}`),
+    );
+    return {
+      status: forced.outcome === "skipped" ? "skipped" : "passed",
+      ms: 0,
+    };
+  }
 
   for (const condition of t.onlyWhen_) {
     if (!(await condition())) return { status: "skipped", ms: 0 };
@@ -388,6 +429,7 @@ async function runTarget(
     // or cache is taken.
     if (t.dryRunnable_ && t.fn_ !== undefined) {
       const echoState = inMemoryStateHandle();
+      const summary = new TargetSummary();
       const targetCtx: TargetContext = {
         runId: env.runId,
         target: name,
@@ -398,20 +440,25 @@ async function runTarget(
         outcomes: () => allOutcomes(env),
         signals: env.signals,
         dryRun: true,
+        reportSummary: (pairs) => summary.add(pairs),
       };
       const start = performance.now();
       try {
-        await withAmbientEcho(
-          (line) => reporter.info(`  $ ${line}`),
-          () => runBody(t, targetCtx),
+        await withAmbientSummary(
+          summary,
+          () =>
+            withAmbientEcho(
+              (line) => reporter.info(`  $ ${line}`),
+              () => runBody(t, targetCtx),
+            ),
         );
         const ms = performance.now() - start;
         passTarget(reporter, renderer, style, name, ms);
-        return { status: "passed", ms };
+        return noted({ status: "passed", ms }, summary);
       } catch (error) {
         const ms = performance.now() - start;
         failTarget(reporter, renderer, style, name, ms, error);
-        return { status: "failed", ms, error };
+        return noted({ status: "failed", ms, error }, summary);
       }
     }
     for (const line of renderer.targetDryRunFooter(style, name)) {
@@ -467,20 +514,25 @@ async function runTarget(
       // are owed now. Returning here without driving them would drop them
       // silently — the run reports success and nothing records the effect was
       // ever due.
+      const summary = new TargetSummary();
       try {
-        await driveEffects(
-          t,
-          name,
-          targetContextFor(name, env, dryRun),
-          env,
-          reporter,
+        await withAmbientSummary(
+          summary,
+          () =>
+            driveEffects(
+              t,
+              name,
+              targetContextFor(name, env, dryRun, summary),
+              env,
+              reporter,
+            ),
         );
       } catch (error) {
         failTarget(reporter, renderer, style, name, 0, error);
-        return { status: "failed", ms: 0, error };
+        return noted({ status: "failed", ms: 0, error }, summary);
       }
       passTarget(reporter, renderer, style, name, 0);
-      return { status: "passed", ms: 0 };
+      return noted({ status: "passed", ms: 0 }, summary);
     }
     env.statuses.set(name, { status: "waiting" });
     void env.writer?.markTargetWaiting(name, wait.waitState);
@@ -503,13 +555,16 @@ async function runTarget(
     return { status: "failed", ms: 0, error };
   }
 
-  const targetCtx = targetContextFor(name, env, dryRun);
+  // The collector behind `ctx.reportSummary` and the ambient `reportSummary`
+  // a tool wrapper calls; installed for the body's whole async subtree below.
+  const summary = new TargetSummary();
+  const targetCtx = targetContextFor(name, env, dryRun, summary);
 
   // Acquire the target's cross-run lock (if any) before the body. A conflict —
   // or a lock declared with no store — fails the target with the guidance.
   let lock: HeldLock | null;
   try {
-    lock = await acquireTargetLock(t, env);
+    lock = await acquireTargetLock(t, env, (line) => reporter.info(line));
   } catch (error) {
     const ms = performance.now() - start;
     failTarget(reporter, renderer, style, name, ms, error);
@@ -517,18 +572,20 @@ async function runTarget(
   }
 
   try {
-    for (const v of t.validateBefore_) await v.validate({ target: name });
-    await runBodyWithRecovery(t, name, globalRecovery, targetCtx);
-    await driveEffects(t, name, targetCtx, env, reporter);
-    for (const v of t.validateAfter_) await v.validate({ target: name });
+    await withAmbientSummary(summary, async () => {
+      for (const v of t.validateBefore_) await v.validate({ target: name });
+      await runBodyWithRecovery(t, name, globalRecovery, targetCtx);
+      await driveEffects(t, name, targetCtx, env, reporter);
+      for (const v of t.validateAfter_) await v.validate({ target: name });
+    });
     const ms = performance.now() - start;
     if (cache !== undefined) await cache.record(t);
     passTarget(reporter, renderer, style, name, ms);
-    return { status: "passed", ms };
+    return noted({ status: "passed", ms }, summary);
   } catch (error) {
     const ms = performance.now() - start;
     failTarget(reporter, renderer, style, name, ms, error);
-    return { status: "failed", ms, error };
+    return noted({ status: "failed", ms, error }, summary);
   } finally {
     // Release on every path — success, failure, cancellation. The TTL is only
     // the backstop for a killed process.
@@ -621,6 +678,21 @@ async function runForEachTarget(
     failTarget(reporter, renderer, style, name, ms, error);
     return { status: "failed", ms, error, children: run.reports };
   }
+  // A cancellation is not a success, and here it has to be said explicitly. The
+  // nested scheduler reports `aborted` only when a sub-target *failed*, and a
+  // cancelled run's remaining items are abandoned rather than failed — so
+  // nothing would mark the fan-out, and the parent would report `passed` for a
+  // batch whose items never ran. The top-level scheduler is saved from the same
+  // reasoning by `execute`, which overrides its outcome with the run's
+  // cancellation; a nested one has no such reader. Getting this wrong is not
+  // cosmetic: the parent's row is written `succeeded`, and the compensation walk
+  // undoes exactly the targets the record calls succeeded — so a rollback would
+  // run against a deployment that never happened.
+  if (ctx.env.signal.aborted) {
+    const error = new Error(`${name}: cancelled before its items finished.`);
+    failTarget(reporter, renderer, style, name, ms, error);
+    return { status: "failed", ms, error, children: run.reports };
+  }
   passTarget(reporter, renderer, style, name, ms);
   return { status: "passed", ms, children: run.reports };
 }
@@ -656,9 +728,14 @@ function settleTarget(
   name: string,
   status: TargetStatus,
   error?: string,
+  summary?: SummaryEntry[],
 ): void {
-  env.statuses.set(name, { status: recordStatusOf(status), error });
-  void env.writer?.markTargetSettled(name, status, error);
+  env.statuses.set(name, {
+    status: recordStatusOf(status),
+    error,
+    ...(summary === undefined ? {} : { summary }),
+  });
+  void env.writer?.markTargetSettled(name, status, error, summary);
 }
 
 /** Sequentially run the plan, aborting (and skipping the rest) on first failure. */
@@ -676,7 +753,14 @@ export async function runSequential(
 
   for (const t of order) {
     const name = t.name_ ?? "<unnamed>";
-    if (skip.has(name) || aborted) {
+    // A cancelled run stops *launching*, not just retrying. Usually the running
+    // target fails first (its shell is terminated) and `aborted` covers the
+    // rest, but a body that finishes anyway — or a run cancelled before the
+    // first target — would otherwise keep starting new work after the run has
+    // demonstrably stopped being this process's to do. That matters most when
+    // the cancellation is a lost lease: the new holder is already running these
+    // very targets.
+    if (skip.has(name) || aborted || env.signal.aborted) {
       reports.push({ name, status: "skipped", ms: 0 });
       settleTarget(env, name, "skipped");
       continue;
@@ -693,9 +777,15 @@ export async function runSequential(
       failTarget(reporter, renderer, style, name, 0, error);
       outcome = { status: "failed", ms: 0, error };
     }
-    settleTarget(env, name, outcome.status, errorMessage(outcome.error));
+    settleTarget(
+      env,
+      name,
+      outcome.status,
+      errorMessage(outcome.error),
+      outcome.summary,
+    );
     if (outcome.status === "passed" || outcome.status === "failed") opened++;
-    reports.push({ name, status: outcome.status, ms: outcome.ms });
+    reports.push(reportOf(name, outcome));
     // A fan-out target's sub-targets appear as their own rows beneath it.
     if (outcome.children !== undefined) reports.push(...outcome.children);
     if (outcome.status === "passed") executed.push(name);
@@ -767,17 +857,71 @@ export async function runScheduled(
     (predecessors.get(t) ?? []).every((p) =>
       t.always_ ? settled.has(p) : done.has(p)
     );
+  /**
+   * Whether `t` can never become ready: a predecessor has settled in a way that
+   * does not satisfy it (failed, or skipped), so no later pass will change the
+   * answer. A predecessor parked at a `waitsFor` gate is deliberately *not*
+   * settled, so a target behind a gate stays pending for a resume instead.
+   */
+  /** Whether this run can still resume, i.e. whether a parked gate may reopen. */
+  const mayStillResume = (): boolean => !anyFailed && !ctx.env.signal.aborted;
+  const stranded = (t: TargetBuilder): boolean =>
+    !t.always_ &&
+    (predecessors.get(t) ?? []).some((p) =>
+      (settled.has(p) && !done.has(p)) ||
+      // A predecessor parked at a `waitsFor` gate is normally left alone, so a
+      // resume can run what is behind it. Once the run has failed or been
+      // cancelled it will never suspend and so never resume — the code already
+      // converts those parked rows to `skipped` once the pump is done — and
+      // until then anything behind the gate counts as unreachable. Without this
+      // the teardown behind it stays un-ready and is swept away, and whether
+      // that happens depends on whether the gate had launched yet, which is to
+      // say on `--parallel`.
+      (!mayStillResume() && outcomes.get(p)?.status === "waiting")
+    );
   const overlaps = (t: TargetBuilder): boolean =>
     [...runningSet].every((r) => canOverlap(t, r));
+
+  /** Settle a target this run will never launch, so its dependents can proceed. */
+  const abandon = (t: TargetBuilder): void => {
+    outcomes.set(t, { status: "skipped", ms: 0 });
+    started.add(t);
+    settled.add(t);
+    settleTarget(env, t.name_ ?? "<unnamed>", "skipped");
+  };
 
   await new Promise<void>((resolve) => {
     const pump = () => {
       for (const t of order) {
         if (runningSet.size >= limit) break;
-        if (started.has(t) || !ready(t) || !overlaps(t)) continue;
-        // After a fatal failure, stop launching — except `always` targets,
-        // which run for cleanup even when the build is failing.
-        if (halted && !t.always_) continue;
+        if (started.has(t)) continue;
+        // Settle a target whose prerequisites have made it unreachable, rather
+        // than leaving it for the final sweep. An `always` target waits for its
+        // predecessors to **settle**, so one that is never launched at all
+        // keeps teardown un-ready forever — and teardown is then swept away as
+        // skipped alongside the work it existed to clean up.
+        if (stranded(t)) {
+          abandon(t);
+          continue;
+        }
+        if (!ready(t) || !overlaps(t)) continue;
+        // Stop launching once the build has halted on a failure, or the run was
+        // cancelled — except `always` targets, which are teardown (stop a
+        // container, release a sandbox) and matter most in exactly those two
+        // situations.
+        //
+        // A target this run will therefore never launch is settled `skipped`
+        // *here* rather than in the final sweep. That is not cosmetic: an
+        // `always` target waits for its predecessors to **settle**, so a
+        // predecessor that is never launched keeps teardown un-ready forever,
+        // and it is swept away as skipped alongside the work it was meant to
+        // clean up — leaking whatever it reclaims. Settling on the spot lets the
+        // dependent become ready on this very pass (`order` is topological, so
+        // it is still ahead of us in this loop).
+        if ((halted || ctx.env.signal.aborted) && !t.always_) {
+          abandon(t);
+          continue;
+        }
         started.add(t);
         runningSet.add(t);
         const buffer = bufferReporter();
@@ -797,6 +941,7 @@ export async function runScheduled(
                   t.name_ ?? "<unnamed>",
                   outcome.status,
                   errorMessage(outcome.error),
+                  outcome.summary,
                 );
               }
               // An executed target (or a parked wait) prints a block worth
@@ -892,7 +1037,7 @@ export async function runScheduled(
   for (const t of order) {
     const name = t.name_ ?? "<unnamed>";
     const outcome = outcomes.get(t) ?? { status: "skipped", ms: 0 };
-    reports.push({ name, status: outcome.status, ms: outcome.ms });
+    reports.push(reportOf(name, outcome));
     // A fan-out target's sub-targets appear as their own rows beneath it.
     if (outcome.children !== undefined) reports.push(...outcome.children);
     if (outcome.status === "passed") executed.push(name);

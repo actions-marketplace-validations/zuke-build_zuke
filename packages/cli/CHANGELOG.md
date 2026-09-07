@@ -1,5 +1,19 @@
 # Changelog
 
+## [1.1.0](https://github.com/zuke-build/zuke/compare/cli-v1.0.1...cli-v1.1.0) (2026-08-22)
+
+
+### Features
+
+* **cli:** open setup with the Zuke logo and close with a star prompt ([#368](https://github.com/zuke-build/zuke/issues/368)) ([3783152](https://github.com/zuke-build/zuke/commit/37831529707b4b99e4d53cd49f7a65a6ff1facb5))
+
+## [1.0.1](https://github.com/zuke-build/zuke/compare/cli-v1.0.0...cli-v1.0.1) (2026-08-13)
+
+
+### Bug Fixes
+
+* **cli:** escape line separators in generated literals; license headers and review docs ([#347](https://github.com/zuke-build/zuke/issues/347)) ([114f842](https://github.com/zuke-build/zuke/commit/114f84246e83fc6fb0bd12b55e8eb04192978074))
+
 ## [1.0.0](https://github.com/zuke-build/zuke/compare/cli-v0.8.1...cli-v1.0.0) (2026-07-30)
 
 

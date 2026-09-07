@@ -1,3 +1,6 @@
+// Copyright (c) 2026 the Zuke contributors
+// SPDX-License-Identifier: MIT
+
 /**
  * The reporting surface of one run: the sink a run writes through, the redactor
  * that masks resolved secrets in everything it prints, the resolved
@@ -19,7 +22,7 @@ import {
   silentReporter,
 } from "./reporter.ts";
 import { appendJobSummary } from "./job_summary.ts";
-import { Redactor } from "./redact.ts";
+import { maskPatterns, Redactor } from "./redact.ts";
 import { detectWidth, type Style, type TargetReport } from "./report.ts";
 import { defaultRenderer, type Renderer } from "./renderer.ts";
 
@@ -123,9 +126,17 @@ export function emitActionsMasks(
 ): void {
   const maskReporter = safeReporter(baseReporter);
   for (const value of values) {
-    // Straight to the base reporter (not redacted, so the directive works),
-    // but best-effort: an EPIPE here must not abort the run either.
-    maskReporter.info(`::add-mask::${value}`);
+    for (const pattern of maskPatterns(value)) {
+      // Never emit a pattern that spans lines. The runner reads the directive
+      // to the end of the *line*, so a multi-line value would mask only its
+      // first line and print every line after it as ordinary log output — the
+      // call meant to protect the secret would be the thing that leaked it.
+      // maskPatterns already contributes each line separately.
+      if (pattern.includes("\n")) continue;
+      // Straight to the base reporter (not redacted, so the directive works),
+      // but best-effort: an EPIPE here must not abort the run either.
+      maskReporter.info(`::add-mask::${pattern}`);
+    }
   }
 }
 

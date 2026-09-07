@@ -1,3 +1,6 @@
+// Copyright (c) 2026 the Zuke contributors
+// SPDX-License-Identifier: MIT
+
 /**
  * Cancel a run and run its compensations — the cancellation half of the
  * durable-run lifecycle (see `./resume.ts` for the resume half, and
@@ -31,7 +34,7 @@
 
 import { type Build, discoverTargets, resolveOrderingEdges } from "./build.ts";
 import { defaultReadEnv, messageOf, runWithTimeout } from "./internal.ts";
-import type { Reporter } from "./executor.ts";
+import { consoleReporter, type Reporter, silentReporter } from "./reporter.ts";
 import { type OrderingEdge, planGraph } from "./graph.ts";
 import { discoverParameters, resolveParameters } from "./params.ts";
 import { Redactor } from "./redact.ts";
@@ -44,18 +47,18 @@ import {
   type TargetStateHandle,
 } from "./target.ts";
 import { outcomesFromRecord } from "./run_support.ts";
-import { absolutePath } from "./path.ts";
-import { findConfigDir, pathExists } from "./config.ts";
-import { defaultStateHost, type StateStore } from "./state/store.ts";
-import { resolveStateStore } from "./state/resolve.ts";
+import { loadOwnedRun } from "./ownership.ts";
+import type { StateStore } from "./state/store.ts";
+import { resolveRunStore } from "./run_store.ts";
 import { acquireCancelLock } from "./state/cancel_lock.ts";
 import { resolveActor } from "./state/record.ts";
-import type {
-  RunEvent,
-  RunRecord,
-  RunStatus,
-  SignalRecord,
-  TargetRunStatus,
+import {
+  isTerminalRunStatus,
+  type RunEvent,
+  type RunRecord,
+  type RunStatus,
+  type SignalRecord,
+  type TargetRunStatus,
 } from "./state/types.ts";
 
 /** How many times a conflicting cancel CAS is re-read and retried. */
@@ -77,19 +80,40 @@ export type SettlementTerminal = "cancelled" | "failed";
  */
 const NEVER_ABORTED: AbortSignal = new AbortController().signal;
 
-/** The console reporter cancel prints through when none is supplied. */
-const consoleReporter: Reporter = {
-  info: (line) => console.log(line),
-  error: (line) => console.error(line),
-};
+/**
+ * How a compensation walk's result reads in an operator's log: how many cleanups
+ * ran, and — only when there were any — how many of them failed.
+ *
+ * Module-internal: shared with `./execute_cancel.ts` and `./resume.ts` so the
+ * three places that narrate a walk cannot word it differently. Deliberately not
+ * the same string as {@link cancelEvent}'s `detail`, which is a persisted audit
+ * field rather than a line of prose.
+ *
+ * Takes the two fields it reads rather than a whole {@link CompensationOutcome},
+ * because the resume path narrates a {@link CancelResult}, which carries the same
+ * two but not the audit `attempts`.
+ */
+export function compensationSummary(
+  outcome: {
+    readonly compensated: readonly string[];
+    readonly failures: readonly CompensationFailure[];
+  },
+): string {
+  const failed = outcome.failures.length;
+  return `${outcome.compensated.length} compensation(s) ran${
+    failed > 0 ? `, ${failed} failed` : ""
+  }`;
+}
 
-/** A reporter that discards output (for `silent`). */
-const silentReporter: Reporter = { info: () => {}, error: () => {} };
-
-/** A run status past which nothing more happens. */
-function isTerminal(status: RunStatus): boolean {
-  return status === "succeeded" || status === "failed" ||
-    status === "cancelled";
+/**
+ * The line every path prints on discovering that another process owns this run's
+ * cancellation: it runs the compensations and settles the record, so this one
+ * stops.
+ *
+ * Module-internal: shared with `./execute_cancel.ts` and `./executor.ts`.
+ */
+export function cancelledElsewhere(runId: string): string {
+  return `Run ${runId} cancelled by another process — stopping.`;
 }
 
 /** An empty compensation outcome (nothing ran, nothing failed). */
@@ -165,6 +189,17 @@ export interface CompensationDeps {
    * by a timed-out wait whose `onTimeout` names a specific compensation target.
    */
   extra?: CompensationStep[];
+  /**
+   * Asked before each compensation whether this process still owns the run.
+   *
+   * A walk can be long — real rollbacks talk to real systems — and a lease is
+   * lost by lapsing, which a process busy doing exactly that can manage without
+   * ever being unhealthy (a compensation that blocks the event loop stops the
+   * heartbeat firing). If the claim changes hands mid-walk, every remaining
+   * compensation would be unwinding work the new holder is rebuilding. The walk
+   * stops instead, reporting what it had already undone.
+   */
+  stop?: () => boolean;
 }
 
 /** An in-memory {@link TargetStateHandle} seeded with a target's persisted meta. */
@@ -235,7 +270,16 @@ export async function runCompensations(
     }
     const status = record.targets[name]?.status;
     const possiblySucceeded = degraded && isUnproven(status);
-    if (status !== "succeeded" && !possiblySucceeded) continue;
+    // A forced `succeeded` counts even before the run has reached the target.
+    // The operator asserted the target's effects exist — that is the whole
+    // difference between forcing `succeeded` and forcing `skipped` — so a
+    // cancel that lands in between must still unwind them. Reading only the
+    // status would make the two forced outcomes indistinguishable here, while
+    // the row is still `pending`.
+    const forcedSucceeded = record.overrides?.[name]?.outcome === "succeeded";
+    if (status !== "succeeded" && !possiblySucceeded && !forcedSucceeded) {
+      continue;
+    }
     if (t.onCancel_ === undefined) continue;
     // The thunk is user code: a throw here must be recorded, not allowed to
     // escape and wedge the run mid-cancel (cleanup stays maximal).
@@ -281,6 +325,19 @@ export async function runCompensations(
   const outcomes = outcomesFromRecord(record.targets);
 
   for (const step of steps) {
+    // Asked before each step, not once up front: the claim can change hands
+    // *during* a walk, which is long by nature — real rollbacks talk to real
+    // systems, and a compensation that blocks the event loop stops the lease
+    // heartbeat firing without the process being unhealthy at all. Every step
+    // from that point would be undoing work the new holder is rebuilding.
+    if (deps.stop?.() === true) {
+      deps.reporter.info(
+        `cancel: this run was taken over by another process mid-rollback — ` +
+          `stopping after ${compensated.length} compensation(s). The rest are ` +
+          `whoever holds the run now to decide on.`,
+      );
+      break;
+    }
     const compName = step.compensation.name_ ??
       `${step.forTarget}.onCancel`;
     const body = step.compensation.fn_;
@@ -307,6 +364,9 @@ export async function runCompensations(
       outcomes: () => outcomes,
       signals: deps.signals,
       dryRun: false,
+      // A compensation has no row in a build summary — the walk runs after the
+      // run it undoes has ended — so there is nowhere for a note to go.
+      reportSummary: () => {},
     };
     try {
       deps.reporter.info(
@@ -663,7 +723,11 @@ export async function settleExternally(
   // this is what an operator reads in the log.
   const verb = terminal === "cancelled" ? "cancelled" : "failed";
   const readEnv = options.readEnv ?? defaultReadEnv;
-  const store = resolveCancelStore(options, build, readEnv);
+  const store = resolveRunStore(
+    options.stateStore,
+    build.stateStore(),
+    readEnv,
+  );
   if (store === undefined) {
     throw new Error(
       "cancel: no state store is configured. Set ZUKE_STATE_DIR / " +
@@ -676,11 +740,12 @@ export async function settleExternally(
     (options.silent ? silentReporter : consoleReporter);
   const now = () => new Date().toISOString();
 
-  const initial = await store.getRun(runId);
-  if (initial === null) {
-    throw new Error(`cancel: no run "${runId}" found in the store.`);
-  }
-  if (isTerminal(initial.record.status)) {
+  // A settlement runs *this* build's compensations against the record, so a run
+  // another build owns is refused before the lock is taken. Reported rather than
+  // silently skipped: unlike a sweep, this path was handed one run by name, so
+  // the caller asked about a run that is not this build's to unwind.
+  const initial = await loadOwnedRun(store, runId, "cancel", readEnv);
+  if (isTerminalRunStatus(initial.record.status)) {
     reporter.info(
       `Run ${runId} is already ${initial.record.status}; nothing to ` +
         `${terminal === "cancelled" ? "cancel" : "settle"}.`,
@@ -832,14 +897,7 @@ export async function settleExternally(
     }
 
     await finalizeCancelled(store, runId, actor, outcome, now, terminal);
-    reporter.info(
-      `Run ${runId} ${verb} — ${outcome.compensated.length} compensation(s) ` +
-        `ran${
-          outcome.failures.length > 0
-            ? `, ${outcome.failures.length} failed`
-            : ""
-        }.`,
-    );
+    reporter.info(`Run ${runId} ${verb} — ${compensationSummary(outcome)}.`);
     return {
       runId,
       status: terminal,
@@ -850,22 +908,6 @@ export async function settleExternally(
   } finally {
     await cancelLock.release();
   }
-}
-
-/** Resolve the store for a cancel — like a run, but always defaulting on. */
-function resolveCancelStore(
-  options: CancelOptions,
-  build: Build,
-  readEnv: (name: string) => string | undefined,
-): StateStore | undefined {
-  return resolveStateStore(options.stateStore, build.stateStore(), {
-    readEnv,
-    host: defaultStateHost,
-    defaultDir: absolutePath(
-      findConfigDir(Deno.cwd(), pathExists) ?? Deno.cwd(),
-    )(".zuke", "runs").path,
-    enableDefault: true,
-  });
 }
 
 /** Resolve `also` target names to compensation steps (timeout `{target}` disposition). */
@@ -903,7 +945,7 @@ async function transitionToCancelling(
   let record = initial.record;
   let version = initial.version;
   for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
-    if (isTerminal(record.status)) return "noop";
+    if (isTerminalRunStatus(record.status)) return "noop";
     if (record.status === "cancelling") return "recover";
     const next = structuredClone(record);
     next.status = "cancelling";
@@ -943,7 +985,7 @@ async function finalizeCancelled(
 ): Promise<void> {
   for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
     const loaded = await store.getRun(id);
-    if (loaded === null || isTerminal(loaded.record.status)) return;
+    if (loaded === null || isTerminalRunStatus(loaded.record.status)) return;
     const at = now();
     const next = structuredClone(loaded.record);
     next.status = terminal;

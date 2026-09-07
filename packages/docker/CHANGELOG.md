@@ -1,5 +1,19 @@
 # Changelog
 
+## [1.1.0](https://github.com/zuke-build/zuke/compare/docker-v1.0.1...docker-v1.1.0) (2026-08-28)
+
+
+### Features
+
+* **docker:** wrap the everyday docker surface as typed tasks ([#404](https://github.com/zuke-build/zuke/issues/404)) ([bb2c395](https://github.com/zuke-build/zuke/commit/bb2c395779e35308a90343b671c3b83246eed572)), closes [#403](https://github.com/zuke-build/zuke/issues/403)
+
+## [1.0.1](https://github.com/zuke-build/zuke/compare/docker-v1.0.0...docker-v1.0.1) (2026-08-13)
+
+
+### Bug Fixes
+
+* **cli:** escape line separators in generated literals; license headers and review docs ([#347](https://github.com/zuke-build/zuke/issues/347)) ([114f842](https://github.com/zuke-build/zuke/commit/114f84246e83fc6fb0bd12b55e8eb04192978074))
+
 ## [1.0.0](https://github.com/zuke-build/zuke/compare/docker-v0.4.0...docker-v1.0.0) (2026-07-30)
 
 

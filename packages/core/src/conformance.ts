@@ -1,3 +1,6 @@
+// Copyright (c) 2026 the Zuke contributors
+// SPDX-License-Identifier: MIT
+
 /**
  * A backend conformance kit for the state-api (`docs/state-api.md`).
  *
@@ -26,7 +29,7 @@
  */
 
 import type { RunEvent, RunRecord } from "./state/types.ts";
-import { messageOf } from "./internal.ts";
+import { delay, messageOf } from "./internal.ts";
 import type { StateStore } from "./state/store.ts";
 import type { LockHolder } from "./state/lock.ts";
 import { HttpStateStore } from "./state/http_store.ts";
@@ -70,11 +73,6 @@ function uniqueId(prefix: string): string {
   return `${prefix}-${crypto.randomUUID()}`;
 }
 
-/** Sleep for `ms` milliseconds. */
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
 /** A TTL long enough that a live-lock scenario never races the expiry (1 hour). */
 const LIVE_TTL_MS = 3_600_000;
 
@@ -112,6 +110,29 @@ function event(tool: string): RunEvent {
 /** A {@link LockHolder} for the given actor and run. */
 function holder(actor: string, runId: string): LockHolder {
   return { actor, runId, since: new Date().toISOString() };
+}
+
+/**
+ * Run each scenario, turning a throw into a failed {@link ConformanceResult} —
+ * so one violation is reported rather than aborting the whole kit.
+ *
+ * The two scenario kinds keep their own interfaces: their `run` arity differs,
+ * which is information, not duplication. Only the loop is shared.
+ */
+async function runScenarios<S extends { name: string }>(
+  scenarios: readonly S[],
+  run: (scenario: S) => Promise<void>,
+): Promise<ConformanceResult[]> {
+  const results: ConformanceResult[] = [];
+  for (const scenario of scenarios) {
+    try {
+      await run(scenario);
+      results.push({ name: scenario.name, ok: true });
+    } catch (error) {
+      results.push({ name: scenario.name, ok: false, error: messageOf(error) });
+    }
+  }
+  return results;
 }
 
 /** One named scenario over a store. */
@@ -225,6 +246,20 @@ const STATE_SCENARIOS: StateScenario[] = [
         since.length === 2,
         `since filter should return the 2 at/after the cutoff, got ${since.length}`,
       );
+      // An unlimited list returns everything, which is what lets a client
+      // filter on a field the query does not carry and then take the newest N
+      // itself. A store that caps this silently would hand that client the
+      // wrong window to search. Compared against a generous explicit limit,
+      // because the realistic failure is a server that honours the limit it is
+      // given but quietly applies a default of its own when given none — a
+      // fixture this size cannot outgrow a cap directly.
+      const unlimited = await store.listRuns({});
+      const generous = await store.listRuns({ limit: 1000 });
+      expect(
+        unlimited.length === generous.length,
+        `an unlimited listRuns must not cap its result: got ` +
+          `${unlimited.length} with no limit, ${generous.length} with limit=1000`,
+      );
       const limited = await store.listRuns({ target, limit: 2 });
       expect(
         limited.length === 2,
@@ -296,7 +331,7 @@ const STATE_SCENARIOS: StateScenario[] = [
         options.lockTtlMs,
       );
       expect(first.ok, "the first acquire should succeed");
-      await sleep(options.lockTtlMs + 150);
+      await delay(options.lockTtlMs + 150);
       const takeover = await store.acquireLock(
         key,
         holder("bob", "r2"),
@@ -351,16 +386,7 @@ export async function checkStateStore(
   const resolved: Required<ConformanceOptions> = {
     lockTtlMs: options.lockTtlMs ?? 200,
   };
-  const results: ConformanceResult[] = [];
-  for (const scenario of STATE_SCENARIOS) {
-    try {
-      await scenario.run(store, resolved);
-      results.push({ name: scenario.name, ok: true });
-    } catch (error) {
-      results.push({ name: scenario.name, ok: false, error: messageOf(error) });
-    }
-  }
-  return results;
+  return await runScenarios(STATE_SCENARIOS, (s) => s.run(store, resolved));
 }
 
 /** A minimal valid {@link BuildDescriptor} with the given id. */
@@ -484,16 +510,7 @@ export async function checkBuildRegistry(
   make: BuildRegistryFactory,
 ): Promise<ConformanceResult[]> {
   const registry = await make();
-  const results: ConformanceResult[] = [];
-  for (const scenario of REGISTRY_SCENARIOS) {
-    try {
-      await scenario.run(registry);
-      results.push({ name: scenario.name, ok: true });
-    } catch (error) {
-      results.push({ name: scenario.name, ok: false, error: messageOf(error) });
-    }
-  }
-  return results;
+  return await runScenarios(REGISTRY_SCENARIOS, (s) => s.run(registry));
 }
 
 /** Injectable dependencies for {@link runConformanceCli} (tests override them). */

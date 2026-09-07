@@ -1,3 +1,6 @@
+// Copyright (c) 2026 the Zuke contributors
+// SPDX-License-Identifier: MIT
+
 /**
  * Post the review as a GitHub pull-request comment. Runs against the REST API
  * with `pull-requests: write` and upserts a single per-reviewer comment
@@ -7,13 +10,17 @@
  */
 
 import { dig } from "../json.ts";
+import { githubReviewThreads } from "./github_threads.ts";
 import {
   commentBody,
   commentMarker,
+  type CommentMode,
   ensureOk,
   type EnvReader,
-  MAX_COMMENT_PAGES,
-  nextLink,
+  findOwn,
+  type HostComment,
+  paginateLinked,
+  probeString,
   readEnv,
   type ReviewHost,
 } from "./types.ts";
@@ -74,53 +81,100 @@ export function githubHeaders(token: string): Record<string, string> {
   };
 }
 
-/** The id of an existing comment carrying `marker`, or `undefined`. */
-async function findComment(
+/** Map one GitHub comment API item into the host-neutral {@link HostComment}. */
+function toHostComment(item: unknown): HostComment | undefined {
+  const id = dig(item, "id");
+  const body = dig(item, "body");
+  if (typeof id !== "number" || typeof body !== "string") return undefined;
+  const login = dig(item, "user", "login");
+  const type = dig(item, "user", "type");
+  const association = dig(item, "author_association");
+  return {
+    id,
+    body,
+    author: typeof login === "string" ? login : "",
+    association: typeof association === "string" ? association : "",
+    bot: type === "Bot",
+  };
+}
+
+/**
+ * List every comment on the pull request, following `Link` pagination (see
+ * {@link paginateLinked}). The author login, `author_association`, and bot flag
+ * come from the API's own metadata, so the discussion layer's trust decisions
+ * are grounded in what GitHub asserts — never in the comment text.
+ */
+export async function listPrComments(
+  context: GithubContext,
+  doFetch: typeof fetch = fetch,
+): Promise<HostComment[]> {
+  const comments: HostComment[] = [];
+  const url =
+    `${API}/repos/${context.owner}/${context.repo}/issues/${context.pull}/comments?per_page=100`;
+  await paginateLinked(
+    url,
+    githubHeaders(context.token),
+    "GitHub",
+    doFetch,
+    (item) => {
+      const comment = toHostComment(item);
+      if (comment !== undefined) comments.push(comment);
+    },
+  );
+  return comments;
+}
+
+/**
+ * The login the `token` authenticates as (`GET /user`), or `undefined` when the
+ * endpoint is unavailable — an Actions installation token cannot call it, but
+ * its comments are authored by a bot account, which the caller checks first.
+ */
+export function selfLogin(
+  token: string,
+  doFetch: typeof fetch,
+): Promise<string | undefined> {
+  return probeString(`${API}/user`, githubHeaders(token), doFetch, "login");
+}
+
+/**
+ * The id of the reviewer's own prior comment carrying `marker`, or `undefined`.
+ * The authorship rule is the shared {@link findOwn} one: marker at the start of
+ * the body **and** a bot author (the Actions token's comments) or the login the
+ * token authenticates as (a PAT run) — resolved only when needed.
+ */
+async function findOwnComment(
   context: GithubContext,
   marker: string,
   doFetch: typeof fetch,
 ): Promise<number | undefined> {
-  let url: string | undefined =
-    `${API}/repos/${context.owner}/${context.repo}/issues/${context.pull}/comments?per_page=100`;
-  // Follow `Link: rel="next"` so a marker beyond the first page is still found —
-  // otherwise a busy PR (>100 comments) would re-post a duplicate every run.
-  for (let page = 0; url !== undefined && page < MAX_COMMENT_PAGES; page++) {
-    const response = await doFetch(url, {
-      headers: githubHeaders(context.token),
-    });
-    await ensureOk(response, "GitHub");
-    const data: unknown = await response.json();
-    if (Array.isArray(data)) {
-      for (const item of data) {
-        const body = dig(item, "body");
-        const id = dig(item, "id");
-        if (
-          typeof body === "string" && body.includes(marker) &&
-          typeof id === "number"
-        ) {
-          return id;
-        }
-      }
-    }
-    url = nextLink(response.headers.get("link"));
-  }
-  return undefined;
+  const own = await findOwn(
+    await listPrComments(context, doFetch),
+    marker,
+    () => selfLogin(context.token, doFetch),
+  );
+  return own?.id;
 }
 
 /**
- * Upsert the per-reviewer comment on the pull request: patch the existing one
- * if present (matched by the hidden `name` marker), otherwise create it.
+ * Post the per-reviewer comment on the pull request. In `"update"` mode
+ * (default), patch the existing comment if present — matched by the hidden
+ * `name` marker **and** verified as the reviewer's own, see
+ * {@link findOwnComment} — otherwise create it. In `"append"` mode, always
+ * create a new comment, leaving earlier assessments on the thread as history.
  */
 export async function upsertPrComment(
   context: GithubContext,
   name: string,
   markdown: string,
   doFetch: typeof fetch = fetch,
+  mode: CommentMode = "update",
 ): Promise<void> {
   const marker = commentMarker(name);
   const body = commentBody(name, markdown);
   const repo = `${API}/repos/${context.owner}/${context.repo}`;
-  const existing = await findComment(context, marker, doFetch);
+  const existing = mode === "append"
+    ? undefined
+    : await findOwnComment(context, marker, doFetch);
   const url = existing === undefined
     ? `${repo}/issues/${context.pull}/comments`
     : `${repo}/issues/comments/${existing}`;
@@ -139,7 +193,17 @@ export const githubHost: ReviewHost = {
   prepare(token, env) {
     const context = resolveGithubContext(token, env);
     if (context === undefined) return undefined;
-    return (name, markdown, doFetch) =>
-      upsertPrComment(context, name, markdown, doFetch);
+    return (name, markdown, doFetch, mode) =>
+      upsertPrComment(context, name, markdown, doFetch, mode);
+  },
+  listComments(token, env) {
+    const context = resolveGithubContext(token, env);
+    if (context === undefined) return undefined;
+    return (doFetch) => listPrComments(context, doFetch);
+  },
+  reviewThreads(token, env) {
+    const context = resolveGithubContext(token, env);
+    if (context === undefined) return undefined;
+    return githubReviewThreads(context);
   },
 };

@@ -1,7 +1,11 @@
-import { assertEquals } from "../../core/tests/_assert.ts";
+// Copyright (c) 2026 the Zuke contributors
+// SPDX-License-Identifier: MIT
+
+import { assertEquals, assertRejects } from "../../core/tests/_assert.ts";
 import {
   aiCache,
   aiFixer,
+  AiReviewError,
   type Assessment,
   budget,
   type CacheEntry,
@@ -13,6 +17,8 @@ import {
 } from "../mod.ts";
 import { consoleLines, toMarkdown } from "../src/report.ts";
 import type { RemediationContext } from "@zuke/core";
+import { captureLines } from "../../core/tests/_console.ts";
+import { withEnv } from "../../core/tests/_env.ts";
 
 const DIFF = "diff --git a/src/app.ts b/src/app.ts\n" +
   "--- a/src/app.ts\n+++ b/src/app.ts\n@@\n+const x = eval(input);\n";
@@ -74,22 +80,8 @@ function memStore(): CacheStore & { map: Map<string, CacheEntry> } {
 }
 
 /** Capture console output with the job-summary file unset (no real writes). */
-async function captured(fn: () => Promise<void>): Promise<string[]> {
-  const lines: string[] = [];
-  const { log, warn } = console;
-  const summary = Deno.env.get("GITHUB_STEP_SUMMARY");
-  Deno.env.delete("GITHUB_STEP_SUMMARY");
-  console.log = (...a: unknown[]) => void lines.push(a.join(" "));
-  console.warn = (...a: unknown[]) => void lines.push(a.join(" "));
-  try {
-    await fn();
-  } finally {
-    console.log = log;
-    console.warn = warn;
-    if (summary !== undefined) Deno.env.set("GITHUB_STEP_SUMMARY", summary);
-  }
-  return lines;
-}
+const captured = (fn: () => Promise<void>): Promise<string[]> =>
+  captureLines(() => withEnv({ GITHUB_STEP_SUMMARY: undefined }, fn));
 
 const CTX: RemediationContext = {
   target: "test",
@@ -153,6 +145,53 @@ Deno.test("reviewer skips the call once the budget is exhausted", async () => {
   assertEquals(lines.some((l) => l.includes("AI budget exhausted")), true);
 });
 
+Deno.test("the verify pass's own usage draws down the shared budget", async () => {
+  const b = budget((x) => x.maxTokens(100_000));
+  const finding = {
+    title: "weak hash",
+    severity: "high" as const,
+    file: "h.ts",
+  };
+  const id = findingFingerprint("security", {
+    title: "weak hash",
+    severity: "high",
+    file: "h.ts",
+  });
+  const responses = [
+    claude({ score: 8, severity: "high", summary: "s", findings: [finding] }, {
+      input_tokens: 10,
+      output_tokens: 5,
+    }),
+    // The verify verdict also reports usage — it must be folded in too.
+    JSON.stringify({
+      content: [{
+        type: "text",
+        text: JSON.stringify({
+          verdicts: [{ id, verdict: "refuted", reason: "not reachable" }],
+        }),
+      }],
+      stop_reason: "end_turn",
+      usage: { input_tokens: 7, output_tokens: 3 },
+    }),
+  ];
+  let served = 0;
+  const queued: typeof fetch = () =>
+    Promise.resolve(
+      new Response(responses[Math.min(served++, responses.length - 1)], {
+        status: 200,
+      }),
+    );
+  await captured(() =>
+    // Passes: the sole finding was refuted, so nothing gates.
+    securityReviewer((r) =>
+      r.provider("claude").apiKey("k").diff((d) => d.text(DIFF))
+        .fetch(queued).budget(b).verify()
+    ).validate({ target: "t" })
+  );
+  assertEquals(b.spend_().calls, 2); // review + verify both recorded
+  assertEquals(b.spend_().totalTokens, 25);
+});
+
 // ----- Cache ---------------------------------------------------------------
 
 Deno.test("reviewer caches a response and reuses it on a repeat run", async () => {
@@ -207,6 +246,63 @@ Deno.test("a cached review notes it served from cache", async () => {
   await run();
   const lines = await run();
   assertEquals(lines.includes("  (cached — no API call)"), true);
+});
+
+/** Replace every stored response with text that is not JSON. */
+function poison(store: ReturnType<typeof memStore>): void {
+  for (const [key, entry] of store.map) {
+    store.map.set(key, { ...entry, text: "not json at all" });
+  }
+}
+
+Deno.test("a corrupt cache entry follows the reviewer's onError policy", async () => {
+  // Reading a cached response is a parse, and a parse can fail — a truncated or
+  // tampered entry must be handled like any other unreadable response, not
+  // thrown past the reviewer's own error policy.
+  const store = memStore();
+  const c = aiCache((x) => x.store(store));
+  const { fetch, calls } = recordFetch(
+    claude({ score: 1, severity: "low", summary: "s", findings: [] }),
+  );
+  const review = (onError: "fail" | "warn") =>
+    securityReviewer((r) =>
+      r.provider("claude").apiKey("k").diff((d) => d.text(DIFF))
+        .fetch(fetch).cache(c).onError(onError)
+    ).validate({ target: "t" });
+  await captured(() => review("warn"));
+  poison(store);
+  const lines = await captured(() => review("warn"));
+  assertEquals(calls.length, 1); // the cache still answered — no second call
+  assertEquals(
+    lines.some((l) => l.includes("the model did not return valid JSON")),
+    true,
+  );
+  // And with the default policy it fails the build rather than passing quietly.
+  await captured(async () => {
+    await assertRejects(() => review("fail"), AiReviewError);
+  });
+});
+
+Deno.test("a corrupt cache entry makes the fixer give up, not throw", async () => {
+  const store = memStore();
+  const c = aiCache((x) => x.store(store));
+  const { fetch, calls } = recordFetch(claudeFix(ONE_EDIT));
+  const fixer = hermetic(aiFixer((f) =>
+    f.provider("claude").apiKey("k")
+      .cache(c)
+  )).fetch(fetch);
+  await captured(async () => void await fixer.remediate(CTX));
+  poison(store);
+  let retry: boolean | undefined;
+  const lines = await captured(async () => {
+    retry = (await fixer.remediate(CTX)).retry;
+  });
+  assertEquals(retry, false); // reported and given up on, not thrown
+  assertEquals(calls.length, 1); // the cache answered — no second call
+  assertEquals(
+    lines.some((l) => l.includes("could not produce a fix")),
+    true,
+  );
 });
 
 // ----- Suppression ---------------------------------------------------------
@@ -314,6 +410,65 @@ Deno.test("an empty suppress list leaves the findings untouched", async () => {
     ).validate({ target: "t" })
   );
   assertEquals(lines.some((l) => l.includes("suppressed")), false);
+});
+
+Deno.test("a suppress list that matches no finding drops nothing", async () => {
+  // A non-empty list whose fingerprints belong to some other finding: the
+  // assessment must pass through untouched, so the critical finding still
+  // trips the default gate.
+  const sup = suppressions((s) => s.add("ffffffffffffffff"));
+  const { fetch } = recordFetch(
+    claude({
+      score: 9,
+      severity: "critical",
+      summary: "bad",
+      findings: [{ title: "rce", severity: "critical" }],
+    }),
+  );
+  const lines = await captured(async () => {
+    await assertRejects(
+      () =>
+        securityReviewer((r) =>
+          r.provider("claude").apiKey("k").diff((d) => d.text(DIFF))
+            .fetch(fetch).suppress(sup)
+        ).validate({ target: "t" }),
+      AiReviewError, // the unrelated fingerprint muted nothing
+    );
+  });
+  assertEquals(lines.some((l) => l.includes("suppressed")), false);
+});
+
+Deno.test("the verify pass is skipped once the review call exhausts the budget", async () => {
+  // The review itself fits under the cap check (0 < 1) but its usage blows the
+  // cap, so the verify pass that follows must be skipped — visibly — and the
+  // unverified finding must keep gating.
+  const b = budget((x) => x.maxTokens(1));
+  const { fetch, calls } = recordFetch(
+    claude(
+      {
+        score: 9,
+        severity: "critical",
+        summary: "bad",
+        findings: [{ title: "rce", severity: "critical" }],
+      },
+      { input_tokens: 500, output_tokens: 100 },
+    ),
+  );
+  const lines = await captured(async () => {
+    await assertRejects(
+      () =>
+        securityReviewer((r) =>
+          r.provider("claude").apiKey("k").diff((d) => d.text(DIFF))
+            .fetch(fetch).budget(b).verify()
+        ).validate({ target: "t" }),
+      AiReviewError, // the finding was kept, not silently verified away
+    );
+  });
+  assertEquals(calls.length, 1); // the review call only — no verify call
+  assertEquals(
+    lines.some((l) => l.includes("verify pass skipped — AI budget exhausted")),
+    true,
+  );
 });
 
 // ----- Report rendering ----------------------------------------------------

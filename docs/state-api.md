@@ -5,7 +5,8 @@ This is the contract a service must implement to back
 the production store for [durable run state](./state.md). Zuke ships the client;
 you host the service (a thin layer over Postgres, a key-value store, a
 k8s-annotation store, an object store, …). It is deliberately small: three
-endpoints, bearer auth, and HTTP preconditions for compare-and-swap.
+resources — runs, locks, and the build catalog — with bearer auth and HTTP
+preconditions for compare-and-swap.
 
 The client is dependency-free and talks plain HTTP, so any stack can serve it.
 
@@ -68,11 +69,11 @@ Delete one run. Backs `zuke runs prune`. **Optional** — a server that manages
 retention itself (see [the retention note](#notes-for-implementers)) may leave
 this unimplemented; the client only calls it from an explicit prune.
 
-| Response | Meaning                                                    |
-| -------- | ---------------------------------------------------------- |
-| `2xx`    | Deleted (or already absent).                               |
-| `404`    | No such run — treated as success (delete is idempotent).   |
-| other    | The client raises an error.                                |
+| Response | Meaning                                                  |
+| -------- | -------------------------------------------------------- |
+| `2xx`    | Deleted (or already absent).                             |
+| `404`    | No such run — treated as success (delete is idempotent). |
+| other    | The client raises an error.                              |
 
 ### `GET /runs?status=&target=&since=&limit=`
 
@@ -86,26 +87,101 @@ List runs as an array of **summaries** (a subset of the record):
     "rootTarget": "deploy",
     "status": "succeeded",
     "actor": "alice",
+    "initiator": { "actor": "alice", "kind": "human", "at": "2026-07-17T…Z" },
     "createdAt": "2026-07-17T…Z",
     "updatedAt": "2026-07-17T…Z"
   }
 ]
 ```
 
+`initiator` is **optional but load-bearing**: it is who asked for the run, while
+`actor` is whoever wrote it last, so a store that omits it from a summary makes
+`zuke runs list --initiator` fall back to `actor` — which on a resumed run is
+the process that resumed it, not the person who started it. Project it whenever
+the record has one. It is absent only on records written before the field
+existed.
+
 Query parameters (all optional, combined with AND):
 
-| Param    | Keeps runs where…                                                |
-| -------- | ---------------------------------------------------------------- |
-| `status` | the run status equals this value                                 |
-| `target` | the run's graph contains a target with this dotted name          |
-| `since`  | `createdAt` is at or after this ISO-8601 timestamp               |
+| Param    | Keeps runs where…                                                                |
+| -------- | -------------------------------------------------------------------------------- |
+| `status` | the run status equals this value                                                 |
+| `target` | the run's graph contains a target with this dotted name                          |
+| `since`  | `createdAt` is at or after this ISO-8601 timestamp                               |
 | `limit`  | at most this many are returned — the **newest**, so a large store stays listable |
+
+**With no `limit`, every matching run is returned.** A server must not impose a
+cap of its own on an unlimited list. The client relies on this whenever it has
+to filter on a field the query does not carry — `zuke runs list --initiator`
+lists without a limit precisely so it can filter and then take the newest N —
+and a silent server-side cap would hand it the wrong window to search, returning
+a confident subset that is not the newest anything. A store that cannot answer
+an unlimited list should fail the request rather than truncate it.
 
 The client validates every summary it receives (an untrusted service is checked,
 not trusted) and expects newest-first ordering is applied server-side where it
 matters; it does not re-sort the list. Ordering is **newest first** (by
 `createdAt`, then `id`); apply `limit` **after** ordering so it returns the most
 recent runs.
+
+## Locks (`/locks`)
+
+Four routes back everything that needs mutual exclusion: a target's
+[`.lock()`](./locks.md), and the **run lease** every stateful run holds on its
+own id (key `zuke-run-<id>`, 60s TTL) — which is also what lets `resume --check`
+tell an abandoned run from a merely slow one. A service that omits these can
+store run records but cannot support locks, leases, or reaping.
+
+A lock is `{ key, holder, token, expiresAt }`. The **token** is an opaque string
+the server mints on acquire; only a caller presenting it may renew or release.
+Expiry is **server-side**: an expired lock must be treated as free, so a crashed
+holder's lock is reclaimed without anyone calling `DELETE`.
+
+### `GET /locks`
+
+List the locks currently held — the read-only answer to "who has this, and until
+when?". No body.
+
+- `200 [ { "key": "…", "holder": { … }, "expiresAt": 1700000000000 }, … ]` —
+  every **live** lock. An expired one is free and must be left out; reporting it
+  as held is worse than omitting it, since the caller is usually looking at a
+  resource they believe is stuck. Never include the token: it is the holder's
+  proof of ownership and a listing is read-only.
+- `404`/`501` — not implemented. The client tells this apart from an empty
+  listing and says the backend cannot enumerate, rather than reporting that
+  nothing is held.
+
+This route is **optional**: a service that omits it supports locking in full,
+and only loses the listing.
+
+### `POST /locks/:key`
+
+Acquire. Body `{ holder, ttlMs }`, where `holder` is
+`{ actor?, runId?, target?, at }` — descriptive only, never an authorization
+input.
+
+- `201 { "token": "…" }` — acquired.
+- `409 { … }` — already held; the body is the **current holder**, which the
+  client surfaces in its conflict error so an operator can see who has it.
+- An expired lock must not produce a `409`; reclaim it and return `201`.
+
+### `PUT /locks/:key`
+
+Renew (the heartbeat). Body `{ token, ttlMs }`; extend the deadline to
+`now + ttlMs` only when `token` matches the current holder.
+
+- `204`/`200` — renewed.
+- `409` or `404` — the token no longer holds the lock. **Not an error:** the
+  client reads it as "someone else owns this now" and stops, which is how a
+  process that was paused long enough to lose its lease learns to stand down.
+
+### `DELETE /locks/:key`
+
+Release. Body `{ token }`; delete only when `token` matches.
+
+- `204`/`200` — released.
+- `404` — already gone, treated as success (release is idempotent, and the TTL
+  would have reclaimed it anyway).
 
 ## Build catalog (`/builds`)
 

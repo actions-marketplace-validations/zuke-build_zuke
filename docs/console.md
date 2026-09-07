@@ -7,6 +7,8 @@ tag-based markup and a set of layout primitives (`line`, `rule`, `box`,
 `table`) that render cleanly to a terminal and degrade gracefully in CI, so a
 build never has to reach for `console.log`.
 
+<!-- check -->
+
 ```ts
 import { ConsoleTasks as Log } from "jsr:@zuke/console";
 
@@ -207,6 +209,12 @@ Log.header("build");
 // The aligned end-of-run summary table:
 Log.summary(reports, totalMs, ok);
 ```
+
+A report's optional `summary` entries — the notes a target reported with
+`ctx.reportSummary`, or a wrapper reported through the ambient form
+(`DenoTasks.test`'s test counts) — trail its row, dimmed:
+`test  Succeeded  8.1s  // Passed: 837`. See
+[Notes on the summary row](./run-context.md#notes-on-the-summary-row).
 
 The [renderer](#renderer-integration) below calls both for you — reach for them
 directly only when you drive the run loop yourself.

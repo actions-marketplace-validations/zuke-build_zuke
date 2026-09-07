@@ -1,3 +1,6 @@
+// Copyright (c) 2026 the Zuke contributors
+// SPDX-License-Identifier: MIT
+
 /**
  * Settling a cancelled run's durable state: the cancel-lock handshake that
  * decides whether *this* process owns the compensation walk, the walk itself,
@@ -17,13 +20,31 @@ import type { Redactor } from "./redact.ts";
 import type { Lifecycle } from "./lifecycle.ts";
 import type { RunStateWriter } from "./state/writer.ts";
 import type { SignalRecord } from "./state/types.ts";
-import { cancelEvent, compensationEvents, runCompensations } from "./cancel.ts";
+import {
+  cancelEvent,
+  cancelledElsewhere,
+  compensationEvents,
+  compensationSummary,
+  runCompensations,
+} from "./cancel.ts";
 
 /**
  * Settle a cancelled run's durable state: hold the per-run cancel lock, walk
  * the succeeded targets' compensations in reverse, record them in the audit
  * trail, and mark the run cancelled — unless another process owns the walk.
  */
+/** What a cancellation settlement did, so the caller can decide about the cache. */
+export interface CancelSettlement {
+  /**
+   * Whether *this* process ran the compensation walk. False when another
+   * process owns the cancellation, in which case what it will undo is unknown
+   * here.
+   */
+  ownedWalk: boolean;
+  /** How many compensations were attempted, successful or not. */
+  compensated: number;
+}
+
 export async function settleCancelledRun(opts: {
   writer: RunStateWriter;
   life: Lifecycle;
@@ -35,7 +56,9 @@ export async function settleCancelledRun(opts: {
   redactor: Redactor;
   nowIso: () => string;
   isExternallyCancelled: () => boolean;
-}): Promise<void> {
+  /** Whether this process has lost the run's lease (see {@link "../cancel.ts".CompensationDeps.stop}). */
+  isLeaseLost?: () => boolean;
+}): Promise<CancelSettlement> {
   const { writer, life, order, runId, actor, reporter } = opts;
   // Hold the per-run cancel lock while we compensate, so a concurrent
   // `zuke cancel` can't settle the run (declaring "no compensations") over
@@ -43,12 +66,16 @@ export async function settleCancelledRun(opts: {
   // (the true case stopped above), so always attempt the acquire; a `null`
   // result means another process already holds the lock and owns the walk —
   // we stop and drain (F7).
+  // Both discoveries that another process owns the walk end identically: drain
+  // the pending writes, say so, and claim nothing.
+  const stopForOtherProcess = async (): Promise<CancelSettlement> => {
+    await writer.drain();
+    reporter.info(cancelledElsewhere(runId));
+    return { ownedWalk: false, compensated: 0 };
+  };
   const cancelLock = await writer.acquireCancelLock(actor);
   if (cancelLock === null) {
-    await writer.drain();
-    reporter.info(
-      `Run ${runId} cancelled by another process — stopping.`,
-    );
+    return await stopForOtherProcess();
   } else {
     try {
       // We initiated it (Ctrl-C / options.signal): mark cancelling (which
@@ -60,10 +87,7 @@ export async function settleCancelledRun(opts: {
       // fired onExternalCancel. Re-check before walking, so we never run the
       // compensations twice (that canceller owns them now).
       if (opts.isExternallyCancelled()) {
-        await writer.drain();
-        reporter.info(
-          `Run ${runId} cancelled by another process — stopping.`,
-        );
+        return await stopForOtherProcess();
       } else {
         // Announce the intermediate `cancelling` transition (the record was
         // just moved there) before compensations run, so a plugin sees the
@@ -77,19 +101,34 @@ export async function settleCancelledRun(opts: {
           signals: opts.signals,
           reporter,
           redactor: opts.redactor,
+          stop: opts.isLeaseLost,
         });
         const at = opts.nowIso();
+        // Recorded even if the claim changed hands mid-walk: an event is
+        // additive and stays true whoever owns the run now, and what happened
+        // before this process stopped is exactly what a later reader needs.
         for (const event of compensationEvents(comp.attempts, actor, at)) {
           await writer.appendEvent(event);
         }
         await writer.appendEvent(cancelEvent(actor, comp, at));
+        // A walk cut short by a lost lease did not settle this run, and saying
+        // otherwise would claim an outcome that belongs to the new holder. The
+        // terminal write is already a no-op on a disowned writer; not making it
+        // is how the operator's report and the returned settlement stay honest.
+        if (opts.isLeaseLost?.() === true) {
+          reporter.error(
+            `Run ${runId} was taken over by another process mid-rollback — ` +
+              `${comp.compensated.length} compensation(s) had already run. ` +
+              `Settling it is the new holder's to do.`,
+          );
+          return { ownedWalk: false, compensated: comp.compensated.length };
+        }
         await writer.markRunCancelled();
-        reporter.info(
-          `Run ${runId} cancelled — ${comp.compensated.length} ` +
-            `compensation(s) ran${
-              comp.failures.length > 0 ? `, ${comp.failures.length} failed` : ""
-            }.`,
-        );
+        reporter.info(`Run ${runId} cancelled — ${compensationSummary(comp)}.`);
+        return {
+          ownedWalk: true,
+          compensated: comp.compensated.length + comp.failures.length,
+        };
       }
     } finally {
       await cancelLock?.release();

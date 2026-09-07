@@ -1,5 +1,47 @@
 # Changelog
 
+## [1.8.0](https://github.com/zuke-build/zuke/compare/gh-v1.7.0...gh-v1.8.0) (2026-08-29)
+
+
+### Features
+
+* **gh:** wrap the run, workflow, repo and Actions config commands ([#410](https://github.com/zuke-build/zuke/issues/410)) ([d3f2ba8](https://github.com/zuke-build/zuke/commit/d3f2ba8d36b8bb251d85bf6bf7ce07e82f9b119f)), closes [#409](https://github.com/zuke-build/zuke/issues/409)
+
+## [1.7.0](https://github.com/zuke-build/zuke/compare/gh-v1.6.0...gh-v1.7.0) (2026-08-29)
+
+
+### Features
+
+* **gh:** wrap the pr, issue and release commands as typed tasks ([#407](https://github.com/zuke-build/zuke/issues/407)) ([45e5393](https://github.com/zuke-build/zuke/commit/45e539337ffce139b836b13ca2cf736b09cd8e77))
+
+## [1.6.0](https://github.com/zuke-build/zuke/compare/gh-v1.5.0...gh-v1.6.0) (2026-08-22)
+
+
+### Features
+
+* **console:** Zuke logo task, gh api task, and a browser opener in core ([#366](https://github.com/zuke-build/zuke/issues/366)) ([2b1453d](https://github.com/zuke-build/zuke/commit/2b1453ddaa3bd6b77437b4b39369ddc224393b8a))
+
+## [1.5.0](https://github.com/zuke-build/zuke/compare/gh-v1.4.0...gh-v1.5.0) (2026-08-14)
+
+
+### Features
+
+* **gh:** mark a release as latest and refresh changed release assets ([#356](https://github.com/zuke-build/zuke/issues/356)) ([fbab708](https://github.com/zuke-build/zuke/commit/fbab7086b4da03afa835117f8b5c0a387e32d658))
+
+## [1.4.0](https://github.com/zuke-build/zuke/compare/gh-v1.3.1...gh-v1.4.0) (2026-08-13)
+
+
+### Features
+
+* **gh:** release-asset uploads, the Gemini extension archive, and a coverage push to 98% ([#352](https://github.com/zuke-build/zuke/issues/352)) ([a678f35](https://github.com/zuke-build/zuke/commit/a678f35c3baea51ebb837dbf2cc0e100760ff0ae))
+
+## [1.3.1](https://github.com/zuke-build/zuke/compare/gh-v1.3.0...gh-v1.3.1) (2026-08-13)
+
+
+### Bug Fixes
+
+* **cli:** escape line separators in generated literals; license headers and review docs ([#347](https://github.com/zuke-build/zuke/issues/347)) ([114f842](https://github.com/zuke-build/zuke/commit/114f84246e83fc6fb0bd12b55e8eb04192978074))
+
 ## [1.3.0](https://github.com/zuke-build/zuke/compare/gh-v1.2.0...gh-v1.3.0) (2026-08-10)
 
 

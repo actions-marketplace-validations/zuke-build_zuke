@@ -1,3 +1,6 @@
+// Copyright (c) 2026 the Zuke contributors
+// SPDX-License-Identifier: MIT
+
 import {
   assertEquals,
   assertRejects,
@@ -15,6 +18,7 @@ import {
   windowsCmdShim,
 } from "../src/tooling.ts";
 import { CommandError, CommandTimeoutError } from "../src/shell.ts";
+import { withTemp } from "./_temp.ts";
 
 /** Minimal concrete settings: runs `deno eval <script>` — hermetic. */
 class EvalSettings extends ToolSettings {
@@ -51,8 +55,7 @@ Deno.test("run() executes and captures output", async () => {
 });
 
 Deno.test("run() applies env and cwd", async () => {
-  const dir = await Deno.makeTempDir();
-  try {
+  await withTemp(async (dir) => {
     // Compare the resolved cwd against the target dir *inside* the subprocess,
     // so both paths are normalised by the same realPath in the same process.
     // A plain string match is unreliable cross-platform (macOS temp symlinks,
@@ -68,9 +71,7 @@ Deno.test("run() applies env and cwd", async () => {
       .quiet()
       .run();
     assertEquals(out.stdout.includes("v1:true"), true);
-  } finally {
-    await Deno.remove(dir, { recursive: true });
-  }
+  });
 });
 
 Deno.test("run() throws CommandError on non-zero exit", async () => {
@@ -497,4 +498,37 @@ Deno.test("SubcommandSettings: leadingTokens and middleTokens bracket the comman
     "o/r",
     "--json",
   ]);
+});
+
+/** Settings that record what {@link ToolSettings.onOutput} was handed. */
+class ObservingSettings extends EvalSettings {
+  readonly seen: Array<{ code: number; stdout: string }> = [];
+  protected override onOutput(output: { code: number; stdout: string }): void {
+    this.seen.push({ code: output.code, stdout: output.stdout.trim() });
+  }
+}
+
+Deno.test("onOutput sees the output of a successful run", async () => {
+  const s = new ObservingSettings().quiet();
+  const out = await s.run();
+  assertEquals(out.code, 0);
+  assertEquals(s.seen, [{ code: 0, stdout: "tool-ok" }]);
+});
+
+Deno.test("onOutput sees a failed run's output before the CommandError is raised", async () => {
+  const s = new ObservingSettings()
+    .script("console.log('partial'); Deno.exit(3)")
+    .quiet();
+  await assertRejects(() => s.run(), CommandError, "exit 3");
+  assertEquals(s.seen, [{ code: 3, stdout: "partial" }]);
+});
+
+Deno.test("onOutput runs once under noThrow too, and the output is returned", async () => {
+  const s = new ObservingSettings()
+    .script("console.log('partial'); Deno.exit(3)")
+    .noThrow()
+    .quiet();
+  const out = await s.run();
+  assertEquals(out.code, 3);
+  assertEquals(s.seen, [{ code: 3, stdout: "partial" }]);
 });
