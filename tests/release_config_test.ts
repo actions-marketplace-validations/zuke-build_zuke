@@ -109,21 +109,35 @@ Deno.test("the deno workspace lists exactly the configured packages", async () =
   assertEquals(workspace.map(String).sort(), [...PACKAGES].sort());
 });
 
-Deno.test("the README package table lists every workspace package", async () => {
-  // The README's package tables are the human-facing catalog; a package missing
-  // there is invisible to anyone browsing the repo. Enforce it so the membership
-  // lists (workspace, release-please config/manifest, the build/packages.ts
-  // publish loop, and the README) never drift apart.
-  const readme = await Deno.readTextFile("README.md");
-  const missing = PACKAGES
-    .map((path) => path.replace("packages/", ""))
-    .filter((name) =>
-      !readme.includes(`[\`@zuke/${name}\`](https://jsr.io/@zuke/${name})`)
-    );
+/** The `[\`@zuke/<name>\`](https://jsr.io/@zuke/<name>)` link that heads a matrix row. */
+const MATRIX_ROW =
+  /^\| \[`@zuke\/([a-z-]+)`\]\(https:\/\/jsr\.io\/@zuke\/\1\)/gm;
+
+Deno.test("the docs package matrix lists exactly the workspace packages", async () => {
+  // docs/packages.md is the human-facing catalogue; a package missing there is
+  // invisible to anyone browsing the repo, and a row for a package that does
+  // not exist (or listed twice) makes the stated count a lie. Enforce exact
+  // membership so the lists (workspace, release-please config/manifest, the
+  // build/packages.ts publish loop, and the matrix) never drift apart.
+  const matrix = await Deno.readTextFile("docs/packages.md");
+  const rows = [...matrix.matchAll(MATRIX_ROW)].map((m) => m[1]);
   assertEquals(
-    missing,
-    [],
-    `README.md package tables are missing: ${missing.join(", ")}`,
+    rows.length,
+    new Set(rows).size,
+    "docs/packages.md lists a package more than once",
+  );
+  assertEquals([...rows].sort(), [...PACKAGE_DIRS].sort());
+});
+
+Deno.test("the README still reaches the package matrix", async () => {
+  // The README names only the notable wrappers; the full catalogue lives in
+  // docs/packages.md, so the README must keep linking to it or the catalogue
+  // becomes unreachable from the landing page.
+  const readme = await Deno.readTextFile("README.md");
+  assertEquals(
+    readme.includes("](./docs/packages.md)"),
+    true,
+    "README.md no longer links docs/packages.md",
   );
 });
 
@@ -149,4 +163,49 @@ Deno.test("deno.lock captures release-please's full npm tree", async () => {
         "`deno cache npm:release-please@16.18.0` and commit the updated lock.",
     );
   }
+});
+
+/**
+ * The files whose prose quotes the size of the workspace. The package *matrix*
+ * is checked above; this is the number written in sentences ("the 58
+ * packages", "a 58-package workspace", "(58 total)"), which drifted for months
+ * because nothing compared it to the real list.
+ */
+const PACKAGE_COUNT_PROSE = [
+  "README.md",
+  "AGENTS.md",
+  "RELEASING.md",
+  "docs/versioning.md",
+  "docs/comparison.md",
+  "docs/getting-started.md",
+];
+
+/**
+ * A number that states the workspace size: `58 packages`, `58 JSR packages`,
+ * `58 independent JSR packages`, `58-package`, or `(58 total)`. A `50+`-style
+ * lower bound has no trailing count keyword and is deliberately not matched.
+ */
+const PACKAGE_COUNT =
+  /\b(\d+)(?=(?:-package\b| (?:independent )?(?:JSR )?packages\b| total\)))/g;
+
+Deno.test("every prose mention of the package count matches the workspace", async () => {
+  const expected = PACKAGE_DIRS.length;
+  const wrong: string[] = [];
+  for (const path of PACKAGE_COUNT_PROSE) {
+    const text = await Deno.readTextFile(path);
+    const counts = [...text.matchAll(PACKAGE_COUNT)].map((m) => Number(m[1]));
+    assertEquals(
+      counts.length > 0,
+      true,
+      `${path} no longer states the package count; drop it from the list`,
+    );
+    for (const count of counts) {
+      if (count !== expected) wrong.push(`${path}: ${count}`);
+    }
+  }
+  assertEquals(
+    wrong,
+    [],
+    `package count is ${expected}; stale mentions: ${wrong.join(", ")}`,
+  );
 });

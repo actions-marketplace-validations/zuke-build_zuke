@@ -84,7 +84,7 @@ Each run is stored as one JSON document:
       "meta": { "target": "sit-7" },
       "startedAt": "…",
       "endedAt": "…",
-      "waitingFor": null, // the gate it is parked on, when suspended
+      "waitingFor": null, // the gate it is parked on; present only while `waiting`
       "effects": {} // per-effect intent + settlement, for crash re-drive
     }
   },
@@ -96,6 +96,12 @@ A target's `status` is one of `pending`, `running`, `succeeded`, `failed`,
 `skipped`, and `waiting` (parked at a [`.waitsFor()`](./orchestration.md) gate).
 This is a **separate vocabulary** from the console's `passed`/`cached`: both of
 those map to `succeeded` in the record.
+
+`waitingFor` belongs to that `waiting` status and goes with it: a target that
+settles by any path — the gate satisfied, the timeout fired, the run cancelled —
+no longer carries one. So a run that has reached a terminal status never has a
+target still claiming to be parked on a gate, and a reader can trust the two to
+agree.
 
 The executor writes the record when it is created, on each target's start and
 finish, and when the run ends. So if the process is killed mid-run, the record
@@ -197,6 +203,35 @@ returns the current metadata. When no store is configured, the handle is an
 in-memory no-op — `set`/`get` are consistent within the run, but nothing is
 persisted. It is the carrier for anything that must survive a
 [suspend/resume](./orchestration.md) boundary.
+
+### Checking that a write landed
+
+`set` resolves when the write has been attempted, whether or not it landed.
+When a body needs to *know*, use **`trySet`**, which resolves `true` when the
+patch reached the store and `false` when the write was dropped — conflicted
+away for good, or refused by a store that errored:
+
+```ts
+deploy = target().executes(async (ctx) => {
+  const slot = await lease();
+  if (!await ctx.state.trySet({ slot })) {
+    // Nothing has been deployed yet, so failing here is cheap. Going ahead
+    // would leave a slot held that no compensation can find again.
+    throw new Error(`could not record the leased slot ${slot}`);
+  }
+  await deployTo(slot);
+});
+```
+
+Treat `false` as **not recorded**: a dropped write is sometimes re-persisted by
+a later one, but nothing guarantees it. A dropped write also warns, and one
+that is definitely unrecoverable marks the record `degraded` so a later resume
+refuses it rather than repeating a step against state it cannot trust.
+
+Two contexts have nothing durable behind them and so always answer `true`: a
+build with no state store, and a compensation body, whose `ctx.state` is seeded
+from the original target's metadata and kept in memory (the run is ending, so
+cleanup state is not persisted).
 
 ### Secrets never touch state
 

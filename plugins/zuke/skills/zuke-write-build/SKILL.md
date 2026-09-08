@@ -142,7 +142,11 @@ it cannot answer "does one exist for this tool?"; only the catalogue
   `ZUKE_*_URL` backend must be `https:` (loopback exempt;
   `ZUKE_ALLOW_INSECURE_URL=1` opts out). In a body, `ctx.state.set({ … })` /
   `ctx.state.get()` records per-target metadata (JSON, **never secrets** —
-  secret parameters and redacted values are excluded). Inspect persisted runs
+  secret parameters and redacted values are excluded). `set` awaits the
+  write; `ctx.state.trySet({ … })` is the same write reporting `true` when it
+  reached the store and `false` when it was dropped — use it before an
+  irreversible step that depends on the value. A store-less build and a
+  compensation body always see `true` (nothing durable behind them). Inspect persisted runs
   afterwards with `zuke runs list` (filter by
   `--status`/`--target`/`--since`/`--limit`) and `zuke runs show <id>` (`--json`
   on both). Prune old ones with `zuke runs prune --keep <age> --keep-last <n>`
@@ -255,7 +259,10 @@ it cannot answer "does one exist for this tool?"; only the catalogue
   client-reported actor and flows to the audit trail, run records, lock holders,
   and a registry-spawned child's `ZUKE_ACTOR`/`ZUKE_ACTOR_KIND`/
   `ZUKE_ACTOR_ROLES`. Both are fail-closed: a throw, a non-object, or an empty
-  actor refuses the request, and nothing runs.
+  actor refuses the request, and nothing runs. `override mcpProtectedResource()`
+  publishes the RFC 9728 metadata document and names it in every challenge, so a
+  client that has no token can discover the identity provider — Zuke is the
+  resource only, and hosts no OAuth endpoints of its own. See the cheatsheet.
 - **AI review & self-healing (`@zuke/ai`):** gate a target on a structured LLM
   review of the diff (`securityReviewer(...)` etc. via `.validateBefore`), or
   attach `aiFixer(...)` with `.recoverWith(...)` so a failing target is

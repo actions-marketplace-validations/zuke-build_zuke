@@ -30,6 +30,15 @@
 - [Shell wrapper (`$`)](./shell.md) — ergonomic, injection-safe process
   execution.
 - [Paths (`absolutePath`)](./paths.md) — the fluent path type.
+- [Packages](./packages.md) — the full package matrix with JSR badges.
+- Recipes — the three things a small project wants first:
+  [replace your shell scripts](./recipes/replace-shell-scripts.md) with the `$`
+  shell, [generate your CI](./recipes/generate-ci.md) and stop editing YAML,
+  and [release a small library](./recipes/release-a-library.md) as one chain
+  of targets.
+- [Examples](../examples/README.md) — five cloneable mini projects: a Deno
+  library gate, generated CI, a Node app, a library release, and shell scripts
+  to targets.
 - [Tools](./tools.md) — the typed tool-wrapper packages and their tasks.
 - [Installing tools](./installing-tools.md) — fetch pinned, checksum-verified
   CLIs from a build with `installRelease()` and `toolchain()`.
@@ -40,6 +49,8 @@
   suspend/resume.
 - [MCP server](./mcp.md) — `zuke mcp` exposes the build to AI agents as typed
   tools over the Model Context Protocol.
+- [Agent skills](./agent-skills.md) — install `zuke-setup` and
+  `zuke-write-build` into Claude Code, OpenAI Codex, or Gemini CLI.
 - [AI review](./ai-review.md) — model-assessed review gates as build
   validations.
 - [Self-healing builds](./self-healing.md) — hand a failure to an AI fixer that

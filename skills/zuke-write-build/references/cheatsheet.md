@@ -150,6 +150,7 @@ deploy = target().executes(async (ctx) => {
   ctx.signal; // AbortSignal, fired when the run is cancelled
   ctx.dryRun; // true under a dry run
   await ctx.state.set({ where: "sit-7" }); // durable metadata — see below
+  await ctx.state.trySet({ where: "sit-7" }); // ...same write, false if dropped
   ctx.stateOf("build").get(); // read ANOTHER target's published state
   ctx.signals.get("approved"); // an external signal's payload (see waits)
   ctx.outcomeOf("checks")?.status; // one target's settled outcome, or undefined
@@ -210,7 +211,9 @@ class CD extends Build {
     return new HttpStateStore({ url: this.url.value, token: this.token.value });
   }
   deploy = target().executes(async (ctx) => {
-    await ctx.state.set({ image: tag }); // JSON patch, merged and persisted
+    // trySet resolves true when the patch reached the store, false when the
+    // write was dropped. Check it before an irreversible step that needs it.
+    if (!await ctx.state.trySet({ image: tag })) throw new Error("not recorded");
     const meta = ctx.state.get(); // read back (this run and later ones)
   });
 }
@@ -1214,6 +1217,24 @@ schedules are UI-side and ignored. Numeric fields + whole-hour offsets only,
 else a friendly error.
 `cicd({ provider: "github", pipeline: { triggers: { schedule: [{ cron: "30 9 * * 1-5", tz: "Europe/Sofia" }] } } })`.
 
+## Recipes — complete builds for the common small-project jobs
+
+Copy the closest one instead of composing from primitives; each is a full
+`zuke.ts` with the commands to run it, and has a runnable twin under
+`examples/`:
+
+- **Replace a shell script** (`docs/recipes/replace-shell-scripts.md`,
+  `examples/scripts-to-zuke`) — `$` from `jsr:@zuke/core/shell` with no `Build`
+  class at all, then the same steps as targets.
+- **Generate the CI** (`docs/recipes/generate-ci.md`, `examples/ci-only`) —
+  `cicd({ provider, fanOut: true })` per provider, `generate-ci --check` as the
+  gate.
+- **Release a library** (`docs/recipes/release-a-library.md`,
+  `examples/release-library`) — `parameter().required()` version, then
+  `GitTasks.add/commit/tag/push` → `GhTasks.releaseCreate((s) =>
+  s.generateNotes().latest())` → `DenoTasks.publish()`, one chain you can stop
+  anywhere.
+
 ## Run & inspect
 
 ```sh
@@ -1360,3 +1381,30 @@ refused archive is a cache miss (rebuild + warning), never a build failure, so
 whoever can write the store can neither plant files nor halt the build.
 `--affected` limits a run to targets touched since a git base (great for CI job
 fan-out).
+
+**Telling a client where to authenticate** (`docs/mcp.md`): verifying a token
+only helps a caller that already has one. `override mcpProtectedResource()`
+returns `protectedResource(canonicalUri).authorizationServer(issuer)` (plus
+optional `.scopes(...)`, `.name(...)`, `.documentation(...)`), which makes
+`zuke mcp --http` an OAuth 2.0 **protected resource**: it publishes the RFC 9728
+metadata document and names it in every `WWW-Authenticate` challenge, so
+`claude mcp add --transport http <url>` can discover the identity provider and
+authenticate in a browser. Zuke issues no tokens and hosts no `/authorize`,
+`/token` or `/register` — those belong to the provider named here, and
+`mcpAuth()` verifies what it mints. Dynamic client registration is **not**
+required (deprecated in the MCP spec; a pre-registered client id works).
+
+Three strings must agree byte for byte or every token fails validation: the
+`resource` you declare, the `resource` parameter the client sends, and the
+**audience** the provider puts in the token. Your `mcpAuth()` verifier must
+check `aud` — a resource server that skips it accepts tokens minted for other
+services. Do not hand-roll JWT verification: a build file may depend on a
+maintained JOSE library even though the published packages may not.
+
+`authorizationServer(...)` takes the provider's **issuer identifier**, not its
+metadata URL. The well-known path insertion (`/mcp` publishes at
+`/.well-known/oauth-protected-resource/mcp`) is handled for you, and only that
+one location is served — a root copy would name a path the root route does not
+expect, so a conformant client must discard it. `UNAUTHORIZED` and `INVALID_TOKEN` are separate refusals on purpose:
+a caller that presented nothing gets no `error` parameter, one whose token was
+rejected gets `error="invalid_token"`.

@@ -88,7 +88,7 @@ regenerate them in the same PR.
   runner, formatter, linter, type-checker, coverage — is the built-in `deno`
   CLI. No Node, npm, or external build tools.
 - **Language:** TypeScript, strict mode (Deno's default).
-- **Distribution:** [JSR](https://jsr.io/) as a workspace of 54 packages:
+- **Distribution:** [JSR](https://jsr.io/) as a workspace of 58 packages:
   `@zuke/core` (exports `.`, `./shell`, `./tooling`, `./tooling/conformance`,
   `./render`, `./conformance`) plus the `@zuke/cli` command, a generic
   `@zuke/cmd` fallback, and 50+ typed tool wrappers and plugins (`@zuke/deno`,
@@ -390,7 +390,7 @@ can drift from it. `zuke.ts`'s `ci` target depends on: `format`
 (`deno fmt --check`), `lint` (`deno lint`), `spell` (cspell), `coverage`
 (type-check, then the test suite with the 95% coverage gate), `coverageUpload`
 (skips locally without a `CODECOV_TOKEN`), `apiDocsCheck`, `docLint`,
-`snippetsCheck`, `hclSyncCheck`, `pluginSyncCheck`, `skillsCheck`,
+`snippetsCheck`, `examplesCheck`, `hclSyncCheck`, `pluginSyncCheck`, `skillsCheck`,
 `graphDocCheck`, `pluginVersionCheck`, `prBodyLint`, `actionPinCheck`,
 `security`, and `lockCheck`. Read `zuke.ts`'s `ci` target for the current,
 authoritative list — this is a snapshot, not a second source of truth.
@@ -415,10 +415,11 @@ packages/
   deno/                   # @zuke/deno — DenoTasks
   npm/                    # @zuke/npm  — NpmTasks
   cmd/                    # @zuke/cmd  — CmdTasks (generic fallback)
-  …                       # + 50 more: @zuke/cli, @zuke/docs, @zuke/ai, and tool wrappers (54 total)
+  …                       # + the rest: @zuke/cli, @zuke/docs, @zuke/ai, and tool wrappers (58 total)
 tests/
   integration/            # in-process: real builds via the CLI main() + _harness.ts
   e2e/                    # subprocess: *_e2e.ts + fixtures/ (run by the `integration` target)
+examples/                 # cloneable mini projects, type-checked and listed by `examplesCheck`
 zuke.ts                   # Zuke's own build (runnable example)
 build/                    # reusable helpers behind zuke.ts's targets (docs, publish, snippets, …)
 zuke, zuke.ps1            # bootstrap launchers (install Deno, run the build); zuke.json names the build class

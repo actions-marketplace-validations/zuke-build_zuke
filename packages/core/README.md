@@ -175,6 +175,13 @@ function assertSafeLinkTarget(entryName: string, target: string): void
   name is bounded by {@link assertSafeEntryName}; a symlink adds a second escape
   vector (its target), so a poisoned tarball can't plant `bin/x -> ../../etc`.
 
+function bearerChallenge(parts: BearerChallenge): string
+  A `WWW-Authenticate: Bearer` challenge built from `parts`.
+
+  Returns a bare `Bearer` when nothing usable is supplied, and drops any single
+  part that survives filtering as empty, so a caller cannot produce a malformed
+  header by passing an odd string.
+
 async function cancelRun(build: Build, options: CancelOptions): Promise<CancelResult>
   Cancel the run `options.runId` for `build`: transition it to `cancelling`
   (exactly one canceller drives the walk; a live owning process observes the
@@ -518,6 +525,26 @@ function lockKey(...parts: Array<string | number>): string
   Each part is sanitised (non-`[A-Za-z0-9._-]` runs become `_`) and empty parts
   are dropped, so `lockKey("deploy", repo)` is stable and injection-free.
 
+function metadataDocument(settings: ProtectedResourceSettings): Record<string, unknown>
+  The metadata document itself, as the JSON object RFC 9728 §2 defines.
+
+  Fields with no values are omitted rather than serialised empty — §3.2 makes
+  that a MUST, and an empty `scopes_supported` would in any case advertise
+  "this resource accepts no scopes".
+
+function metadataPath(resource: string): string
+  The path the metadata document is published at: the well-known suffix with
+  the resource's own path inserted after it.
+
+  For a resource that is a bare origin this is the root well-known path, which
+  is then the conformant location for that identifier. A trailing slash is
+  dropped before insertion, as RFC 9728 §3.1 requires.
+
+function metadataUrl(resource: string): string
+  The absolute URL a `WWW-Authenticate` challenge points at: always the
+  path-inserted location, which is the one a client can validate under both
+  halves of RFC 9728 §3.3.
+
 function operatingSystem(os: typeof Deno.build.os): OperatingSystem
   The operating system as a Zuke {@link OperatingSystem}: `darwin` becomes
   `macos`, `windows` stays `windows`, and every other Unix (`linux`, the BSDs,
@@ -579,6 +606,23 @@ function prependPath(dir: PathLike, os: typeof Deno.build.os): string
 
   @return
       the resulting `PATH` string.
+
+function protectedResource(resource: string): ProtectedResourceSettings
+  Begin a protected-resource declaration for `resource`, the canonical URI of
+  this MCP endpoint (`https://build.example.com/mcp`).
+
+  ```ts
+  import { Build, protectedResource } from "jsr:@zuke/core";
+
+  class CI extends Build {
+    override mcpProtectedResource() {
+      return protectedResource("https://build.example.com/mcp")
+        .authorizationServer("https://acme.eu.auth0.com")
+        .scopes("zuke:run")
+        .name("Acme build server");
+    }
+  }
+  ```
 
 function remoteCacheKey(name: string, fingerprint: string): string
   The store key for a target's outputs: its name and input `fingerprint`. The
@@ -829,6 +873,16 @@ const FileTasks: FileTasksApi
 const HARDEN_RUNNER_ACTION: "step-security/harden-runner"
   The action a {@link CiHardenRunner} is generated from when pins are resolved.
 
+const INVALID_TOKEN: McpAuthReject
+  The refusal for a request that presented a token which did not hold up —
+  expired, wrong signature, wrong audience.
+
+  Distinct from {@link UNAUTHORIZED} on purpose: OAuth 2.1 §5.3.1 says a
+  challenge SHOULD NOT carry error information when the request had no
+  credentials at all, because there is nothing yet to have been wrong. Sending
+  `invalid_token` to a client that simply has not logged in tells it its stored
+  token was rejected, which is a different and misleading thing.
+
 const REDACTED: "[redacted]"
   The placeholder a {@link Redactor} substitutes for each secret value.
 
@@ -852,6 +906,13 @@ const ToolTasks: ToolTasksApi
   Provision external CLIs from a build. `ToolTasks.install((s) => …)` fetches a
   single release binary and `ToolTasks.npm(...)` a single npm package; group
   several of either with {@link toolchain}.
+
+const UNAUTHORIZED: McpAuthReject
+  The bare `401` challenge: the refusal an authenticator's own failure produces
+  (so a throw leaks nothing about why it threw), and the one the transport
+  answers an absent static bearer token with. A token that was presented
+  and rejected gets {@link INVALID_TOKEN} instead: the two are different facts
+  about the caller, and only the second one is about a credential.
 
 const ZUKE_ACTION: "zuke-build/zuke"
   The name a {@link CiPinResolver} is asked for the prelude action, so a
@@ -1187,6 +1248,34 @@ class Build
             return { actor: claims.sub, kind: "human", roles: claims.roles };
           },
         };
+      }
+    }
+    ```
+  mcpProtectedResource(): ProtectedResourceSettings | undefined
+    Declares this MCP endpoint an OAuth 2.0 protected resource, so a client
+    that has never authenticated can find out where to get a token.
+
+    `zuke mcp --http` then publishes the RFC 9728 metadata document and names
+    it in every `WWW-Authenticate` challenge, which is the whole of what
+    `claude mcp add --transport http <url>` needs to open a browser and
+    authenticate with nothing pasted. Zuke issues no tokens and hosts no
+    `/authorize`, `/token` or `/register` endpoint — those belong to the
+    identity provider named here, and {@link Build.mcpAuth} is where the tokens
+    it mints are verified. Default: none, and the server behaves exactly as
+    before.
+
+    The one thing to get right is that three strings must agree byte for
+    byte: the resource identifier below, the `resource` parameter the client
+    sends, and the audience the identity provider puts in the token. When they
+    differ every token fails validation, and nothing in the error says why.
+
+    ```ts
+    class ControlPlane extends Build {
+      override mcpProtectedResource(): ProtectedResourceSettings {
+        return protectedResource("https://build.example.com/mcp")
+          .authorizationServer("https://acme.eu.auth0.com")
+          .scopes("zuke:run")
+          .name("Acme build server");
       }
     }
     ```
@@ -1686,6 +1775,52 @@ class ParameterError extends Error
 
   override name: string
     The error name.
+
+class ProtectedResourceError extends Error
+  Raised when a protected-resource declaration cannot produce a valid document.
+
+  constructor(message: string)
+    Construct the error with `message`.
+  override name: string
+    The error name.
+
+class ProtectedResourceSettings
+  A build's protected-resource declaration, configured fluently.
+
+  The resource identifier is the single value everything else has to agree
+  with, so it is a direct argument to {@link protectedResource}; the rest are
+  setters. It must be the canonical URI of this MCP endpoint — the same
+  string the client sends as its RFC 8707 `resource` parameter, and the same
+  string the identity provider mints into the token's `aud`. Those three
+  agreeing byte for byte is the whole contract; when they disagree every token
+  fails validation, and the error says nothing about why.
+
+  constructor(resource: string)
+    Construct the settings for `resource`, the canonical endpoint URI.
+  resource_: string
+    The canonical resource identifier of this MCP endpoint.
+  authorizationServers_: string[]
+    Issuer identifiers of the authorization servers that issue for it.
+  scopes_: string[]
+    Scope values a caller may request for this resource.
+  resourceName_?: string
+    Human-readable name of the resource, for a consent screen.
+  documentation_?: string
+    URL of human-readable documentation for the resource.
+  authorizationServer(issuer: string): this
+    Add an authorization server by its issuer identifier — `https://acme.eu.auth0.com`,
+    not its metadata URL. It must string-match the `issuer` in that server's own
+    metadata document, or a client is required to reject it. At least one is
+    required: RFC 9728 marks the field optional, but MCP raises it to required.
+  scopes(...values: string[]): this
+    Declare the scope values a caller may request. These are advertised to
+    clients, which request them wholesale when a challenge names none, so keep
+    the list to what this server actually distinguishes rather than the whole
+    catalogue of a shared identity provider.
+  name(value: string): this
+    Set the human-readable resource name shown on a consent screen.
+  documentation(url: string): this
+    Set the URL of human-readable documentation for this resource.
 
 class Redactor
   Collects secret values and masks them in text. Register a value with
@@ -2422,6 +2557,18 @@ interface AnyParameter
   stringValue_(): string | undefined
     The resolved value as a string, or `undefined` if unset (for masking).
 
+interface BearerChallenge
+  The parts of a `WWW-Authenticate: Bearer` challenge Zuke emits.
+
+  metadataUrl?: string
+    Absolute URL of the protected resource metadata document (RFC 9728).
+  scopes?: readonly string[]
+    Scopes required for the attempted operation — all of them, in one go.
+  error?: ChallengeError
+    The failure, omitted for a request that presented no credentials.
+  description?: string
+    Developer-facing explanation; never shown to an end user.
+
 interface BrowserTasksApi
   The shape of {@link BrowserTasks}.
 
@@ -2545,6 +2692,10 @@ interface CancelOptions
   also?: string[]
     Extra compensation target names to run first (a timed-out wait whose
     `onTimeout` names a specific compensation target routes through here).
+  expiredWait?: { target: string; message: string; }
+    The wait whose expired deadline caused this cancellation, when one did:
+    the target's name and the message describing the miss. Recorded on that
+    target's row as it settles, so the terminal record still says why.
 
 interface CancelResult
   The outcome of {@link cancelRun}.
@@ -3167,10 +3318,11 @@ interface FanOutOptions
     its own target; its dependencies run in their own jobs and are shared via
     the {@link "./remote_cache.ts" | remote cache}, so pair fan-out with one.
   setupSteps?: CiStep[]
-    Steps prepended to every job — checkout, tool setup, cache restore. Defaults
-    to a single `actions/checkout` (rendered on GitHub; GitLab and Azure check
-    out automatically). Provide `env` for `ZUKE_REMOTE_CACHE_*` here or via
-    {@link env}.
+    Steps prepended to every job — tool setup, cache restore. None by default:
+    the prelude action every job starts with already hardens the runner and
+    checks the repository out (and GitLab and Azure check out on their own), so
+    a job's steps are just `Run <target>` unless you add to them. Provide `env`
+    for `ZUKE_REMOTE_CACHE_*` here or via {@link env}.
   runsOn?: string
     The runner for every job (see {@link CiJob.runsOn}).
   includeUnlisted?: boolean
@@ -4326,6 +4478,26 @@ interface TargetStateHandle
 
   set(patch: Record<string, JsonValue>): Promise<void>
     Merge a JSON patch into this target's persisted metadata (awaits the write).
+  trySet(patch: Record<string, JsonValue>): Promise<boolean>
+    {@link set}, reporting whether the patch was recorded: `true` when it
+    reached the store, `false` when the write was dropped.
+
+    A write can be dropped — conflicted away for good, or refused by a store
+    that errored — and {@link set} resolves the same either way, so a body
+    that needs the value to be durable cannot tell. This is the seam for the
+    cases that do need to know: before an irreversible step that depends on
+    the value, or before handing a compensation something it will have to read
+    back.
+
+    Do not read `false` as "it may still land": a dropped write is sometimes
+    re-persisted by a later one, but nothing guarantees it, so treat `false`
+    as not recorded. A dropped write also warns, and one that is definitely
+    unrecoverable marks the run {@link "./state/types.ts".RunRecord.degraded}
+    so a later resume knows the record is missing something.
+
+    A handle with nothing durable behind it always answers `true` — a build
+    with no state store, and a compensation, whose state is in-memory by
+    design. Nothing is persisted, but nothing is dropped either.
   get(): Record<string, JsonValue>
     Read this target's persisted metadata (from prior attempts/runs too).
 
@@ -4465,6 +4637,9 @@ type BuildLocation = { kind: "module"; module: string; cwd: string; repo?: strin
   `module` (the entry file `deno run` executes — the form `zuke register`
   writes) or an explicit `command` (a launch argv, for a build fronted by a
   wrapper script). Both carry the working directory and, in CI, the repository.
+
+type ChallengeError = "invalid_token" | "insufficient_scope"
+  How a bearer challenge names the failure, when there is one to name.
 
 type ChangedFilesFn = (base: string) => Promise<string[]>
   Lists the files changed since `base` (a git revision), each path relative to
