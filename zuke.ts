@@ -106,6 +106,7 @@ import {
   checkPluginSkillsSync,
   syncPluginSkills,
 } from "./build/plugin_sync.ts";
+import { checkRootLaunchers, syncRootLaunchers } from "./build/launchers.ts";
 import { checkSkillTree } from "./build/skill_check.ts";
 import {
   buildGeminiArchive,
@@ -459,19 +460,22 @@ class ZukeBuild extends Build {
     });
 
   examplesCheck = target()
-    .description("Type-check every example project and list its targets")
+    .description("Type-check every example, list its targets, verify its CI")
     .executes(async () => {
       // The examples import `jsr:@zuke/*`, which resolves to the workspace from
       // inside this repository — so each one is held to the real source, not a
       // published version that could lag behind it. A failing `--list` catches
-      // what a type-check cannot: a build that no longer constructs.
+      // what a type-check cannot: a build that no longer constructs. And
+      // `generate-ci --check` catches what neither can: an example that commits
+      // generated pipeline files the current renderer no longer produces.
       const examples = await discoverExamples();
       const failures = await checkExamples(examples);
       if (failures.length > 0) {
         throw new Error(formatExampleFailures(failures));
       }
       ConsoleTasks.info(
-        `${examples.length} example(s) type-check and list their targets.`,
+        `${examples.length} example(s) type-check, list their targets, and ` +
+          "carry up-to-date pipeline files.",
       );
     });
 
@@ -524,6 +528,33 @@ class ZukeBuild extends Build {
         );
       }
       ConsoleTasks.info("plugins/zuke/skills/ is in sync with skills/.");
+    });
+
+  launcherSync = target()
+    .description(
+      "Regenerate ./zuke and zuke.ps1 from @zuke/cli's launcher template",
+    )
+    .executes(async () => {
+      const written = await syncRootLaunchers();
+      ConsoleTasks.info(`Wrote ${written.join(", ")}.`);
+    });
+
+  launcherSyncCheck = target()
+    .description(
+      "Verify ./zuke and zuke.ps1 match @zuke/cli's launcher template",
+    )
+    .executes(async () => {
+      const stale = await checkRootLaunchers();
+      if (stale.length > 0) {
+        throw new Error(
+          `The launchers have drifted from the template:\n  ${
+            stale.join("\n  ")
+          }\n` +
+            "Run `./zuke launcherSync` and commit the result (edit " +
+            "packages/cli/src/launcher.ts or deno_pin.ts, never the scripts).",
+        );
+      }
+      ConsoleTasks.info("./zuke and zuke.ps1 are in sync with the template.");
     });
 
   skillsCheck = target()
@@ -802,6 +833,7 @@ class ZukeBuild extends Build {
       this.examplesCheck,
       this.hclSyncCheck,
       this.pluginSyncCheck,
+      this.launcherSyncCheck,
       this.skillsCheck,
       this.graphDocCheck,
       this.pluginVersionCheck,
