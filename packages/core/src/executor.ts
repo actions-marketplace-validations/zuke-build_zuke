@@ -22,6 +22,7 @@
 
 import type { Build, BuildResult } from "./build.ts";
 import { defaultReadEnv, messageOf } from "./internal.ts";
+import { escapeLine } from "./render.ts";
 import type { Reporter } from "./reporter.ts";
 export type { Reporter } from "./reporter.ts";
 import {
@@ -29,6 +30,7 @@ import {
   emitActionsMasks,
   writeJobSummary,
 } from "./execute_output.ts";
+import { buildRunPlan } from "./run_plan.ts";
 import {
   applyAffectedSkips,
   conditionSkips,
@@ -294,10 +296,16 @@ export async function execute(
     return { ok: false, executed: [], error };
   }
   const { order, predecessors } = planGraph(root, extraEdges);
+  // The run's shape, fixed here and read by every body and condition — the same
+  // answer in every process a resumed run passes through, since it is derived
+  // from the graph rather than from what has happened so far.
+  const planView = buildRunPlan(order, predecessors);
   reportDanglingEdges(extraEdges, order, discovered.values(), reporter);
   // Evaluate up-front conditions for `whenSkipped("skip-dependencies")` targets
   // and skip them plus any dependencies that nothing else needs.
-  for (const name of await conditionSkips(root, order)) skip.add(name);
+  for (const name of await conditionSkips(root, order, planView)) {
+    skip.add(name);
+  }
 
   // With `--affected`, skip every planned target a change cannot reach. Skipped
   // targets still unblock their dependents (their prior outputs are assumed
@@ -380,6 +388,7 @@ export async function execute(
     params: [...params.values()],
     runId,
     dryRun,
+    plan: planView,
     signal: runController.signal,
     redactor,
     reporter,
@@ -549,6 +558,7 @@ export async function execute(
         writer,
         life,
         order,
+        plan: planView,
         runId,
         actor,
         signals: env.signals,
@@ -642,7 +652,7 @@ export async function execute(
   // A cancelled run never resumes, so it skips this even if it parked a wait.
   if (run.suspended && !cancelled) {
     const waiting = run.reports.filter((r) => r.status === "waiting")
-      .map((r) => r.name);
+      .map((r) => style.github ? escapeLine(r.name) : r.name);
     reporter.info(
       `Run ${runId} suspended — state saved; waiting on: ${
         waiting.join(", ")
@@ -650,7 +660,7 @@ export async function execute(
     );
   }
   if (style.github && writesToConsole) {
-    writeJobSummary(renderer, run.reports, totalMs, result.ok);
+    writeJobSummary(renderer, run.reports, totalMs, result.ok, redactor);
   }
   await life.finish(result);
   return result;

@@ -120,7 +120,10 @@ it cannot answer "does one exist for this tool?"; only the catalogue
   `.executes((ctx) => …)` — with `ctx.runId`, `ctx.initiator` (who asked for the
   run, unchanged by a resume), `ctx.target`, `ctx.signal` (an
   `AbortSignal` fired when the run is cancelled; a plain `` $`…` `` in the body
-  is `SIGTERM`'d automatically), `ctx.state`, `ctx.dryRun`, and
+  is `SIGTERM`'d automatically), `ctx.state`, `ctx.dryRun`, `ctx.plan()` (the
+  run's planned shape — `targets`, `includes(name)`, `dependenciesOf(name)` — so
+  a body can ask whether `deploy` was part of what was asked for; it reports the
+  plan, never what will actually execute, which is `ctx.outcomeOf(name)`), and
   `ctx.reportSummary({ … })` (`key: value` notes on the target's own row of
   the Build Summary; every test-runner wrapper — `DenoTasks.test`,
   `VitestTasks.run`, `JestTasks.run`, `BunTasks.test`, `NodeTasks.test`,
@@ -250,8 +253,10 @@ it cannot answer "does one exist for this tool?"; only the catalogue
   (secrets excluded, validated, forwarded to the spawn) — see the cheatsheet.
   Because the registry names _where_ a build launches from, a descriptor with a
   **remote** entry module is refused unless its origin is in
-  `ZUKE_REGISTRY_LAUNCH_HOSTS`; `zuke register` writes a local module, so this
-  only affects a hand-authored or second-party entry. For a shared, multi-user
+  `ZUKE_REGISTRY_LAUNCH_HOSTS`, and a `command` location is refused unless its
+  program is in `ZUKE_REGISTRY_LAUNCH_COMMANDS` (the registry writer picks the
+  program and its arguments); `zuke register` writes a local module, so both
+  only affect a hand-authored or second-party entry. For a shared, multi-user
   endpoint, `override mcpAuth()` authenticates a **trusted** caller per request
   — an async `authenticate(ctx)` returning `{ actor, kind?, roles?, via? }` or
   an `McpAuthReject` (`{ status, error, detail?, challenge? }`), so a refused

@@ -24,7 +24,7 @@ that declares only `.effect(...)` each legitimately have no `.executes(...)`.
 | `.dependentFor(...t)`                                                                                    | Reverse of `dependsOn`: make this a prerequisite of others.                                                                                               |
 | `.inputs(...p)` / `.outputs(...p)`                                                                       | Incremental cache: skip when inputs unchanged and outputs exist.                                                                                          |
 | `.cacheKey(fn)`                                                                                          | Add a non-file value (version, git sha, param) to the cache fingerprint.                                                                                  |
-| `.onlyWhen(cond)`                                                                                        | Run only when the (possibly async) predicate holds, else skip.                                                                                            |
+| `.onlyWhen(cond)`                                                                                        | Run only when the (possibly async) predicate holds, else skip. The predicate may take a context: `(ctx) => ctx.plan().includes("deploy")`.                 |
 | `.whenSkipped("skip-dependencies")`                                                                      | When `onlyWhen` skips this target, also skip deps no other planned target needs. Condition is evaluated up front, so it must not read run-produced state. |
 | `.requires(...params)`                                                                                   | Fail unless the listed parameters resolved to a value.                                                                                                    |
 | `.retry(times, delayMs?)`                                                                                | Retry the body on failure.                                                                                                                                |
@@ -39,7 +39,7 @@ that declares only `.effect(...)` each legitimately have no `.executes(...)`.
 | `.unlisted()`                                                                                            | Hide from `--list`/`--help`; still runnable by name.                                                                                                      |
 | `.dryRunnable()`                                                                                         | Run this body under `--dry-run` with `$` in echo mode (prints argv, no spawn); others stay skipped.                                                       |
 | `.validateBefore(...v)` / `.validateAfter(...v)`                                                         | Run `Validation` checks around the body; a throw fails the target.                                                                                        |
-| `.recoverWith(...r)` / `.recoverAttempts(n)`                                                             | Run `Remediation`s if the body fails (self-healing); re-run when one asks to. See AI section.                                                             |
+| `.recoverWith(...r)` / `.recoverAttempts(n)`                                                             | Run `Remediation`s if the body fails (self-healing); re-run when one asks to. A remediation gets the target name, attempt and error — **no state handle**. |
 | `.partOf(group)`                                                                                         | Join a parallel batch (see `group()`).                                                                                                                    |
 | `.produces(...p)` / `.consumes(...t)`                                                                    | Declare and consume artifact paths.                                                                                                                       |
 | `.readOnly()`                                                                                            | Advertise the target as query-only over MCP (`readOnlyHint` instead of `destructiveHint`).                                                                |
@@ -156,6 +156,9 @@ deploy = target().executes(async (ctx) => {
   ctx.outcomeOf("checks")?.status; // one target's settled outcome, or undefined
   ctx.outcomeOf("test")?.summary; // its Build Summary notes (durable, e.g. Tests/Passed)
   ctx.outcomes(); // every outcome settled SO FAR, keyed by dotted name
+  ctx.plan().targets; // every target THIS run planned, in execution order
+  ctx.plan().includes("deploy"); // was `deploy` part of what was asked for?
+  ctx.plan().dependenciesOf("test"); // what must finish before `test` starts
   ctx.reportSummary({ Version: "3.6.2" }); // a note on THIS row of the Build Summary
 });
 ```
@@ -368,8 +371,15 @@ class Deploy extends Build {
   an external GitHub Actions workflow, satisfied when it finishes; read its
   per-job result with `readWorkflowResult(ctx.stateOf("<gate>"))`). By default
   it correlates via a marker echoed into the run's `run-name:`; for a workflow
-  you can't modify use `.correlate("created-window")` (best-effort). Either way
-  it **fails fast** (`.discoveryTimeout(...)`, default 1m) if the run never
+  you can't modify use `.correlate("created-window")` (best-effort). A marker is
+  copyable and anyone who can dispatch the workflow can wear it, so a run is
+  adopted only if it is *also* a `workflow_dispatch`, on the dispatched ref, and
+  created within the discovery window; two survivors are a refusal, and the
+  identity is re-checked before the result is read. A holder of `actions: write`
+  on that repo can still dispatch the same workflow (branch protection does not
+  gate a dispatch), so narrow that permission or use an environment with
+  required reviewers when the gate authorizes work in another trust domain. Either way it
+  **fails fast** (`.discoveryTimeout(...)`, default 1m) if the run never
   correlates, instead of eating the whole `.timeout()`. The **dispatched**
   workflow has its own contract (marker input, run-name, required inputs) — see
   [The dispatched workflow's contract](#the-dispatched-workflows-contract-githubworkflow)
@@ -439,7 +449,15 @@ class CD extends Build {
 
 - The compensation body's `ctx.state` exposes **the original target's**
   persisted metadata (persist what a rollback needs in `ctx.state` when you do
-  the work).
+  the work). `ctx.state` is seeded with the meta of the target the step is
+  **for**: under `.onCancel` that is the compensated target (so `ctx.target`
+  names the compensation but `ctx.state` holds `deploy`'s meta), while a
+  timed-out `.onTimeout(() => this.cleanup)` makes `cleanup` compensate
+  **itself** — its own meta, `{}` if it never ran forward. One rule spans both:
+  `ctx.stateOf(ctx.target)` is `ctx.state`, every other name reads **empty**
+  (so `stateOf("deploy")` is empty under `.onCancel`). Writes stay in memory.
+  `ctx.outcomeOf(...)` works; `ctx.plan()` is the whole run's plan, so a
+  compensation is in it only when it is also a graph target.
 - Cancel with `zuke cancel <id>`, `Ctrl-C`/`SIGTERM`, or the MCP `cancel_run`
   tool (all run the same walk). A live run aborts on its next state write.
 - A compensation that throws is recorded but does **not** stop the walk (cleanup
@@ -667,7 +685,7 @@ tool wrappers, which inherit `Deno.env` — finds the provisioned tool.
 are hoisted to the repo root, a wrapper can find its binary npx-style instead of
 needing a `.toolPath(...)`. `.fromNodeModules()` on any settings object walks up
 from the working directory for `node_modules/.bin/<tool>` (the `.cmd`/`.bat`
-shims on Windows, launched via `cmd /c`) and falls back to `PATH` on a miss;
+shims on Windows, spawned as themselves) and falls back to `PATH` on a miss;
 `.fromPath()` forces `PATH`; and `ZUKE_TOOL_RESOLUTION=node_modules|path` flips
 every wrapper repo-wide without touching call sites (a per-call setting wins
 over it). An explicit `.toolPath(...)` always wins, so a `toolchain()` pin stays
@@ -1277,6 +1295,10 @@ Copy the closest one instead of composing from primitives; each is a full
 ./zuke register [--json]      # record this build in the build registry (idempotent)
 ./zuke doc jsr:@zuke/deno     # print a package's API (deno doc) from an isolated empty dir
 ./zuke outdated [--exit-code]  # jsr packages the lock resolves behind their latest (network)
+                               # --exit-code exits 1 when behind OR uncheckable.
+                               # Wire it as a SCHEDULED pipeline, never in the ci
+                               # gate: it needs the network, and a dependency's
+                               # release would redden unrelated PRs.
 ./zuke mcp --registry --allow-run  # serve the registry: registered builds as tools, spawned
 ./zuke mcp --registry --max-concurrent-runs 4  # cap concurrent run-tool spawns (default 4)
 ```
@@ -1321,8 +1343,16 @@ a descriptor whose entry module is **remote** (not a local path or `file:` URL �
 `https:`, `jsr:`, `npm:`, `data:`) is refused unless its origin is listed in
 `ZUKE_REGISTRY_LAUNCH_HOSTS` (`*` allows any); the call is denied and audited
 `launch_origin_not_allowed`, before the confirmation prompt, with nothing
-spawned. `zuke register` writes a local `file:` module, so this only bites a
-hand-authored or second-party registry entry.
+spawned. A `command` location is gated the same way against
+`ZUKE_REGISTRY_LAUNCH_COMMANDS` (comma-separated; matched against `command[0]`
+exactly, never by basename, since the descriptor picks the program string; `*`
+allows any), because the registry writer chooses the program *and its
+arguments* — audited `launch_command_not_allowed`. Listing a program does not
+license it to fetch: a remote argument still has to pass
+`ZUKE_REGISTRY_LAUNCH_HOSTS`. Prefer absolute paths: a relative program resolves
+against the descriptor's own cwd. `zuke register`
+writes a local `file:` module, so both only bite a hand-authored or
+second-party registry entry.
 
 **Authorization by role** (`docs/mcp.md`): once the server authenticates its
 callers, `target().requiresRole("operator")` raises the bar for one target and

@@ -3161,6 +3161,27 @@ interface CompensationFailure
   error: string
     The failure message.
 
+interface ConditionContext
+  The context a condition receives.
+
+  Deliberately narrower than a {@link TargetContext}. A condition on a
+  `.whenSkipped("skip-dependencies")` target is evaluated before the run
+  starts, to decide what the run prunes — at which point the run's identity,
+  its durable state handles, and its cancellation signal do not exist yet. This
+  type carries only what is available at every moment a condition can be
+  called.
+
+  readonly target: string
+    Dotted name of the target this condition gates.
+  plan(): RunPlan
+    The resolved shape of this run — which targets it plans, and how they
+    relate. Lets a condition gate on the graph ("only when `deploy` was asked
+    for") rather than only on the environment.
+
+    Reports the plan, not the outcome, which matters most here: a condition can
+    be one of the things deciding what runs, so the plan deliberately does not
+    claim to know what will execute. See {@link "./run_plan.ts".RunPlan}.
+
 interface CopyOptions
   Options for {@link FileTasksApi.copy}.
 
@@ -4058,6 +4079,57 @@ interface RunOptions
     Zuke's built-in look; inject `consoleRenderer` from `@zuke/console` (or a
     custom {@link Renderer}) to restyle a build's output.
 
+interface RunPlan
+  The resolved shape of this run: the class-field targets it plans, in order,
+  and the dependencies between them.
+
+  This describes the plan, not the outcome. A target is in the plan because
+  the graph put it there; it may still be skipped by a condition, by
+  `--affected`, or by an operator's forced outcome, and a run that fails early
+  never reaches its later targets at all. Ask {@link RunPlan.includes} what the
+  run set out to do, and `ctx.outcomeOf(...)` what actually became of a target
+  once it settled.
+
+  Two things the plan is not.
+
+  It is not every target that will appear in the run record. A `.forEach()`
+  fan-out expands into its sub-targets while the run executes, long after the
+  graph is planned, so `fan[us].prep` has an outcome and a summary row but is
+  absent from the plan — only the `fan` target that produced it is in
+  there. For a fan-out, `outcomeOf` sees more than `includes` does.
+
+  It is not a promise that holds across processes. The plan is the graph as
+  this process resolved it, and it is fixed for the whole of this process: two
+  bodies, and both evaluations of a condition, always agree. A second process —
+  a resume, or a `zuke cancel` running compensations — re-resolves the graph
+  from the build class it was given, so it can legitimately differ: the class
+  may have changed since the run was suspended (which is what `--force-graph`
+  is for), and a lazy `orderWith` provider may answer differently or, if it is
+  unreachable, be degraded to the base topological order.
+
+  readonly targets: readonly string[]
+    Every planned target's dotted name, in the run's deterministic execution
+    order.
+
+    The build summary can list more rows than this: a `.forEach()` fan-out's
+    sub-targets are created during execution and get their own rows, but are
+    not part of the planned graph.
+  includes(target: string): boolean
+    Whether `target` is part of this run's planned set.
+
+    The question a body asks to decide whether its work is needed by something
+    else in the run — "am I building for a `deploy` that was actually asked
+    for?". An unknown name is `false`, never an error, so probing for an
+    optional target does not need a guard.
+  dependenciesOf(target: string): readonly string[]
+    The targets that must complete before `target` may start: everything the
+    planner treats as a predecessor — declared `dependsOn` dependencies, the
+    targets this one `triggers`, and the soft `before`/`after`, `extraEdges`
+    and `orderWith` edges that apply within this run's set.
+
+    Empty for a target with no predecessors and for a name that is not in
+    the plan — use {@link RunPlan.includes} to tell those apart.
+
 interface RunQuery
   Filters for {@link "./store.ts".StateStore.listRuns}; all fields are optional.
 
@@ -4392,6 +4464,12 @@ interface TargetContext
     Every outcome this run has settled so far, keyed by dotted target name — a
     snapshot, not a live view. Targets that have not settled are absent rather
     than present with a placeholder status.
+  plan(): RunPlan
+    The resolved shape of this run — which targets it plans, and how they
+    relate. The seam for a body whose work depends on what else was asked
+    for: a build that signs its artifact only when `deploy` is in the run.
+
+    Reports the plan, not the outcome — see {@link "./run_plan.ts".RunPlan}.
   reportSummary(pairs: SummaryPairs): void
     Report `key: value` notes into this target's row of the end-of-build
     summary — where a count or a version belongs once the body is done:
@@ -4695,8 +4773,12 @@ type CiSyncStatus = "written" | "unchanged" | "stale"
 type CiUses = string | CiActionRef
   A step's `uses:` value — a bare reference, or one carrying its version.
 
-type Condition = () => boolean | Promise<boolean>
+type Condition = (ctx: ConditionContext) => boolean | Promise<boolean>
   A predicate gating whether a target runs; may be synchronous or async.
+
+  Receiving the context is optional — a zero-argument
+  `.onlyWhen(() => …)` stays valid, since a zero-argument function is
+  assignable to this one-parameter type.
 
 type DownloadFn = (url: string, dest: PathLike) => Promise<void>
   A download function: fetch `url` into the file at `dest`.
@@ -5064,11 +5146,26 @@ function shimFallbackArgv(argv: ReadonlyArray<string>, os: typeof Deno.build.os)
   On Windows, wrap an argv in a `cmd /c` invocation so `.cmd`/`.bat` shims
   (such as npm's) become spawnable; returns `null` on other platforms.
 
+  @deprecated
+      Unsafe, and no longer used. The wrapped argv is handed to
+      `cmd.exe` as one command line quoted by C-runtime rules, which quote on
+      spaces but not on the metacharacters cmd.exe acts on, so an operand
+      containing `&`, `|` or `^` and no space is re-parsed as further commands.
+      Nothing needs the wrapper: `Deno.Command` spawns a `.cmd`/`.bat` directly,
+      escaping for the command processor as it does. Scheduled for removal in the
+      next major.
+
 function windowsCmdShim(argv: ReadonlyArray<string>, os: typeof Deno.build.os): string[]
-  On Windows, spawn a resolved `.cmd`/`.bat` shim (such as npm's `node_modules`
-  shims) through `cmd /c` — a batch shim is not a PE executable, so
-  `Deno.Command` cannot launch it directly. Returns `argv` unchanged on other
-  platforms or when the binary is not a batch shim.
+  On Windows, wrap a resolved `.cmd`/`.bat` shim in `cmd /c`. Returns `argv`
+  unchanged on other platforms or when the binary is not a batch shim.
+
+  @deprecated
+      Unsafe, and no longer used. Its premise — that `Deno.Command`
+      cannot launch a batch shim — does not hold: Deno spawns one through the
+      command processor itself, quoting each argument for it. Wrapping instead
+      makes `cmd.exe` the direct child, whose command line is quoted by C-runtime
+      rules that leave `&`, `|` and `^` bare, so a caller operand carrying one is
+      re-parsed as a command. Scheduled for removal in the next major.
 
 class DynamicToolSettings extends ToolSettings
   Fluent settings for a {@link defineTool} tool: build the argv with
@@ -5207,9 +5304,18 @@ abstract class ToolSettings
     tests and diagnostics: it reveals whether a wrapper resolved to a local
     shim or fell back to the bare name on `PATH`.
   async run(): Promise<CommandOutput>
-    Run the configured tool. If the binary is missing and the platform is
-    Windows, retry once through `cmd /c` (covers `.cmd`/`.bat` shims);
-    otherwise raise a {@link ToolNotFoundError} naming the tool.
+    Run the configured tool, raising a {@link ToolNotFoundError} naming it when
+    the binary is missing.
+
+    The argv is spawned as it was resolved, on every platform. Windows batch
+    shims used to be wrapped in `cmd /c` here, which silently gave up the
+    argv-boundary guarantee every wrapper relies on: `Deno.Command` hands
+    `cmd.exe` a single command line built with C-runtime quoting, which quotes
+    on spaces but not on `&`, `|` or `^`, so cmd.exe re-parsed an operand like
+    `A=1&whoami` as a second command. Spawning the shim itself instead keeps
+    that decision where it belongs: Deno resolves a bare name through `PATHEXT`
+    and launches a `.cmd`/`.bat` through the command processor with quoting
+    hardened for it, so the operand stays one argument.
 
 interface DefineToolOptions
   Options for {@link defineTool}.
@@ -5283,9 +5389,8 @@ function missingTool<S extends ToolSettings>(settings: S): S
   process — the way a wrapper test proves each of its task functions reaches
   execution.
 
-  The platform is pinned to `linux` because on Windows a missing binary is
-  retried through `cmd /c`, which exists, so the failure would surface as a
-  command error instead:
+  The platform is pinned to `linux` so the assertion reads the same on every
+  runner, rather than depending on how the host reports a missing binary:
 
   ```ts
   await assertRejects(() => BiomeTasks.check(missingTool), ToolNotFoundError);
@@ -5320,6 +5425,52 @@ function box(style: Style, content: string | readonly string[], options: BoxOpti
 
 function detectWidth(): number
   Read the terminal width if available, clamped to a sane range.
+
+function escapeData(value: string): string
+  Escape a value interpolated into the body of a GitHub Actions workflow
+  command (`::error::<data>`).
+
+  A workflow command is terminated by the end of its line, so a value carrying
+  a newline continues into what the runner parses as a fresh command. A
+  target's failure message embeds a subprocess's stderr verbatim, which is not
+  ours to trust: a tool that writes `::stop-commands::` on a line of its own
+  would otherwise suspend the runner's command processing, and one that writes
+  `::error::` would forge an annotation. Percent-encoding is the escape the
+  Actions spec defines for exactly this, and `%` is encoded first so the
+  encoding cannot be spoofed by a literal `%0A` in the input.
+
+function escapeLine(text: string): string
+  Neutralise workflow commands in text that is printed as itself on a stream
+  the GitHub Actions runner parses — a failure message, a target name, a
+  summary row — rather than interpolated into a command's body.
+
+  {@link escapeData} is the wrong tool there. It answers the same threat, but
+  by encoding every newline, which would fold a multi-line compiler dump into
+  one unreadable `%0A`-joined line: correct, and useless to the person reading
+  the log. This keeps the text as it was written and disarms only the two
+  sequences the runner acts on.
+
+  Both forms are covered, because the runner accepts both. A line whose first
+  non-blank characters are `::` opens a command, and leading whitespace is
+  trimmed before that test, so indenting the text defends nothing. The legacy
+  `##[command]` form is recognised anywhere in a line, so it needs no newline
+  to reach at all.
+
+  "Blank" is the runner's idea of it, not this language's. The two sets differ
+  by exactly one character in the direction that matters: NEXT LINE (U+0085),
+  which the runner trims and `\s` does not match. It is not a line terminator
+  for the reader the runner uses, so it travels inside a line and disappears
+  only when the command is parsed, which would let `::` reach the front of a
+  line that looked indented here. It is matched explicitly for that reason.
+
+  Ordinary output is returned unchanged; only text that would have been
+  executed as a command comes back visibly encoded.
+
+function escapeProperty(value: string): string
+  Escape a value interpolated into a workflow command's property list
+  (`::error title=<property>::`). Properties are comma-separated and
+  colon-terminated, so those two characters need encoding on top of what
+  {@link escapeData} handles.
 
 function formatDuration(ms: number): string
   Format a duration in milliseconds as `1.2s`.

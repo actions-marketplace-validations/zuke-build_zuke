@@ -104,6 +104,22 @@ class Release extends Build {
   `.correlate("created-window")`: the trigger claims the `workflow_dispatch` run
   on the dispatch ref created just after dispatch, and fails loudly if two
   candidates share the window.
+
+  **A marker is not proof of identity.** The workflow echoes it into a title
+  anyone who can list the runs can read, and anyone who can dispatch that
+  workflow can raise a run wearing it. So a marked run is adopted only if it is
+  also a `workflow_dispatch`, on the ref this gate dispatched, created no earlier
+  than the dispatch — the same three facts created-window mode matches on, which
+  is why both modes now share one predicate. Two runs surviving that is a
+  refusal, not a coin toss, and the identity is re-checked on the run the gate
+  finally reads its result from, so a resume in another process cannot inherit a
+  stale id. What that leaves is the holder of `actions: write` on the workflow's
+  repository, who can dispatch it on the same ref and produce a run genuinely
+  indistinguishable from ours. Branch protection does **not** help — a
+  `workflow_dispatch` is not gated by it — so when a gate authorizes something
+  in a different trust domain, narrow who holds that permission, or put the
+  workflow behind an environment with required reviewers, or have the workflow
+  check its own `github.actor`.
 - **Fast-fail.** If no run is identified within a short discovery window
   (`.discoveryTimeout(...)`, default one minute), the gate fails with guidance
   instead of eating the whole `.timeout()` — so a workflow that silently never
@@ -418,6 +434,34 @@ What a cancellation does:
   body gets a normal `ctx` whose `ctx.state` exposes **the original target's**
   metadata — the `deploy` above rolls back from exactly the `slot` it recorded.
   So persist what a rollback needs in `ctx.state` at the time you do the work.
+
+  The precise rule, because a rollback is a bad place to be surprised:
+  **`ctx.state` is seeded with the meta of the target the compensation step is
+  _for_** — and which target that is depends on how the step was created.
+
+  With `.onCancel(...)`, the step is for the target being undone. So `ctx.target`
+  names the **compensation** (`rollback`) while `ctx.state` holds **`deploy`'s**
+  meta: deliberately two different targets.
+
+  With a timed-out wait's `.onTimeout(() => this.cleanup)`, the named target
+  compensates **itself** — the step is for `cleanup`, so `ctx.state` is
+  `cleanup`'s **own** meta. If `cleanup` never ran forward in the run, that is
+  `{}`. A body written for the `.onCancel` shape, reaching for the deployed
+  target's slot, finds nothing there.
+
+  One invariant spans both: **`ctx.stateOf(ctx.target)` is the same handle as
+  `ctx.state`, and every other name reads empty.** So under `.onCancel`,
+  `ctx.stateOf("deploy")` — asking for the compensated target by name — is
+  empty even though `ctx.state` is holding exactly that target's meta. A
+  compensation runs off the durable graph rather than inside the run: reach for
+  `ctx.state`, not for `stateOf`.
+
+  Writes merge into that seeded meta and stay **in memory** — the run is ending,
+  so nothing a compensation records is persisted, on either cancel path. What
+  does still work is `ctx.outcomeOf(...)`, which reads the durable record, so a
+  rollback can ask what actually happened to the run it is undoing; a target
+  that never ran reads `undefined`. `ctx.plan()` is the whole run's plan, so a
+  compensation appears in it exactly when it is also a target in the graph.
 - **A live run stops.** Cancelling a run another process is executing flips it
   to `cancelling`; the owner observes that on its next state write and aborts —
   its in-flight `$` commands get SIGTERM through the ambient signal, releasing
