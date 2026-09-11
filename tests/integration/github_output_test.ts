@@ -16,9 +16,18 @@
  * @module
  */
 
-import { assertEquals } from "../../packages/core/tests/_assert.ts";
-import { Build, target } from "../../packages/core/mod.ts";
-import { runCli } from "./_harness.ts";
+import {
+  assertEquals,
+  assertStringIncludes,
+} from "../../packages/core/tests/_assert.ts";
+import {
+  appendJobSummary,
+  Build,
+  externalSignal,
+  parameter,
+  target,
+} from "../../packages/core/mod.ts";
+import { runCli, withStateDir } from "./_harness.ts";
 import { withEnv } from "../../packages/core/tests/_env.ts";
 
 /** Zuke's own workflow commands, which are supposed to open with `::`. */
@@ -109,4 +118,136 @@ Deno.test("integration: a hostile target name cannot forge workflow commands", a
     [],
     `these lines would run as workflow commands:\n${stray.join("\n")}`,
   );
+});
+
+Deno.test("a force's echoed reason cannot forge a command", async () => {
+  // `zuke force` echoes the operator's reason back to the log. In a scripted
+  // force that reason is often interpolated from a pull request title or an
+  // issue body, so it is not something the job's own author controls.
+  //
+  // This asserts on the FORCE command's own output, not on a later run: the
+  // forced target settles before the scheduler prints anything about it, so a
+  // test that watched the resumed run would pass with the escaping removed.
+  await withStateDir(async () => {
+    class Pipeline extends Build {
+      migrate = target().executes(() => {});
+      gate = target()
+        .dependsOn(this.migrate)
+        .waitsFor((s) => s.on(externalSignal("go")));
+      report = target().dependsOn(this.gate).executes(() => {});
+    }
+
+    const first = await runCli(Pipeline, ["report"]);
+    assertEquals(first.code, 0, first.err);
+    const listed = await runCli(Pipeline, ["runs", "list", "--json"]);
+    const runId = String(JSON.parse(listed.out)[0].id);
+
+    let forced = { code: -1, out: "", err: "" };
+    await withEnv({ GITHUB_ACTIONS: "true" }, async () => {
+      // `report` is still pending behind the gate; forcing an already-succeeded
+      // target is refused, since the record would then claim something that did
+      // not happen.
+      forced = await runCli(Pipeline, [
+        "force",
+        runId,
+        "report",
+        "--outcome",
+        "skipped",
+        "--reason",
+        HOSTILE,
+        "--actor",
+        "ops",
+      ]);
+    });
+    assertEquals(forced.code, 0, forced.err);
+    assertEquals(
+      unintendedCommands(`${forced.out}\n${forced.err}`),
+      [],
+      "the force echo let hostile text reach the runner as a command",
+    );
+  });
+});
+
+Deno.test("a remediation's job-summary section is redacted", async () => {
+  // Where the AI fixer writes. Its markdown is built from a failed command's
+  // output and the model's response to it, which is exactly where a secret in
+  // an argv would appear — and the summary is published to everyone who can
+  // view the run. A remediation has no redactor on its context, so this works
+  // only because the writer itself applies the ambient one.
+  const dir = await Deno.makeTempDir();
+  const summaryPath = `${dir}/summary.md`;
+  await Deno.writeTextFile(summaryPath, "");
+  try {
+    class B extends Build {
+      token = parameter("Deploy token").secret().required();
+      check = target()
+        .recoverWith({
+          name: "probe-fixer",
+          remediate: () => {
+            appendJobSummary(
+              "## Fix attempt\n\ncommand failed: deploy --token s3cr3t-value-xyz",
+            );
+            return { retry: false };
+          },
+        })
+        .executes(() => {
+          throw new Error("boom");
+        });
+    }
+    await withEnv(
+      { GITHUB_ACTIONS: "true", GITHUB_STEP_SUMMARY: summaryPath },
+      async () => {
+        await runCli(B, ["check", "--token", "s3cr3t-value-xyz"]);
+      },
+    );
+    const written = await Deno.readTextFile(summaryPath);
+    assertEquals(
+      written.includes("s3cr3t-value-xyz"),
+      false,
+      "a remediation published a secret to the job summary",
+    );
+    assertStringIncludes(written, "[redacted]");
+  } finally {
+    await Deno.remove(dir, { recursive: true });
+  }
+});
+
+Deno.test("a build's lifecycle hooks write a redacted job summary", async () => {
+  // `onStart` and `onFinish` are the natural places for a build to add its own
+  // section to the job summary, and they run OUTSIDE the executor's own ambient
+  // scope, which covers the plan rather than the calls around it. The redaction
+  // is installed where the hooks are dispatched for that reason — an earlier
+  // version of this fix guarded only the plan and published both hooks' output
+  // in the clear.
+  const dir = await Deno.makeTempDir();
+  const summaryPath = `${dir}/summary.md`;
+  await Deno.writeTextFile(summaryPath, "");
+  try {
+    class B extends Build {
+      token = parameter("Deploy token").secret().required();
+      ok = target().executes(() => {});
+      override onStart(): void {
+        appendJobSummary(`start: ${this.token.value}`);
+      }
+      override onFinish(): void {
+        appendJobSummary(`finish: ${this.token.value}`);
+      }
+    }
+    await withEnv(
+      { GITHUB_ACTIONS: "true", GITHUB_STEP_SUMMARY: summaryPath },
+      async () => {
+        await runCli(B, ["ok", "--token", "s3cr3t-value-xyz"]);
+      },
+    );
+    const written = await Deno.readTextFile(summaryPath);
+    assertEquals(
+      written.includes("s3cr3t-value-xyz"),
+      false,
+      "a lifecycle hook published a secret to the job summary",
+    );
+    assertStringIncludes(written, "start: [redacted]");
+    assertStringIncludes(written, "finish: [redacted]");
+  } finally {
+    await Deno.remove(dir, { recursive: true });
+  }
 });

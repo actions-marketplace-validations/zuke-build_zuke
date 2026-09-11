@@ -1,5 +1,31 @@
 # Changelog
 
+## [1.52.0](https://github.com/zuke-build/zuke/compare/core-v1.51.0...core-v1.52.0) (2026-09-10)
+
+
+### Features
+
+* **core:** refuse symlinked restore paths and bound remote-cache artifacts ([#552](https://github.com/zuke-build/zuke/issues/552)) ([3dcab8d](https://github.com/zuke-build/zuke/commit/3dcab8d34cc1066ea69e78727cb02b8ea1f1e581)), closes [#549](https://github.com/zuke-build/zuke/issues/549)
+
+
+### Bug Fixes
+
+* **console:** escape the two workflow-command sites [#547](https://github.com/zuke-build/zuke/issues/547) left for later ([#550](https://github.com/zuke-build/zuke/issues/550)) ([ab68a70](https://github.com/zuke-build/zuke/commit/ab68a703b4a3dc4b58afbff620075b0008651c14)), closes [#546](https://github.com/zuke-build/zuke/issues/546)
+* **core:** redact the job summary at the one writer that produces it ([#560](https://github.com/zuke-build/zuke/issues/560)) ([11569a2](https://github.com/zuke-build/zuke/commit/11569a289e71199abf85e45ef6ed195efcb69315))
+
+## [1.51.0](https://github.com/zuke-build/zuke/compare/core-v1.50.0...core-v1.51.0) (2026-09-10)
+
+
+### Features
+
+* **core:** harden the registry launch, scaffold, spawn and workflow-gate paths ([#542](https://github.com/zuke-build/zuke/issues/542)) ([4257b0b](https://github.com/zuke-build/zuke/commit/4257b0bc5ef5e387a44f913349646d4baccd1654))
+* **core:** neutralise workflow-command sequences in GitHub-mode output and redact the job summary ([#547](https://github.com/zuke-build/zuke/issues/547)) ([a46fd72](https://github.com/zuke-build/zuke/commit/a46fd7287c913d937b4d0bb46d0c22b87ddd8ba7))
+
+
+### Bug Fixes
+
+* **core:** correct the lock-refresh advice zuke outdated prints ([#543](https://github.com/zuke-build/zuke/issues/543)) ([5abc20a](https://github.com/zuke-build/zuke/commit/5abc20ae8f123d86fcf4bbdc2221cafce791fe31)), closes [#539](https://github.com/zuke-build/zuke/issues/539) [#541](https://github.com/zuke-build/zuke/issues/541)
+
 ## [1.50.0](https://github.com/zuke-build/zuke/compare/core-v1.49.1...core-v1.50.0) (2026-09-10)
 
 

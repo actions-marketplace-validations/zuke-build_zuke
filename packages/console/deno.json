@@ -1,13 +1,13 @@
 {
   "name": "@zuke/console",
-  "version": "1.1.0",
+  "version": "1.1.1",
   "license": "MIT",
   "description": "Task-shaped console output for Zuke builds — a levelled logger, inline style markup with a semantic theme, and line/box/table primitives, so builds never reach for console.log.",
   "exports": {
     ".": "./mod.ts"
   },
   "imports": {
-    "@zuke/core": "jsr:@zuke/core@^1.25.0"
+    "@zuke/core": "jsr:@zuke/core@^1.51.0"
   },
   "publish": {
     "exclude": [
