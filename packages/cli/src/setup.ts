@@ -18,41 +18,12 @@ import {
 } from "./mcp_config.ts";
 import { isRecord } from "./records.ts";
 import { launcherBash, launcherPwsh } from "./launcher.ts";
+import { exists, lstatOrNull } from "./fs.ts";
+import { output } from "./output.ts";
+import { starterBuild, starterConfig } from "./starter.ts";
 
 // Re-exported so the merge guard keeps its historical home for importers.
 export { isRecord };
-
-/** The starter `zuke.ts`, with the build class named `name`. */
-export function starterBuild(name: string): string {
-  return `import { Build, run, target } from "jsr:@zuke/core@^1";
-
-/** Your project's build. Run a target with \`./zuke <target>\`. */
-class ${name} extends Build {
-  hello = target()
-    .description("A sample target — replace me with real work")
-    .executes(() => {
-      console.log("Hello from Zuke!");
-    });
-
-  // Convention: \`default\` runs when no target is named.
-  default = target()
-    .description("Default target")
-    .dependsOn(this.hello)
-    .executes(() => {});
-}
-
-await run(${name});
-`;
-}
-
-/**
- * The starter `zuke.json` config. Its presence at the repository root is what
- * `@zuke/core`'s `repoRoot()` walks up to find; the recorded `name` is the
- * build class for reference.
- */
-export function starterConfig(name: string): string {
-  return `${JSON.stringify({ name }, null, 2)}\n`;
-}
 
 /**
  * The task names `setup` writes into `deno.json`, with their commands.
@@ -152,24 +123,12 @@ export interface SetupHost {
 }
 
 /**
- * `Deno.lstat` a path, or `null` when nothing is there. Every probe on
- * {@link defaultHost} reads the link itself rather than its target, so a
- * symlink is reported as a symlink instead of as whatever it points at.
+ * The real, `Deno`-backed {@link SetupHost}. Every probe reads the link itself
+ * rather than its target (see {@link lstatOrNull}), so a symlink is reported
+ * as a symlink instead of as whatever it points at.
  */
-async function lstatOrNull(path: string): Promise<Deno.FileInfo | null> {
-  try {
-    return await Deno.lstat(path);
-  } catch (error) {
-    if (error instanceof Deno.errors.NotFound) return null;
-    throw error;
-  }
-}
-
-/** The real, `Deno`-backed {@link SetupHost}. */
 export const defaultHost: SetupHost = {
-  async exists(path: string): Promise<boolean> {
-    return await lstatOrNull(path) !== null;
-  },
+  exists,
   async isDirectory(path: string): Promise<boolean> {
     return (await lstatOrNull(path))?.isDirectory === true;
   },
@@ -200,7 +159,7 @@ export const defaultHost: SetupHost = {
     return Deno.chmod(path, mode);
   },
   log(message: string): void {
-    console.log(message);
+    output.info(message);
   },
 };
 

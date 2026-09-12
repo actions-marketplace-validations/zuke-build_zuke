@@ -895,6 +895,34 @@ const ZUKE_ACTION: "zuke-build/zuke"
   The name a {@link CiPinResolver} is asked for the prelude action, so a
   repository that pins its own actions can pin this one the same way.
 
+const cliReporter: Reporter
+  The sink every command-surface module writes through, neutralised for a
+  GitHub Actions runner.
+
+  These commands echo arguments the invoker chose — a run id, a target name, a
+  force reason — and read values another process wrote into the shared state
+  store. Under Actions those commonly come from a workflow-dispatch input or an
+  issue body rather than from a person at a terminal, and a thrown message
+  quotes them straight back.
+
+  A sink rather than a guard at each of the sixty-odd writes, because none of
+  them should be exempt: unlike the run's reporter, none of these modules emits
+  a workflow command of its own, so there is no half to carve out. The MCP
+  command writes only diagnostics here — its protocol never goes through the
+  console — so escaping cannot corrupt it.
+
+  The decision is made per line, not once when this module loads. A top-level
+  constant would read the environment at import time, before an embedder or a
+  test has set it, and the escaping would then silently not apply.
+
+  Public so a companion command surface — `@zuke/cli` is one — can write
+  through the same sink instead of composing a copy of it. It is the sink for
+  a command's own diagnostics and output, not the `reporter` handed to
+  {@link execute}: the run's renderer writes `::group::` and `::endgroup::` of
+  its own and wraps only third-party text in {@link escapingReporter} beside
+  them, and a sink that neutralises every leading `::` would break that
+  grouping.
+
 const defaultRenderer: Renderer
   The built-in renderer: Zuke's ruled headers and summary table.
 
@@ -8394,12 +8422,16 @@ type LogLevel = "trace" | "debug" | "info" | "warn" | "error" | "silent"
 deno install -A -g -n zuke jsr:@zuke/cli
 ```
 
-and scaffold Zuke into any project with `zuke setup`.
+scaffold Zuke into any project with `zuke setup`, then run its build from
+anywhere inside the project with `zuke <target>`: every command that is not
+the CLI's own (`setup`, `import`, `doc`) is forwarded to the nearest
+`zuke.ts`, exactly as the `./zuke` launcher would run it.
 @module
 
-async function main(args: string[], host: SetupHost, prompter: Prompter, docRunner: DocRunner, starActions: StarActions): Promise<number>
+async function main(args: string[], host: SetupHost, prompter: Prompter, docRunner: DocRunner, starActions: StarActions, buildRunner: BuildRunner, buildProbe: BuildProbe): Promise<number>
   The CLI entry point. Returns a process exit code; `host`, `prompter`,
-  `docRunner`, and `starActions` are injectable for testing.
+  `docRunner`, `starActions`, `buildRunner`, and `buildProbe` are injectable
+  for testing.
 
 function parseImportFlags(args: string[]): ImportFlags
   Parse the argument list following `zuke import`.
@@ -8416,11 +8448,39 @@ function resolveDocSpec(pkg: string | undefined): string | undefined
 const defaultPrompter: Prompter
   The real {@link Prompter}, backed by Deno's `prompt`/`confirm`.
 
+interface BuildLocation
+  Where a forwarded command runs, and how.
+
+  root: string
+    The absolute repository root: the directory holding `zuke.json`.
+  frozen: boolean
+    Whether a `deno.lock` sits at the root, so the run passes `--frozen`.
+
+interface BuildProbe
+  The filesystem questions discovery asks, injectable so the walk and its
+  trust gate are testable without a filesystem or a second user.
+
+  exists(path: string): Promise<boolean>
+    Whether a path exists (the link itself, not its target).
+  ownership(path: string): Promise<Ownership | null>
+    The owner and mode of what a path resolves to, or `null` when nothing is
+    there.
+  uid(): number | null
+    The current user's numeric id, or `null` where the platform has none.
+
 interface ImportFlags extends SetupFlags
   Flags accepted by `zuke import` — the setup flags plus `--from`.
 
   from?: ImportSource
     Force a source (`package.json` or `makefile`); auto-detected when unset.
+
+interface Ownership
+  What the trust gate needs to know about a filesystem entry.
+
+  uid: number | null
+    The numeric owner, or `null` where the platform reports none (Windows).
+  mode: number | null
+    The permission bits, or `null` where the platform reports none.
 
 interface Prompter
   The interactive surface, injectable so the wizard is testable without a TTY.
@@ -8504,6 +8564,10 @@ interface StarActions
     Star the Zuke repository through `gh api`.
   openBrowser(url: string): Promise<boolean>
     Open `url` in the default browser; `false` when it could not launch.
+
+type BuildRunner = (root: string, denoArgs: string[]) => Promise<number>
+  Runs `deno <denoArgs>` from `root` and resolves to its exit code — the
+  injectable subprocess seam, so the forwarding is testable without a build.
 
 type DocRunner = (denoArgs: string[]) => Promise<number>
   Runs `deno doc <args>` — the injectable subprocess seam for
