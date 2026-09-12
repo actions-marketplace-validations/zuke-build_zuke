@@ -14,10 +14,12 @@
  */
 
 import { messageOf } from "./internal.ts";
+import { singleLine } from "./summary_note.ts";
 import type { TargetStatus } from "./build.ts";
 import {
   escapeData,
   escapeLine,
+  escapeLineIf,
   escapeProperty,
   formatDuration,
   line,
@@ -119,7 +121,7 @@ export function targetPassFooter(
   // A fan-out sub-target's name carries the item key, which comes from repo or
   // remote data, so on the runner's stream it is neutralised like any other
   // untrusted text.
-  const safe = style.github ? escapeLine(name) : name;
+  const safe = escapeLineIf(style.github, name);
   const line = `${icon} ${safe} ${tail}`;
   return style.github ? [line, "::endgroup::"] : [line];
 }
@@ -183,7 +185,7 @@ export function targetWaitFooter(
   // The trigger describes what is being waited on, which for a workflow gate
   // names a repository and a workflow file, so it is no more ours than the
   // target name beside it.
-  const safe = (text: string) => style.github ? escapeLine(text) : text;
+  const safe = (text: string) => escapeLineIf(style.github, text);
   const note = paint(style.color, SGR.dim, `waiting for ${safe(trigger)}`);
   const line = `${icon} ${safe(name)} ${note}`;
   return style.github ? [line, "::endgroup::"] : [line];
@@ -193,7 +195,7 @@ export function targetWaitFooter(
 export function targetDryRunFooter(style: Style, name: string): string[] {
   const icon = paint(style.color, SGR.cyan, ICON.passed);
   const note = paint(style.color, SGR.dim, "(dry run — not executed)");
-  const line = `${icon} ${style.github ? escapeLine(name) : name} ${note}`;
+  const line = `${icon} ${escapeLineIf(style.github, name)} ${note}`;
   return style.github ? [line, "::endgroup::"] : [line];
 }
 
@@ -210,8 +212,10 @@ export function summaryBlock(
   now: Date = new Date(),
 ): string[] {
   const headers = { name: "Target", status: "Status", duration: "Duration" };
+  const shownName = new Map(reports.map((r) => [r, displayName(r.name)]));
+  const nameOf = (r: TargetReport): string => shownName.get(r) ?? r.name;
   const nameWidth = reports.reduce(
-    (w, r) => Math.max(w, r.name.length),
+    (w, r) => Math.max(w, nameOf(r).length),
     headers.name.length,
   );
   const statusWidth = Object.values(STATUS_LABEL).reduce(
@@ -251,15 +255,16 @@ export function summaryBlock(
     // they are the same untrusted class as the name. They need no newline to
     // matter: the legacy bracketed command form is recognised mid-line.
     const raw = formatSummary(r.summary);
-    const note = style.github ? escapeLine(raw) : raw;
+    const note = escapeLineIf(style.github, raw);
     const notes = note === ""
       ? ""
       : "  " + paint(style.color, SGR.dim, `// ${note}`);
     // A row starts at column 0, so a target name is the one thing here that
     // could open a command; the padding is computed from the raw name so the
     // columns stay aligned when nothing needed escaping.
-    const name = style.github ? escapeLine(r.name) : r.name;
-    return name + " ".repeat(Math.max(0, nameWidth - r.name.length)) + "  " +
+    const shown = nameOf(r);
+    const name = escapeLineIf(style.github, shown);
+    return name + " ".repeat(Math.max(0, nameWidth - shown.length)) + "  " +
       status + "  " +
       duration.padStart(durationWidth) + notes;
   });
@@ -335,7 +340,7 @@ export function closingLine(
   }
   const failed = reports.filter((r) => r.status === "failed");
   const culprit = failed.length === 1
-    ? `'${style.github ? escapeLine(failed[0].name) : failed[0].name}' failed`
+    ? `'${escapeLineIf(style.github, displayName(failed[0].name))}' failed`
     : failed.length > 1
     ? `${failed.length} targets failed`
     : "no target succeeded";
@@ -353,6 +358,50 @@ export function closingLine(
  * Render the GitHub Actions job-summary Markdown for a build — an aligned table
  * with a Total row and a verdict heading, mirroring the terminal summary.
  */
+/**
+ * A target's name as any renderer should print it: collapsed to one line.
+ *
+ * A name is not necessarily the build author's text — a fan-out sub-target's
+ * carries its item key, which comes from repository or remote data — and every
+ * renderer here puts it in a table. A newline breaks the row in each of them:
+ * the terminal table loses its alignment and gains a line that can imitate a
+ * Total row, and a Markdown row ends early, publishing what follows as document
+ * content. So it is collapsed once, here, rather than at each renderer.
+ */
+function displayName(name: string): string {
+  return singleLine(name);
+}
+
+/**
+ * Render `value` as the contents of one Markdown table cell.
+ *
+ * Neither a target name nor a summary note is necessarily the build author's
+ * text: a wrapper hands over what a tool printed, and a fan-out sub-target's
+ * name carries its item key, which comes from repository or remote data. Three
+ * things in such a value would otherwise escape the cell:
+ *
+ * - a **newline** ends the row, so everything after it is published as document
+ *   content — a heading, a list, raw markup — rather than as a cell;
+ * - a **pipe** opens a column of its own, shifting every later cell;
+ * - an **HTML comment marker** comments out the rest of the table, so the rows
+ *   below it silently vanish from the rendered summary.
+ *
+ * The collapsing is {@link "./summary_note.ts".singleLine}, which a note
+ * already went through when it was recorded; applying it here as well is what
+ * covers the name, which went through nothing.
+ *
+ * Matches `@zuke/ai`'s own cell renderer deliberately, including in what it
+ * does *not* do: other markup is left as written, since a cell is rendered by
+ * GitHub's sanitiser and over-escaping would mangle ordinary names.
+ */
+function markdownCell(value: string): string {
+  return singleLine(value)
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll("|", "\\|");
+}
+
 export function jobSummaryMarkdown(
   reports: TargetReport[],
   totalMs: number,
@@ -365,13 +414,11 @@ export function jobSummaryMarkdown(
   // keeps the three-column table it always had.
   const withNotes = reports.some((r) => formatSummary(r.summary) !== "");
   const notesCell = (r: TargetReport) =>
-    withNotes ? ` ${formatSummary(r.summary).replaceAll("|", "\\|")} |` : "";
+    withNotes ? ` ${markdownCell(formatSummary(r.summary))} |` : "";
   const rows = reports.map((r) => {
     const ran = r.status === "passed" || r.status === "failed";
     const duration = ran ? formatDuration(r.ms) : "—";
-    // A pipe in a name would otherwise open a column of its own, the way the
-    // note cell already guards against.
-    const name = r.name.replaceAll("|", "\\|");
+    const name = markdownCell(r.name);
     return `| ${name} | ${ICON[r.status]} ${
       STATUS_LABEL[r.status]
     } | ${duration} |${notesCell(r)}`;
