@@ -255,6 +255,8 @@
     "shortlog",
     "shortstat",
     "sidecar",
+    "signpath",
+    "signtool",
     "Sigstore",
     "socio",
     "spawnable",
