@@ -31,13 +31,14 @@ whole thing to **AI agents** as typed tools. Inspired by
 ```sh
 deno install -A -g -n zuke jsr:@zuke/cli    # 1. the CLI, once, from JSR
 brew install zuke-build/tap/zuke            #    …or as a signed binary (macOS, Linux)
+choco install zuke                          #    …or as a signed binary (Windows)
 zuke setup                                  # 2. scaffold zuke.ts + the ./zuke launcher
 zuke                                        # 3. run it (or ./zuke — no install needed)
 zuke generate-ci                            # 4. write .github/workflows/ci.yml from the build
 ```
 
-Both installs are the same CLI, and both are supported; the Homebrew binary
-needs no Deno up front. See [Install](#install).
+Every install is the same CLI, and every one is supported; the binaries need no
+Deno up front. See [Install](#install).
 
 Step 4 needs one line in the build. Here is the whole file after you have
 replaced the scaffolded sample target with real work:
@@ -109,7 +110,7 @@ Three short recipes cover what a small project wants first:
   support — no bespoke DSL. The `$` tagged template from `@zuke/core/shell` runs
   processes with sane defaults and is injection-safe, so it also replaces the
   `scripts/*.sh` nobody dares touch.
-- **A typed wrapper for every tool.** 66 packages: a tiny core, the CLI, and a
+- **A typed wrapper for every tool.** 67 packages: a tiny core, the CLI, and a
   `*Tasks` object per tool — Deno, npm, pnpm, Bun, Docker, Kubernetes,
   Terraform, Vite, Playwright, GitHub, Claude Code, and the rest — whose
   settings lambdas mirror the real flags. See [Packages](./docs/packages.md).
@@ -138,7 +139,7 @@ Teams running Zuke in production:
 ## Install
 
 The `zuke` CLI scaffolds a project, migrates an existing one, and runs its
-build. It ships two ways, built from the same release: pick the one that suits
+build. It ships three ways, built from the same release: pick the one that suits
 the machine. `zuke --version` tells you which one you are running.
 
 ### From JSR (any OS, with Deno)
@@ -160,6 +161,17 @@ A standalone binary: no Deno needed. The macOS builds are signed with a
 Developer ID and notarized by Apple, and every archive carries a
 build-provenance attestation you can verify. Upgrade with `brew upgrade zuke`.
 See [installing](./docs/install.md) for how to check a download.
+
+### With Chocolatey (Windows)
+
+```powershell
+choco install zuke
+```
+
+A standalone binary: no Deno needed. The executable is Authenticode-signed, and
+the archive it is installed from carries the same build-provenance attestation
+as the others. Upgrade with `choco upgrade zuke`. See
+[installing](./docs/install.md) for how to check a download.
 
 ### Set up a project
 
@@ -183,7 +195,7 @@ launcher that uses the Deno on your `PATH` and fails closed without one, for a
 project that must never download a tool from its build entry point.
 
 > [!NOTE]
-> **Maturity.** Every one of the 66 packages is `1.x` and follows full semver —
+> **Maturity.** Every one of the 67 packages is `1.x` and follows full semver —
 > `@zuke/core`, the `@zuke/cli` command, and all the tool wrappers. A minor or
 > patch release never breaks a public symbol; a breaking change bumps the major.
 > See [Versioning & compatibility](./docs/versioning.md). The npm scope `@zuke`
@@ -218,7 +230,7 @@ refused on contributor-controlled events:
 
 ## Packages
 
-Zuke ships as a JSR workspace of 66 packages:
+Zuke ships as a JSR workspace of 67 packages:
 [`@zuke/core`](https://jsr.io/@zuke/core) (the engine, the `$` shell, and the
 tooling base classes), the [`@zuke/cli`](https://jsr.io/@zuke/cli) command, a
 generic [`@zuke/cmd`](https://jsr.io/@zuke/cmd) fallback, plugins such as
@@ -234,6 +246,7 @@ a typed wrapper per tool — [`@zuke/deno`](https://jsr.io/@zuke/deno),
 [`@zuke/aws`](https://jsr.io/@zuke/aws), [`@zuke/az`](https://jsr.io/@zuke/az),
 [`@zuke/gh`](https://jsr.io/@zuke/gh), [`@zuke/git`](https://jsr.io/@zuke/git),
 [`@zuke/homebrew`](https://jsr.io/@zuke/homebrew),
+[`@zuke/chocolatey`](https://jsr.io/@zuke/chocolatey),
 [`@zuke/kubectl`](https://jsr.io/@zuke/kubectl),
 [`@zuke/terraform`](https://jsr.io/@zuke/terraform),
 [`@zuke/vite`](https://jsr.io/@zuke/vite),
