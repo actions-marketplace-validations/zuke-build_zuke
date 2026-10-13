@@ -28,20 +28,31 @@ whole thing to **AI agents** as typed tools. Inspired by
 
 ## Five minutes to a typed build
 
+**1. Install the CLI** — pick one. Both are the same CLI and fully supported;
+the Homebrew binary needs no Deno up front. See [Install](#install).
+
+From JSR (any OS, with Deno):
+
 ```sh
-deno install -A -g -n zuke jsr:@zuke/cli    # 1. the CLI, once, from JSR
-brew install zuke-build/tap/zuke            #    …or as a signed binary (macOS, Linux)
-choco install zuke                          #    …or as a signed binary (Windows)
-zuke setup                                  # 2. scaffold zuke.ts + the ./zuke launcher
-zuke                                        # 3. run it (or ./zuke — no install needed)
-zuke generate-ci                            # 4. write .github/workflows/ci.yml from the build
+deno install -A -g -n zuke jsr:@zuke/cli
 ```
 
-Every install is the same CLI, and every one is supported; the binaries need no
-Deno up front. See [Install](#install).
+With Homebrew (macOS, Linux):
 
-Step 4 needs one line in the build. Here is the whole file after you have
-replaced the scaffolded sample target with real work:
+```sh
+brew install zuke-build/tap/zuke
+```
+
+**2. Set up a project and run it**, whichever way you installed:
+
+```sh
+zuke setup         # scaffold zuke.ts + the ./zuke launcher
+zuke               # run it (or ./zuke — no install needed)
+zuke generate-ci   # write .github/workflows/ci.yml from the build
+```
+
+`zuke generate-ci` needs one line in the build. Here is the whole file after you
+have replaced the scaffolded sample target with real work:
 
 <!-- check -->
 
@@ -139,7 +150,7 @@ Teams running Zuke in production:
 ## Install
 
 The `zuke` CLI scaffolds a project, migrates an existing one, and runs its
-build. It ships three ways, built from the same release: pick the one that suits
+build. It ships two ways, built from the same release: pick the one that suits
 the machine. `zuke --version` tells you which one you are running.
 
 ### From JSR (any OS, with Deno)
@@ -162,17 +173,6 @@ Developer ID and notarized by Apple, and every archive carries a
 build-provenance attestation you can verify. Upgrade with `brew upgrade zuke`.
 See [installing](./docs/install.md) for how to check a download, and for the
 [code signing policy](./docs/install.md#code-signing-policy).
-
-### With Chocolatey (Windows)
-
-```powershell
-choco install zuke
-```
-
-A standalone binary: no Deno needed. The executable is Authenticode-signed, and
-the archive it is installed from carries the same build-provenance attestation
-as the others. Upgrade with `choco upgrade zuke`. See
-[installing](./docs/install.md) for how to check a download.
 
 ### Set up a project
 
