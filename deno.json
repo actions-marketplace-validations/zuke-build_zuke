@@ -95,6 +95,7 @@
       "tests/",
       "packages/",
       "examples/",
+      "spike/",
       "docs/",
       "skills/",
       ".github/",
@@ -114,7 +115,8 @@
       "build/",
       "tests/",
       "packages/",
-      "examples/"
+      "examples/",
+      "spike/"
     ],
     "rules": {
       "tags": [
