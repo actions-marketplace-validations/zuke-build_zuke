@@ -30,14 +30,25 @@ interface PlanTarget {
   barrier?: string;
   fail?: string;
   execAs?: string;
+  condition?: boolean;
+  condition_answer?: unknown;
+  cacheKey?: boolean;
+  cacheKey_answer?: unknown;
 }
 
 /** Start the fake worker on `plan` and materialise its build. */
 async function fake(
   targets: PlanTarget[],
-  options: { badToken?: string; connectTimeoutMs?: number } = {},
+  options: {
+    badToken?: string;
+    connectTimeoutMs?: number;
+    manifest?: Record<string, unknown>;
+  } = {},
 ): Promise<{ host: WorkerHost; Remote: new () => Build }> {
-  Deno.env.set("ZUKE_FAKE_PLAN", JSON.stringify({ name: "Fake", targets }));
+  Deno.env.set(
+    "ZUKE_FAKE_PLAN",
+    JSON.stringify({ name: "Fake", targets, ...options.manifest }),
+  );
   if (options.badToken !== undefined) {
     Deno.env.set("ZUKE_FAKE_BAD_TOKEN", options.badToken);
   } else Deno.env.delete("ZUKE_FAKE_BAD_TOKEN");
@@ -117,6 +128,65 @@ Deno.test("a body that fails marks its target failed with the worker's message",
       const result = await runCli(Remote, ["after"]);
       assertEquals(result.code, 1);
       assertStringIncludes(result.out + result.err, "the worker said no");
+    } finally {
+      await host.finish(1);
+    }
+  });
+});
+
+Deno.test("a worker hook that throws fails the run with its message", async () => {
+  await withStateDir(async () => {
+    const { host, Remote } = await fake(
+      [{ name: "a" }],
+      {
+        manifest: { hooks: { onTargetStart: true }, failHook: "onTargetStart" },
+      },
+    );
+    try {
+      const result = await runCli(Remote, ["a"]);
+      assertEquals(result.code, 1);
+      assertStringIncludes(
+        result.out + result.err,
+        "the worker's onTargetStart threw",
+      );
+      assertEquals(result.err.includes("worker: call: target.run a"), false);
+    } finally {
+      await host.finish(1);
+    }
+  });
+});
+
+Deno.test("a condition answered with the wrong type is refused, naming the target", async () => {
+  await withStateDir(async () => {
+    const { host, Remote } = await fake([
+      { name: "gated", condition: true, condition_answer: "yes" },
+    ]);
+    try {
+      const gated = await runCli(Remote, ["gated"]);
+      assertEquals(gated.code, 1);
+      assertStringIncludes(
+        gated.out + gated.err,
+        'target.condition: "gated" must answer a boolean',
+      );
+      assertEquals(gated.err.includes("worker: call: target.run"), false);
+    } finally {
+      await host.finish(1);
+    }
+  });
+});
+
+Deno.test("a cache key answered with the wrong type is refused, naming the target", async () => {
+  await withStateDir(async () => {
+    const { host, Remote } = await fake([
+      { name: "keyed", cacheKey: true, cacheKey_answer: 1 },
+    ]);
+    try {
+      const keyed = await runCli(Remote, ["keyed"]);
+      assertEquals(keyed.code, 1);
+      assertStringIncludes(
+        keyed.out + keyed.err,
+        'target.cacheKey: "keyed" must answer a string',
+      );
     } finally {
       await host.finish(1);
     }
