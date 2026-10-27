@@ -46,6 +46,11 @@ export class Peer {
     this.#conn = conn;
   }
 
+  /** Whether the connection has been closed, by either side. */
+  get closed(): boolean {
+    return this.#closed;
+  }
+
   /** Register the handler for `method`. */
   on(method: string, handler: RpcHandler): this {
     this.#handlers.set(method, handler);
@@ -86,14 +91,19 @@ export class Peer {
         }
       }
     } catch (error) {
-      if (!this.#closed) throw error; // A read after close() is the close.
+      // A read after close() is the close. A read error otherwise is the
+      // remote vanishing: Windows reports a peer that died as a reset, not
+      // an end of stream, and either way nothing is left to read.
+      if (!this.#closed) {
+        this.close(error instanceof Error ? error.message : String(error));
+      }
     } finally {
       this.close();
     }
   }
 
-  /** Close the connection; every pending request rejects. */
-  close(): void {
+  /** Close the connection; every pending request rejects with `reason`. */
+  close(reason = "connection closed"): void {
     if (this.#closed) return;
     this.#closed = true;
     // A pending read on a closed connection never settles; cancelling the
@@ -106,7 +116,7 @@ export class Peer {
     }
     for (const [id, pending] of this.#pending) {
       this.#pending.delete(id);
-      pending.reject(new RpcFailure(-32000, "connection closed"));
+      pending.reject(new RpcFailure(-32000, reason));
     }
   }
 
