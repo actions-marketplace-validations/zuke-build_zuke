@@ -5,7 +5,7 @@
  * The `gcloud functions` group — deploying and inspecting Cloud Functions.
  *
  * ```ts
- * import { GcloudTasks } from "jsr:@zuke/gcloud";
+ * import { GcloudTasks } from "@zuke/gcloud";
  * await GcloudTasks.functionsDeploy((s) =>
  *   s.function("ingest").runtime("nodejs20").triggerHttp()
  *     .region("us-central1").entryPoint("main").gen2()
@@ -165,7 +165,11 @@ export class GcloudFunctionsDeploySettings extends GcloudSettings {
     if (this.#envVars.length > 0) {
       argv.push(
         "--set-env-vars",
-        commaJoined(this.#envVars, "functionsDeploy", "--set-env-vars"),
+        commaJoined(
+          this.#envVars,
+          "GcloudTasks.functionsDeploy",
+          "--set-env-vars",
+        ),
       );
     }
     if (this.#memory !== undefined) argv.push("--memory", this.#memory);

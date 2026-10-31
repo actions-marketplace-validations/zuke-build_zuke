@@ -9,10 +9,22 @@
  * @module
  */
 
+import { type GhReactionContent, GhTasks } from "@zuke/gh";
+import {
+  type CallerVerdict,
+  commandCaller,
+  mayStartReview,
+} from "../callers.ts";
 import { parsePullNumber, REVIEW_PR_ENV } from "../diff.ts";
 import { dig } from "../json.ts";
+import {
+  githubReactions,
+  githubReplyReactions,
+  postReaction,
+} from "./github_reactions.ts";
 import { githubReviewThreads } from "./github_threads.ts";
 import {
+  type CommandSignal,
   commentBody,
   commentMarker,
   type CommentMode,
@@ -39,6 +51,75 @@ export interface GithubContext {
   repo: string;
   /** The pull-request number to comment on. */
   pull: number;
+}
+
+/**
+ * The env var the generated command job sets to the id of the comment that
+ * started the run, for the reviewer to acknowledge before it starts.
+ */
+export const REVIEW_COMMENT_ENV = "ZUKE_REVIEW_COMMENT";
+
+/** The GitHub reaction content for each {@link CommandSignal}. */
+const COMMAND_CONTENT: Record<CommandSignal, GhReactionContent> = {
+  started: "+1",
+  unable: "confused",
+};
+
+/**
+ * React on the comment {@link REVIEW_COMMENT_ENV} names — 👍 the command was
+ * accepted and the review is starting, 😕 it cannot run. `false` when the run
+ * was not comment-started, the id is not a number, the repository is unknown,
+ * or GitHub refuses — best-effort, like every post the review makes. The id is
+ * checked against digits before it is put in a URL.
+ */
+export function acknowledgeGithubCommand(
+  env: EnvReader,
+):
+  | ((
+    token: string,
+    signal: CommandSignal,
+    doFetch: typeof fetch,
+  ) => Promise<boolean>)
+  | undefined {
+  const id = env(REVIEW_COMMENT_ENV);
+  if (id === undefined || id === "") return undefined;
+  const repo = env("GITHUB_REPOSITORY");
+  return async (token, signal, doFetch) => {
+    if (!/^[1-9]\d{0,15}$/.test(id) || repo === undefined || token === "") {
+      return false;
+    }
+    const reaction = await postReaction(
+      { slug: repo, token },
+      (s) => s.issueComment(Number(id)),
+      COMMAND_CONTENT[signal],
+      doFetch,
+    );
+    return reaction !== undefined;
+  };
+}
+
+/**
+ * Whether the commenter who started this run may start a review — see
+ * `callers.ts`. Asks GitHub's collaborators API through `GhTasks`, with the
+ * token given; `undefined` when the run was not started by a comment.
+ */
+export function authorizeGithubCommand(
+  env: EnvReader,
+):
+  | ((token: string, doFetch: typeof fetch) => Promise<CallerVerdict>)
+  | undefined {
+  const id = env(REVIEW_COMMENT_ENV);
+  if (id === undefined || id === "") return undefined;
+  const caller = commandCaller(env);
+  const repo = env("GITHUB_REPOSITORY") ?? "";
+  return (token, doFetch) =>
+    mayStartReview(
+      caller,
+      (login) =>
+        GhTasks.collaboratorPermission((s) =>
+          s.repo(repo).token(token).fetch(doFetch).login(login)
+        ),
+    );
 }
 
 /** Parse a `refs/pull/<n>/merge` ref into its pull-request number. */
@@ -140,6 +221,61 @@ export async function listPrComments(
 }
 
 /**
+ * The `author_association` values GitHub gives an author it already counts as
+ * the repository's own — no lookup is needed to trust these.
+ */
+const STANDING = ["OWNER", "MEMBER", "COLLABORATOR"];
+
+/** The collaborator permissions that amount to push access. */
+const PUSH_PERMISSIONS = ["admin", "maintain", "write"];
+
+/**
+ * Fill in the standing `author_association` hides.
+ *
+ * GitHub reports an organisation member whose membership is private as
+ * `CONTRIBUTOR` to a token that cannot see the membership — the Actions token
+ * in particular — so a trust gate keyed on that field alone dropped this very
+ * repository's maintainers' replies without a trace. The collaborators API
+ * answers the question the gate actually asks, whether the author can push,
+ * and it answers it for the Actions token too. Every distinct human author the
+ * listing does not already count as the repository's own is looked up once;
+ * one with push access is given `COLLABORATOR`, the association GitHub uses
+ * for exactly that standing, and everyone else keeps what the listing said. A
+ * lookup that fails leaves the association as reported: no standing is
+ * invented, and a token that cannot ask reads exactly as before.
+ */
+export async function withPushAccess(
+  comments: HostComment[],
+  context: GithubContext,
+  doFetch: typeof fetch,
+): Promise<HostComment[]> {
+  const logins = new Set<string>();
+  for (const comment of comments) {
+    if (comment.bot || comment.author === "") continue;
+    if (STANDING.includes(comment.association)) continue;
+    logins.add(comment.author);
+  }
+  const push = new Set<string>();
+  for (const login of logins) {
+    const permission = await probeString(
+      `${API}/repos/${context.owner}/${context.repo}/collaborators/` +
+        `${encodeURIComponent(login)}/permission`,
+      githubHeaders(context.token),
+      doFetch,
+      "permission",
+    );
+    if (permission !== undefined && PUSH_PERMISSIONS.includes(permission)) {
+      push.add(login);
+    }
+  }
+  return comments.map((comment) =>
+    push.has(comment.author)
+      ? { ...comment, association: "COLLABORATOR" }
+      : comment
+  );
+}
+
+/**
  * The login the `token` authenticates as (`GET /user`), or `undefined` when the
  * endpoint is unavailable — an Actions installation token cannot call it, but
  * its comments are authored by a bot account, which the caller checks first.
@@ -214,11 +350,24 @@ export const githubHost: ReviewHost = {
   listComments(token, env) {
     const context = resolveGithubContext(token, env);
     if (context === undefined) return undefined;
-    return (doFetch) => listPrComments(context, doFetch);
+    return async (doFetch) =>
+      withPushAccess(await listPrComments(context, doFetch), context, doFetch);
   },
   reviewThreads(token, env) {
     const context = resolveGithubContext(token, env);
     if (context === undefined) return undefined;
     return githubReviewThreads(context);
+  },
+  acknowledgeCommand: acknowledgeGithubCommand,
+  authorizeCommand: authorizeGithubCommand,
+  reactions(token, env) {
+    const context = resolveGithubContext(token, env);
+    if (context === undefined) return undefined;
+    return githubReactions(context);
+  },
+  replyReactions(token, env) {
+    const context = resolveGithubContext(token, env);
+    if (context === undefined) return undefined;
+    return githubReplyReactions(context);
   },
 };

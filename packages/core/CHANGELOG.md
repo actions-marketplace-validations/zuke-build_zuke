@@ -1,5 +1,191 @@
 # Changelog
 
+## [1.77.0](https://github.com/zuke-build/zuke/compare/core-v1.76.0...core-v1.77.0) (2026-10-21)
+
+
+### Features
+
+* **core:** cache SDK outputs with their .git, long paths and a raised size limit ([#893](https://github.com/zuke-build/zuke/issues/893)) ([216de10](https://github.com/zuke-build/zuke/commit/216de102ae73c5c43794bf1e1f2822697313d114))
+* **core:** keep tar and zip file modes and zip symlinks on extraction ([#891](https://github.com/zuke-build/zuke/issues/891)) ([a9d3933](https://github.com/zuke-build/zuke/commit/a9d3933c2111768c81312f076af24f101442b117))
+
+
+### Bug Fixes
+
+* **core:** speed up tar.xz extraction with the system xz ([#892](https://github.com/zuke-build/zuke/issues/892)) ([f86689d](https://github.com/zuke-build/zuke/commit/f86689d8d7398a5f4bc98ad6f5e87b45f2335b14))
+
+## [1.76.0](https://github.com/zuke-build/zuke/compare/core-v1.75.0...core-v1.76.0) (2026-10-21)
+
+
+### Features
+
+* **core:** remote cache store backed by the GitHub Actions cache ([#877](https://github.com/zuke-build/zuke/issues/877)) ([213d523](https://github.com/zuke-build/zuke/commit/213d5234c03e1fedc314159a77b2f680c2d6c8f5))
+* **core:** S3-compatible remote cache store and HTTP store headers ([#883](https://github.com/zuke-build/zuke/issues/883)) ([b3f6ddb](https://github.com/zuke-build/zuke/commit/b3f6ddbb93144d43ca2719a43745a4da12c9cbc8))
+* **core:** support tar.xz archives in installRelease and installTree ([#878](https://github.com/zuke-build/zuke/issues/878)) ([88c76a5](https://github.com/zuke-build/zuke/commit/88c76a5e46abcfb33636a4bfabe95d0b7d9118a7))
+
+## [1.75.0](https://github.com/zuke-build/zuke/compare/core-v1.74.0...core-v1.75.0) (2026-10-21)
+
+
+### Features
+
+* **core:** add an ES256 JWT signer beside the RS256 one ([#869](https://github.com/zuke-build/zuke/issues/869)) ([7681545](https://github.com/zuke-build/zuke/commit/7681545b12c917debe4ff4e77a2bfe76eeec8dda))
+
+## [1.74.0](https://github.com/zuke-build/zuke/compare/core-v1.73.0...core-v1.74.0) (2026-10-19)
+
+
+### Features
+
+* **core:** render an argv as a paste-able shell command line ([#847](https://github.com/zuke-build/zuke/issues/847)) ([12c43b4](https://github.com/zuke-build/zuke/commit/12c43b4e70a32a2e5ceb08f6ab766fc0aebba724))
+
+## [1.73.0](https://github.com/zuke-build/zuke/compare/core-v1.72.0...core-v1.73.0) (2026-10-14)
+
+
+### Features
+
+* **cli:** publish the Windows binary to Chocolatey, unsigned until Authenticode lands ([#819](https://github.com/zuke-build/zuke/issues/819)) ([60e24a8](https://github.com/zuke-build/zuke/commit/60e24a814f15ee9603cfc9ebf34f49e7c5e37b7e))
+
+
+### Bug Fixes
+
+* **core:** wait on a mutex marker Windows reports as access denied ([#822](https://github.com/zuke-build/zuke/issues/822)) ([159da36](https://github.com/zuke-build/zuke/commit/159da364ce6a918672fff8cb05461b284f11ee36)), closes [#821](https://github.com/zuke-build/zuke/issues/821)
+
+## [1.72.0](https://github.com/zuke-build/zuke/compare/core-v1.71.0...core-v1.72.0) (2026-10-12)
+
+
+### Features
+
+* **cli:** build, sign, attest and tap the zuke CLI as a standalone binary ([#796](https://github.com/zuke-build/zuke/issues/796)) ([e437476](https://github.com/zuke-build/zuke/commit/e437476675e7051547f8e2f50c7598885a28fdda))
+
+## [1.71.0](https://github.com/zuke-build/zuke/compare/core-v1.70.1...core-v1.71.0) (2026-10-11)
+
+
+### Features
+
+* **core:** add job environments, outputs, sparse matrices, and path filters ([#780](https://github.com/zuke-build/zuke/issues/780)) ([e774671](https://github.com/zuke-build/zuke/commit/e774671891ce8b26ba6510404e5665601ba534f8))
+
+## [1.70.1](https://github.com/zuke-build/zuke/compare/core-v1.70.0...core-v1.70.1) (2026-10-08)
+
+
+### Bug Fixes
+
+* **core:** register a reshaped secret wherever the query moved it ([#764](https://github.com/zuke-build/zuke/issues/764)) ([714610f](https://github.com/zuke-build/zuke/commit/714610f40b3757f7396424d7cdb7206f7fa25f15))
+
+## [1.70.0](https://github.com/zuke-build/zuke/compare/core-v1.69.0...core-v1.70.0) (2026-10-08)
+
+
+### Features
+
+* **core:** find the secrets in a credential-bearing command's output ([#761](https://github.com/zuke-build/zuke/issues/761)) ([254e471](https://github.com/zuke-build/zuke/commit/254e471e0d89e94a955d425007c31f6fc9faec17))
+
+## [1.69.0](https://github.com/zuke-build/zuke/compare/core-v1.68.0...core-v1.69.0) (2026-10-08)
+
+
+### Features
+
+* **core:** keep outdated --update from corrupting the lock; add --min-dep-age and --entrypoint ([#754](https://github.com/zuke-build/zuke/issues/754)) ([3bd7a2d](https://github.com/zuke-build/zuke/commit/3bd7a2d7ba470cf6bad52c9f0e3442fa0573f005))
+
+## [1.68.0](https://github.com/zuke-build/zuke/compare/core-v1.67.0...core-v1.68.0) (2026-10-07)
+
+
+### Features
+
+* **core:** export the CLI palette and version panel, and follow the lock setting in zuke --version ([#745](https://github.com/zuke-build/zuke/issues/745)) ([2ee5d72](https://github.com/zuke-build/zuke/commit/2ee5d727ea027a66a8e6ef4dc7a5daafc60b0077))
+
+
+### Bug Fixes
+
+* **core:** list each outdated package once, however many ranges pin it ([#753](https://github.com/zuke-build/zuke/issues/753)) ([b6c723b](https://github.com/zuke-build/zuke/commit/b6c723b07c5d0a39a33cb994d4148e45e5f176ab))
+
+## [1.67.0](https://github.com/zuke-build/zuke/compare/core-v1.66.0...core-v1.67.0) (2026-10-07)
+
+
+### Features
+
+* **core:** rich build-CLI output with a ZUKE_PLAIN / --plain switch ([#735](https://github.com/zuke-build/zuke/issues/735)) ([e345b58](https://github.com/zuke-build/zuke/commit/e345b5844ecb9fee40cc9843b7f3bf23d2d781bb))
+
+## [1.66.0](https://github.com/zuke-build/zuke/compare/core-v1.65.0...core-v1.66.0) (2026-10-07)
+
+
+### Features
+
+* **core:** export the plaintext-backend guard, the bounded body reader and an RS256 JWT signer ([#726](https://github.com/zuke-build/zuke/issues/726)) ([88a38f9](https://github.com/zuke-build/zuke/commit/88a38f91f4c00a6322b3048385534cc262028c46))
+
+## [1.65.0](https://github.com/zuke-build/zuke/compare/core-v1.64.0...core-v1.65.0) (2026-10-06)
+
+
+### Features
+
+* **ai:** one combined pull-request comment for a target's reviewers ([#702](https://github.com/zuke-build/zuke/issues/702)) ([adcfeb8](https://github.com/zuke-build/zuke/commit/adcfeb846c9e5f095b00124abaead2308e1093c8))
+
+## [1.64.0](https://github.com/zuke-build/zuke/compare/core-v1.63.0...core-v1.64.0) (2026-10-05)
+
+
+### Features
+
+* **ai:** add progress reactions on pull requests ([#693](https://github.com/zuke-build/zuke/issues/693)) ([949cb79](https://github.com/zuke-build/zuke/commit/949cb7970a73f56e3d1ba0d30c204ec88c9eddee))
+
+## [1.63.0](https://github.com/zuke-build/zuke/compare/core-v1.62.0...core-v1.63.0) (2026-10-05)
+
+
+### Features
+
+* **core:** export one hardened URL redactor every package can share ([#690](https://github.com/zuke-build/zuke/issues/690)) ([549ac27](https://github.com/zuke-build/zuke/commit/549ac272e050e5b5666f68c57a9d9bfb605fcd8f))
+
+## [1.62.0](https://github.com/zuke-build/zuke/compare/core-v1.61.0...core-v1.62.0) (2026-10-05)
+
+
+### Features
+
+* **core:** run-held locks and in-flight validations ([#685](https://github.com/zuke-build/zuke/issues/685)) ([f71f838](https://github.com/zuke-build/zuke/commit/f71f83835940bce6e5ead223c2f9dc3496cde7b4))
+
+## [1.61.0](https://github.com/zuke-build/zuke/compare/core-v1.60.1...core-v1.61.0) (2026-10-01)
+
+
+### Features
+
+* **core:** add .onFailure() to cancel runs on target failure ([#680](https://github.com/zuke-build/zuke/issues/680)) ([2c0c14d](https://github.com/zuke-build/zuke/commit/2c0c14dd98a825ea0be5545f82d0a7fdbc1525a8))
+
+## [1.60.1](https://github.com/zuke-build/zuke/compare/core-v1.60.0...core-v1.60.1) (2026-09-30)
+
+
+### Bug Fixes
+
+* **core:** sort targets alphabetically in --help and --list ([#670](https://github.com/zuke-build/zuke/issues/670)) ([4a02089](https://github.com/zuke-build/zuke/commit/4a020891df9fa6030764038b85ad13619fb76fa5))
+
+## [1.60.0](https://github.com/zuke-build/zuke/compare/core-v1.59.0...core-v1.60.0) (2026-09-21)
+
+
+### Features
+
+* **core:** resolve doc specs by one rule, and answer --version on the build ([#660](https://github.com/zuke-build/zuke/issues/660)) ([de5af3f](https://github.com/zuke-build/zuke/commit/de5af3f7c2204aafd075ce0be63187d439bb2b77))
+
+## [1.59.0](https://github.com/zuke-build/zuke/compare/core-v1.58.0...core-v1.59.0) (2026-09-21)
+
+
+### Features
+
+* **cli:** group the help, move detail behind per-command help, merge both surfaces ([#649](https://github.com/zuke-build/zuke/issues/649)) ([50987ff](https://github.com/zuke-build/zuke/commit/50987ff8b3a64fee4efa576e6f211732e1d917a7))
+* **core:** add `outdated --update` to bump the versions the lock resolves ([#645](https://github.com/zuke-build/zuke/issues/645)) ([56c9d39](https://github.com/zuke-build/zuke/commit/56c9d39a8ff08ace7c8758532c3eda5f251d5516))
+
+## [1.58.0](https://github.com/zuke-build/zuke/compare/core-v1.57.0...core-v1.58.0) (2026-09-21)
+
+
+### Features
+
+* **core:** export the default env reader, and drop console's wordmark copy ([#643](https://github.com/zuke-build/zuke/issues/643)) ([0b67f33](https://github.com/zuke-build/zuke/commit/0b67f335f444fc52291b9abddcd571726d5c7c56)), closes [#639](https://github.com/zuke-build/zuke/issues/639)
+
+## [1.57.0](https://github.com/zuke-build/zuke/compare/core-v1.56.0...core-v1.57.0) (2026-09-21)
+
+
+### Features
+
+* **ai:** remember refutations, adjudicate dropped findings, answer rebuttals on command ([#629](https://github.com/zuke-build/zuke/issues/629)) ([f63dd63](https://github.com/zuke-build/zuke/commit/f63dd6387f8a2b470e2f43572ecfb132028a4f89))
+* **core:** open every run with a version and platform banner ([#630](https://github.com/zuke-build/zuke/issues/630)) ([5917780](https://github.com/zuke-build/zuke/commit/59177807f1bb5cb3d211622f9987761b6cae6899))
+
+
+### Bug Fixes
+
+* **core:** widen the version constant so a bump cannot stale the API docs ([#635](https://github.com/zuke-build/zuke/issues/635)) ([fdefeeb](https://github.com/zuke-build/zuke/commit/fdefeeb2fa3c95a211006be6f6adca9f09303305)), closes [#633](https://github.com/zuke-build/zuke/issues/633)
+
 ## [1.56.0](https://github.com/zuke-build/zuke/compare/core-v1.55.1...core-v1.56.0) (2026-09-17)
 
 

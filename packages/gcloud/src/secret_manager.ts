@@ -7,7 +7,7 @@
  * {@link "./auth.ts".AccessTokenProvider} (default: `gcloud auth print-access-token`).
  *
  * ```ts
- * import { SecretManagerTasks } from "jsr:@zuke/gcloud";
+ * import { SecretManagerTasks } from "@zuke/gcloud";
  *
  * // Create-if-absent, then add a version (idempotent, write-before-create):
  * await SecretManagerTasks.addVersion("db-password", secret, { project: "p" });
@@ -21,6 +21,7 @@
  */
 
 import { type AccessTokenProvider, resolveAccessToken } from "./auth.ts";
+import { resolveProject } from "./project.ts";
 import { gcpJson, isRecord, readString } from "./rest.ts";
 
 /** The Secret Manager v1 API root (overridable only via the `fetch` seam in tests). */
@@ -49,26 +50,9 @@ export interface SecretManagerAccessOptions extends SecretManagerOptions {
   version?: string;
 }
 
-/** Read an environment variable, treating missing env access as unset. */
-function defaultReadEnv(name: string): string | undefined {
-  try {
-    return Deno.env.get(name);
-  } catch {
-    return undefined;
-  }
-}
-
 /** Resolve the target project from the option or the standard gcloud env vars. */
-function resolveProject(options: SecretManagerOptions): string {
-  if (options.project !== undefined) return options.project;
-  const readEnv = options.readEnv ?? defaultReadEnv;
-  const project = readEnv("GOOGLE_CLOUD_PROJECT") ?? readEnv("GCLOUD_PROJECT");
-  if (project === undefined || project === "") {
-    throw new Error(
-      "secret manager: no project — pass { project } or set GOOGLE_CLOUD_PROJECT.",
-    );
-  }
-  return project;
+function projectOf(options: SecretManagerOptions): string {
+  return resolveProject(options, "secret manager", "pass { project }");
 }
 
 /** Base64-encode a UTF-8 string (the payload wire format), dependency-free. */
@@ -117,7 +101,7 @@ export const SecretManagerTasks: SecretManagerTasksApi = {
     name: string,
     options: SecretManagerAccessOptions = {},
   ): Promise<string> {
-    const project = resolveProject(options);
+    const project = projectOf(options);
     const token = await resolveAccessToken(options);
     const version = options.version ?? "latest";
     const url = `${SECRET_MANAGER_BASE}/projects/${
@@ -150,7 +134,7 @@ export const SecretManagerTasks: SecretManagerTasksApi = {
     value: string,
     options: SecretManagerOptions = {},
   ): Promise<string> {
-    const project = resolveProject(options);
+    const project = projectOf(options);
     const token = await resolveAccessToken(options);
     const rest = { token, fetch: options.fetch };
     const projectPath = `${SECRET_MANAGER_BASE}/projects/${

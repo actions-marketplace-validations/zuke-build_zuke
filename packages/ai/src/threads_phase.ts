@@ -34,6 +34,18 @@ import {
 export interface ThreadPhaseSettings {
   /** The reviewer's diagnostic name — also the seed for its thread markers. */
   readonly name: string;
+  /**
+   * The reviewer as a thread root names it — its badge and name, e.g.
+   * `🛡️ security review` — so a reader tells apart the threads several
+   * reviewers opened on one pull request.
+   */
+  readonly label: string;
+  /**
+   * The mention maintainers address commands to, when the reviewer takes
+   * them — named in each thread root so the `accept` command is one reply
+   * away.
+   */
+  readonly mention?: string;
   /** Whether `.quiet()` is set: no console notes when it is. */
   readonly quiet: boolean;
   /** The reviewer's environment reader, for host detection. */
@@ -159,7 +171,9 @@ export async function postThreads(
       // Masked once, before the branch: opening a thread and replying into one
       // publish the same text to the same pull request, so redacting at each
       // call separately would be two places to forget instead of one.
-      const body = settings.redact(threadBody(nameHash, action));
+      const body = settings.redact(
+        threadBody(nameHash, action, settings),
+      );
       const result = action.kind === "reply"
         ? await context.ops.reply(doFetch, action.rootId ?? 0, body)
         : sha === undefined || action.anchor === undefined
@@ -194,20 +208,21 @@ export async function postThreads(
     // Resolution last, and only after its outcome reply landed: a collapsed
     // thread with no explanation is worse than one left open.
     if (!stopped && plan.resolve.length > 0) {
-      const done = await context.ops.setResolved(
+      const { done, reason } = await context.ops.setResolved(
         doFetch,
         plan.resolve.map((target) => target.rootId),
         true,
       );
       if (done < plan.resolve.length) {
         notes.push(
-          `could not resolve ${plan.resolve.length - done} review thread(s) ` +
-            `— the outcome was still posted in the thread`,
+          `could not resolve ${plan.resolve.length - done} review thread(s)` +
+            `${because(reason)} — the outcome was still posted in the thread`,
         );
+        warnResolution(settings, "resolve", reason);
       }
     }
     if (!stopped && plan.unresolve.length > 0) {
-      const done = await context.ops.setResolved(
+      const { done, reason } = await context.ops.setResolved(
         doFetch,
         plan.unresolve.map((target) => target.rootId),
         false,
@@ -217,9 +232,10 @@ export async function postThreads(
         // outcome to shout about, so it names the ids.
         notes.push(
           `could not reopen the review thread(s) for ` +
-            `${listIds(plan.unresolve.map((t) => t.id))} — the finding is ` +
-            `reported in the table above and still gates`,
+            `${listIds(plan.unresolve.map((t) => t.id))}${because(reason)} ` +
+            `— the finding is reported in the table above and still gates`,
         );
+        warnResolution(settings, "reopen", reason);
       }
     }
   } catch (error) {
@@ -232,10 +248,44 @@ export async function postThreads(
   return notes;
 }
 
+/**
+ * The host's reason for a failed resolution, as a parenthetical for a note —
+ * empty when the host gave none. The reason is host output: the note it lands
+ * in is rendered through the report's cell escaping like every other note.
+ */
+function because(reason: string | undefined): string {
+  return reason === undefined ? "" : ` (${reason})`;
+}
+
+/**
+ * Say on the console why threads could not be resolved or reopened, so the
+ * job log carries the host's answer next to the report's note. A refusal that
+ * repeats on every run is a configuration problem — a token the host will not
+ * let resolve threads — and the log is where whoever configures the workflow
+ * looks first.
+ */
+function warnResolution(
+  settings: ThreadPhaseSettings,
+  verb: "resolve" | "reopen",
+  reason: string | undefined,
+): void {
+  if (settings.quiet) return;
+  console.warn(
+    `[${settings.name}] could not ${verb} review thread(s): ` +
+      `${reason ?? "the host gave no reason"}`,
+  );
+}
+
 /** The body of a thread root or outcome reply, with its marker leading. */
-function threadBody(nameHash: string, action: ThreadAction): string {
+function threadBody(
+  nameHash: string,
+  action: ThreadAction,
+  settings: Pick<ThreadPhaseSettings, "label" | "mention">,
+): string {
   if (action.kind === "open") {
-    return `${findingMarker(nameHash, action.id)}\n${threadRootBody(action)}`;
+    return `${findingMarker(nameHash, action.id)}\n${
+      threadRootBody(action, settings.label, settings.mention)
+    }`;
   }
   const outcome = action.outcome ?? "upheld";
   return `${outcomeMarker(nameHash, action.id, outcome)}\n${

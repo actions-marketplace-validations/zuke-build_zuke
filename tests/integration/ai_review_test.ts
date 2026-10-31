@@ -16,10 +16,12 @@ import { Build, target } from "../../packages/core/mod.ts";
 import { securityReviewer } from "../../packages/ai/mod.ts";
 import { findingFingerprint } from "../../packages/ai/src/suppress.ts";
 import { decodeState, encodeState } from "../../packages/ai/src/state.ts";
+import { sha256Hex } from "../../packages/core/mod.ts";
 import { SUPPRESS_HINT } from "../../packages/ai/src/report.ts";
 import { commentMarker } from "../../packages/ai/src/hosts/types.ts";
 import { runCli } from "./_harness.ts";
 import { withEnv } from "../../packages/core/tests/_env.ts";
+import { reacted, REACTIONS } from "../../packages/ai/tests/_reactions.ts";
 
 const DIFF = "diff --git a/src/app.ts b/src/app.ts\n" +
   "--- a/src/app.ts\n+++ b/src/app.ts\n@@\n+const x = eval(input);\n";
@@ -66,6 +68,7 @@ function fakeFetch(
   let served = 0;
   const impl = ((input: string | URL | Request, init?: RequestInit) => {
     const url = String(input);
+    if (REACTIONS.test(url)) return reacted();
     const method = init?.method ?? "GET";
     calls.push({
       url,
@@ -412,6 +415,7 @@ Deno.test("the discussion drives a real build on GitLab, not just GitHub", async
   const calls: Call[] = [];
   const doFetch = ((input: string | URL | Request, init?: RequestInit) => {
     const url = String(input);
+    if (REACTIONS.test(url)) return reacted();
     const method = init?.method ?? "GET";
     calls.push({
       url,
@@ -658,4 +662,236 @@ Deno.test("a maintainer's comment reviews a pull request that is not checked out
     "https://api.github.com/repos/zuke-build/zuke/issues/7/comments",
   );
   assertEquals(write?.authorization, "Bearer minted-app-token");
+});
+
+Deno.test("a refuted finding stays refuted across CLI runs without a second verifier call", async () => {
+  // The previous run's verifier refuted FINDING against this very diff; the
+  // model raises it again. Driven through the CLI: the build passes, no
+  // verifier is paid for, the report labels the refutation as standing, and
+  // the state carries it forward unchanged for the run after this one.
+  const evidence = await sha256Hex(`${DIFF.trim()}\n`);
+  const priorBody = `${MARKER}\nround 1\n${
+    encodeState({
+      findings: [{
+        id: ID,
+        title: FINDING.title,
+        severity: "high",
+        status: "refuted",
+        file: FINDING.file,
+        rationale: "eval runs in a sandboxed worker",
+        evidence,
+      }],
+    })
+  }`;
+  const comments = [{
+    id: 3,
+    body: priorBody,
+    user: { login: "github-actions[bot]", type: "Bot" },
+    author_association: "NONE",
+  }];
+  const { fetch, calls } = fakeFetch(comments, [
+    claude({ score: 8, severity: "high", findings: [FINDING] }),
+  ]);
+  class Pipeline extends Build {
+    review = securityReviewer((r) =>
+      r.provider("claude").apiKey("test-key")
+        .comment("append").discussion().verify()
+        .diff((d) => d.text(DIFF))
+        .fetch(fetch)
+    );
+    deploy = target()
+      .validateBefore(this.review)
+      .executes(() => Promise.resolve());
+  }
+  await withEnv(
+    {
+      GITHUB_ACTIONS: "true",
+      GITHUB_REPOSITORY: "zuke-build/zuke",
+      GITHUB_REF: "refs/pull/7/merge",
+      GITHUB_TOKEN: "tkn",
+      GITHUB_STEP_SUMMARY: undefined,
+    },
+    async () => {
+      const result = await runCli(Pipeline, ["deploy"]);
+      assertEquals(result.code, 0);
+      assertStringIncludes(
+        result.out,
+        "refuted by verify (earlier round): Eval of user input — eval runs in a sandboxed worker",
+      );
+    },
+  );
+  const providerCalls = calls.filter((c) =>
+    !c.url.startsWith("https://api.github.com/")
+  );
+  assertEquals(providerCalls.length, 1);
+  const write = calls.find((c) =>
+    c.url.startsWith("https://api.github.com/") && c.method === "POST"
+  );
+  const posted = JSON.parse(write?.body ?? "{}").body;
+  assertStringIncludes(posted, "_(earlier round, input unchanged)_");
+  const stored = decodeState(posted)?.findings[0];
+  assertEquals(stored?.status, "refuted");
+  assertEquals(stored?.evidence, evidence);
+});
+
+Deno.test("one rebuttal answers a cross-file, higher-severity restatement through the CLI", async () => {
+  // Round one left a low finding open on src/app.ts and the maintainer
+  // contested it by quoting its id. This round the model drops that wording
+  // and reports the same concern as critical on another file of the change.
+  // The restatement must land on the contested identity, so the rebuttal is
+  // weighed once and the build passes — the loop #637 describes, closed.
+  const restated = {
+    title: "The loader hands unsanitised input to a dynamic evaluator",
+    severity: "critical",
+    file: "src/load.ts",
+  };
+  const restatedId = findingFingerprint("security", {
+    title: restated.title,
+    severity: "critical",
+    file: restated.file,
+  });
+  const priorBody = `${MARKER}\nround 1\n${
+    encodeState({
+      findings: [{
+        id: ID,
+        title: FINDING.title,
+        severity: "low",
+        status: "open",
+        file: FINDING.file,
+      }],
+    })
+  }`;
+  const comments = [
+    {
+      id: 21,
+      body: priorBody,
+      user: { login: "github-actions[bot]", type: "Bot" },
+      author_association: "NONE",
+    },
+    {
+      id: 22,
+      body: `${ID} — the input is validated in validate() before it gets here.`,
+      user: { login: "maintainer", type: "User" },
+      author_association: "MEMBER",
+    },
+  ];
+  const { fetch, calls } = fakeFetch(comments, [
+    claude({ score: 10, severity: "critical", findings: [restated] }),
+    claude({ verdicts: [{ id: "p1", verdict: "same", reason: "same eval" }] }),
+    claude({
+      verdicts: [{
+        id: ID,
+        verdict: "dismissed",
+        reason: "validated upstream",
+      }],
+    }),
+  ]);
+  const executed: string[] = [];
+  class Pipeline extends Build {
+    review = securityReviewer((r) =>
+      r.provider("claude").apiKey("test-key")
+        .comment().discussion()
+        .diff((d) => d.text(DIFF))
+        .fetch(fetch)
+    );
+    deploy = target()
+      .validateBefore(this.review)
+      .executes(() => {
+        executed.push("deploy");
+        return Promise.resolve();
+      });
+  }
+  await withEnv(
+    {
+      GITHUB_ACTIONS: "true",
+      GITHUB_REPOSITORY: "zuke-build/zuke",
+      GITHUB_REF: "refs/pull/7/merge",
+      GITHUB_TOKEN: "tkn",
+      GITHUB_STEP_SUMMARY: undefined,
+    },
+    async () => {
+      const result = await runCli(Pipeline, ["deploy"]);
+      assertEquals(result.code, 0);
+      assertEquals(executed, ["deploy"]);
+      assertStringIncludes(
+        result.out,
+        "dismissed via discussion by maintainer",
+      );
+      assertStringIncludes(result.out, "validated upstream");
+    },
+  );
+  // The dedup pass was asked across the two files, and the one identity
+  // carries the restatement as its alias, dismissed.
+  const providerCalls = calls.filter((c) =>
+    !c.url.startsWith("https://api.github.com/")
+  );
+  assertEquals(providerCalls.length, 3);
+  assertStringIncludes(
+    JSON.parse(providerCalls[1].body).messages[0].content,
+    "the new finding names src/load.ts, the earlier one src/app.ts",
+  );
+  const write = calls.find((c) =>
+    c.url.startsWith("https://api.github.com/") && c.method !== "GET"
+  );
+  const state = decodeState(JSON.parse(write?.body ?? "{}").body);
+  assertEquals(state?.findings.length, 1);
+  assertEquals(state?.findings[0].id, ID);
+  assertEquals(state?.findings[0].status, "dismissed");
+  assertEquals(state?.findings[0].aliases, [restatedId]);
+});
+
+Deno.test("a maintainer's accept command passes the build through the CLI, with the Commands panel posted", async () => {
+  const comments = [{
+    id: 31,
+    body:
+      `@zuke-build accept ${ID}: by design, eval runs in a sandboxed worker`,
+    user: { login: "maintainer", type: "User" },
+    author_association: "MEMBER",
+  }];
+  const { fetch, calls } = fakeFetch(comments, [
+    claude({ score: 9, severity: "high", findings: [FINDING] }),
+  ]);
+  class Pipeline extends Build {
+    review = securityReviewer((r) =>
+      r.provider("claude").apiKey("test-key")
+        .comment().discussion((d) => d.commands("@zuke-build"))
+        .diff((d) => d.text(DIFF))
+        .fetch(fetch)
+    );
+    deploy = target()
+      .validateBefore(this.review)
+      .executes(() => Promise.resolve());
+  }
+  await withEnv(
+    {
+      GITHUB_ACTIONS: "true",
+      GITHUB_REPOSITORY: "zuke-build/zuke",
+      GITHUB_REF: "refs/pull/7/merge",
+      GITHUB_TOKEN: "tkn",
+      GITHUB_STEP_SUMMARY: undefined,
+    },
+    async () => {
+      const result = await runCli(Pipeline, ["deploy"]);
+      assertEquals(result.code, 0);
+      assertStringIncludes(
+        result.out,
+        "accepted by maintainer: Eval of user input — by design, eval runs " +
+          "in a sandboxed worker",
+      );
+    },
+  );
+  // No adjudication was paid for: the assessment was the only provider call.
+  assertEquals(
+    calls.filter((c) => !c.url.startsWith("https://api.github.com/")).length,
+    1,
+  );
+  const write = calls.find((c) =>
+    c.url.startsWith("https://api.github.com/") && c.method !== "GET"
+  );
+  const posted = JSON.parse(write?.body ?? "{}").body;
+  assertStringIncludes(posted, "**Accepted by a maintainer (not gating):**");
+  assertStringIncludes(posted, "<details><summary>Commands</summary>");
+  assertStringIncludes(posted, "`@zuke-build accept <id> <reason>`");
+  assertEquals(decodeState(posted)?.findings[0].status, "accepted");
+  assertEquals(decodeState(posted)?.findings[0].author, "maintainer");
 });

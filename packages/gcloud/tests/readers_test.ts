@@ -27,14 +27,14 @@ Deno.test("readScalar returns the single line gcloud printed", () => {
     maxCapturedBytes: 8388608,
   };
   assertEquals(
-    readScalar(ok, "runServiceUrl", "service URL"),
+    readScalar(ok, "GcloudTasks.runServiceUrl", "service URL"),
     "https://api-abc.a.run.app",
   );
   // Surrounding whitespace is gcloud's line terminator, not part of the value.
   assertEquals(
     readScalar(
       { ...ok, stdout: "  ya29.token  \n\n" },
-      "accessToken",
+      "GcloudTasks.accessToken",
       "access token",
     ),
     "ya29.token",
@@ -49,7 +49,7 @@ Deno.test("readScalar refuses an empty answer rather than returning one", () => 
     () =>
       readScalar(
         { stdout: "\n", truncated: false, maxCapturedBytes: 8388608 },
-        "configValue",
+        "GcloudTasks.configValue",
         "configured value",
       ),
     Error,
@@ -65,7 +65,7 @@ Deno.test("readScalar refuses a truncated capture", () => {
     () =>
       readScalar(
         { stdout: "token", truncated: true, maxCapturedBytes: 1024 },
-        "accessToken",
+        "GcloudTasks.accessToken",
         "access token",
       ),
     Error,
@@ -223,6 +223,26 @@ const REACH: Array<[string, () => Promise<unknown>]> = [
     "secretValue",
     () => GcloudTasks.secretValue((s) => missingTool(s).secret("k")),
   ],
+  ["loggingRead", () => GcloudTasks.loggingRead((s) => missingTool(s))],
+  ["logEntryCount", () => GcloudTasks.logEntryCount((s) => missingTool(s))],
+  ["loggingLogsList", () => GcloudTasks.loggingLogsList((s) => missingTool(s))],
+  [
+    "monitoringPoliciesList",
+    () => GcloudTasks.monitoringPoliciesList((s) => missingTool(s)),
+  ],
+  [
+    "monitoringPoliciesDescribe",
+    () =>
+      GcloudTasks.monitoringPoliciesDescribe((s) => missingTool(s).policy("1")),
+  ],
+  [
+    "monitoringDashboardsList",
+    () => GcloudTasks.monitoringDashboardsList((s) => missingTool(s)),
+  ],
+  [
+    "monitoringUptimeListConfigs",
+    () => GcloudTasks.monitoringUptimeListConfigs((s) => missingTool(s)),
+  ],
 ];
 
 for (const [name, invoke] of REACH) {
@@ -260,7 +280,7 @@ Deno.test("readScalar refuses output that is not one value", () => {
           truncated: false,
           maxCapturedBytes: 8388608,
         },
-        "runServiceUrl",
+        "GcloudTasks.runServiceUrl",
         "service URL",
       ),
     Error,
@@ -275,7 +295,7 @@ Deno.test("readScalar refuses output that is not one value", () => {
         truncated: false,
         maxCapturedBytes: 8,
       },
-      "runServiceUrl",
+      "GcloudTasks.runServiceUrl",
       "service URL",
     ),
     "https://a.run.app",

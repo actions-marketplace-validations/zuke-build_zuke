@@ -5,7 +5,7 @@ TypeScript classes; each target is a field wired to others by reference, forming
 a dependency graph that Zuke sorts and runs.
 
 ```ts
-import { Build, run, target } from "jsr:@zuke/core";
+import { Build, run, target } from "@zuke/core";
 
 class MyBuild extends Build {
   hello = target()
@@ -41,7 +41,7 @@ an incoming webhook or, in bot mode (`.bot().token(t).channel(c)`), through the
 platform's API.
 
 ```ts
-import { AnnounceTasks } from "jsr:@zuke/core";
+import { AnnounceTasks } from "@zuke/core";
 
 await AnnounceTasks.slack((s) =>
   s.webhook(slackWebhookUrl)
@@ -72,8 +72,8 @@ the {@link target} fluent builder, and make the file runnable with
 {@link run}:
 
 ```ts
-import { Build, target, run } from "jsr:@zuke/core";
-import { $ } from "jsr:@zuke/core/shell";
+import { Build, target, run } from "@zuke/core";
+import { $ } from "@zuke/core/shell";
 
 class MyBuild extends Build {
   test = target()
@@ -141,9 +141,10 @@ function appendJobSummary(markdown: string): boolean
   that produced it — the build's own result is the signal that matters.
 
 async function archiveOutputs(outputs: readonly string[], host: OutputHost): Promise<Uint8Array>
-  Archive a target's `outputs` into a gzipped tar of their current contents.
-  A declared output that does not exist is skipped, as is anything under a
-  `.git` or `.zuke` directory.
+  Archive a target's `outputs` into a gzipped tar of their current contents,
+  each file with its permission bits so a binary restores executable. A
+  declared output that does not exist is skipped, as is anything under a
+  `.git` or `.zuke` directory, other than `.zuke/tools` and whatever it holds.
 
 function assert(condition: unknown, message: string): asserts condition
   Assert that `condition` is truthy, narrowing it for the rest of the scope.
@@ -174,6 +175,48 @@ function assertSafeLinkTarget(entryName: string, target: string): void
   extraction root once resolved against the link's own directory. A file entry's
   name is bounded by {@link assertSafeEntryName}; a symlink adds a second escape
   vector (its target), so a poisoned tarball can't plant `bin/x -> ../../etc`.
+
+  A `..` is allowed only before the target's first name: after a name, that
+  name may itself be a symlink, and `..` would climb from wherever it points —
+  so a chain such as `up -> ..` then `p -> up/..` could reach outside the root
+  while every target looked bounded. An empty target, or one holding a NUL, is
+  refused too.
+
+function assertSecureBackendUrl(raw: string, what: string, readEnv: (name: string) => string | undefined): void
+  Refuse a plaintext URL for a backend Zuke both authenticates to and trusts
+  the answers from — the state service, the build registry, and the remote
+  cache.
+
+  Confidentiality is the obvious half: a bearer token sent over `http:` is
+  readable by anyone on the path, and that token can forge run records, the
+  audit trail, and the cross-run locks two deploys rely on being exclusive.
+
+  Integrity is the half that matters more, and it does not need a token at
+  all. A registry descriptor is a launch command the MCP host will spawn, and a
+  cache artifact is a file tree restored into the workspace — so an on-path
+  attacker who can answer a plaintext request reaches code execution without
+  stealing anything. That is why this refuses `http:` whether or not a
+  credential is configured.
+
+  Loopback is exempt: there is no path to sit on, and a local dev service on
+  `http://localhost` is the ordinary way to work on one. A deliberate plaintext
+  endpoint elsewhere is still reachable by setting {@link ALLOW_INSECURE_ENV},
+  which is an explicit decision rather than a silent default.
+
+  This guards the environment path — the `ZUKE_*_URL` variables, which are
+  set by whoever configures the CI job or the shell. Constructing a store in
+  code (`new HttpStateStore({ url })`, a `stateStore()` override) is deliberately
+  left alone: that URL is first-party source in the build file, so writing it is
+  itself the trust decision, and a build author who means to talk plaintext to a
+  service on their own network should not have to also set an env var.
+
+  Exported so a package that sends a credential to a service it reads answers
+  from applies this same rule rather than a second loopback check of its own:
+  `@zuke/prometheus` runs every URL that will carry a credential through it.
+
+  @throws {InsecureBackendUrlError}
+      naming the variable that relaxes it, when
+      `raw` is neither `https:` nor loopback and the opt-out is unset.
 
 function bearerChallenge(parts: BearerChallenge): string
   A `WWW-Authenticate: Bearer` challenge built from `parts`.
@@ -244,6 +287,11 @@ function defaultMcpAuthorize(identity: McpIdentity, call: McpCall): McpAuthoriza
   its owner would mean nobody could intervene. Documented, and overridable by
   `Build.mcpAuthorize`.
 
+function defaultReadEnv(name: string): string | undefined
+  Read an environment variable, tolerating a denied `--allow-env` permission by
+  returning `undefined` rather than throwing. The default env reader every
+  command uses when the caller doesn't inject one.
+
 function denoExecutable(standalone: boolean): string
   The executable that runs Deno here — what to spawn when a build needs `deno`
   itself, rather than a tool it installed.
@@ -261,7 +309,7 @@ function denoExecutable(standalone: boolean): string
   real Deno on `PATH`. `Deno.build.standalone` is what tells the two apart.
 
   ```ts
-  import { denoExecutable } from "jsr:@zuke/core";
+  import { denoExecutable } from "@zuke/core";
   const deno = new Deno.Command(denoExecutable(), { args: ["doc", "jsr:@zuke/core"] });
   ```
 
@@ -284,7 +332,7 @@ function describeCli(build: Build, options: DescribeCliOptions): CliDescription
   available to tooling and agents that introspect a build in code.
 
   ```ts
-  import { describeCli } from "jsr:@zuke/core";
+  import { describeCli } from "@zuke/core";
   const surface = describeCli(new MyBuild());
   console.log(surface.targets.map((t) => t.name));
   ```
@@ -336,7 +384,15 @@ function envCacheStore(readEnv: (name: string) => string | undefined): RemoteCac
   Resolve a {@link RemoteCacheStore} from the environment, or `undefined` when
   none is configured. `ZUKE_REMOTE_CACHE_URL` (with an optional
   `ZUKE_REMOTE_CACHE_TOKEN`) selects an {@link HttpCacheStore}; otherwise
-  `ZUKE_REMOTE_CACHE_DIR` selects a {@link FileSystemCacheStore}.
+  `ZUKE_REMOTE_CACHE_S3_URL` selects an {@link "./s3_cache.ts".S3CacheStore}
+  signed with `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` (and
+  `AWS_SESSION_TOKEN`) in `AWS_REGION` or `AWS_DEFAULT_REGION`; otherwise
+  `ZUKE_REMOTE_CACHE_DIR` selects a {@link FileSystemCacheStore}; otherwise,
+  on a GitHub Actions job that exposes its `ACTIONS_RUNTIME_TOKEN` and
+  `ACTIONS_RESULTS_URL` (the `actions-cache` input of the `zuke-build/zuke`
+  action), a {@link "./github_actions_cache.ts".GitHubActionsCacheStore}.
+  Whichever is chosen takes `ZUKE_REMOTE_CACHE_MAX_INFLATED_BYTES`, when set,
+  as its {@link RemoteCacheStore.maxInflatedBytes}.
 
 function envStateStore(readEnv: (name: string) => string | undefined, host: StateHost): StateStore | undefined
   Resolve a {@link StateStore} from the environment, or `undefined` when none is
@@ -380,6 +436,15 @@ async function extractTarGzip(src: PathLike, destDir: PathLike, options: Extract
   `destDir` (creating parent directories as needed). Symlink entries are
   recreated as symlinks and directory entries as directories; pass
   {@link ExtractOptions.strip} to drop leading path components.
+
+async function extractTarXz(src: PathLike, destDir: PathLike, options: ExtractOptions): Promise<void>
+  Read the `.tar.xz` at `src`, decompress and unpack it, and write each entry
+  under `destDir` exactly as {@link extractTarGzip} does — the same symlink
+  handling, the same zip-slip guards, the same {@link ExtractOptions.strip}.
+  The system `xz` decompresses when one is on `PATH`, several times faster
+  than the built-in decoder this falls back to, which covers the single LZMA2
+  filter chain `xz` writes by default and verifies each block's check. Either
+  way Zuke's own tar reader and guards unpack the result.
 
 async function extractZip(src: PathLike, destDir: PathLike, options: ExtractOptions): Promise<void>
   Read the `.zip` at `src`, unpack it, and write each entry under `destDir`
@@ -543,8 +608,9 @@ async function installTree(options: InstallTreeOptions): Promise<AbsolutePath>
 
   Because {@link AbsolutePath} is callable, the root doubles as an accessor:
   `root("bin", "node")` is the node binary and `root("bin")` is the directory to
-  put on `PATH` (with `prependPath`). Declared {@link InstallTreeOptions.bins}
-  are marked executable on POSIX. With a {@link InstallTreeOptions.checksum} the
+  put on `PATH` (with `prependPath`). Files keep the archive's permission bits;
+  declared {@link InstallTreeOptions.bins} are also marked executable on POSIX,
+  as a fallback. With a {@link InstallTreeOptions.checksum} the
   archive is verified before unpacking and a matching prior install is reused.
 
 function isCI(env: (name: string) => string | undefined): boolean
@@ -572,6 +638,20 @@ function lockKey(...parts: Array<string | number>): string
   Join parts into a lock key that is safe to use as a filename and URL segment.
   Each part is sanitised (non-`[A-Za-z0-9._-]` runs become `_`) and empty parts
   are dropped, so `lockKey("deploy", repo)` is stable and injection-free.
+
+function lockedJsrSpecifiers(lockText: string): LockedSpecifier[]
+  The `jsr:` specifiers a lock resolves, in the order the lock lists them.
+
+  Tolerant by design: a lock whose shape is unfamiliar yields no entries
+  rather than throwing, because "I could not read your lock" is a worse answer
+  to `zuke outdated` than "nothing to report" only if it is silent — and the
+  caller distinguishes the two by the specifier count, not by an exception.
+
+function logoLines(color: boolean, options: LogoOptions): string[]
+  The logo as printable lines: the {@link ZUKE_LOGO} art painted two-tone when
+  `color` is on (letters bright, shadow dimmed), plus the optional tagline.
+  Pure — no I/O and no environment reads — so callers that manage their own
+  output (like the `zuke` CLI) can route the lines through any sink.
 
 function metadataDocument(settings: ProtectedResourceSettings): Record<string, unknown>
   The metadata document itself, as the JSON object RFC 9728 §2 defines.
@@ -601,7 +681,7 @@ function operatingSystem(os: typeof Deno.build.os): OperatingSystem
   {@link isCI}.
 
   ```ts
-  import { operatingSystem } from "jsr:@zuke/core";
+  import { operatingSystem } from "@zuke/core";
   if (operatingSystem() === "macos") { ... }
   ```
 
@@ -660,7 +740,7 @@ function protectedResource(resource: string): ProtectedResourceSettings
   this MCP endpoint (`https://build.example.com/mcp`).
 
   ```ts
-  import { Build, protectedResource } from "jsr:@zuke/core";
+  import { Build, protectedResource } from "@zuke/core";
 
   class CI extends Build {
     override mcpProtectedResource() {
@@ -671,6 +751,44 @@ function protectedResource(resource: string): ProtectedResourceSettings
     }
   }
   ```
+
+async function readBytesBounded(body: ReadableStream<Uint8Array> | null, limit: number): Promise<Uint8Array | null>
+  Read `body` into memory, or return `null` once it exceeds `limit` bytes.
+
+  Reads incrementally and abandons the stream at the cap, so an oversized
+  stream — a chunked HTTP body that declares no `content-length`, or a small
+  archive that decompresses to gigabytes — is never buffered whole just to be
+  rejected. A `null` body reads as empty.
+
+function redactUrl(raw: string): string
+  Strip userinfo (`user:pass@`) and mask every credential-bearing parameter so
+  a URL is safe to put in an error message or a log:
+
+  ```ts
+  redactUrl("https://ci:hunter2@host.example/x?token=abc&page=2");
+  // "https://host.example/x?token=REDACTED&page=2"
+  ```
+
+  Parameters are masked in the query and in the fragment, including
+  `;`-separated ones. A parameter whose value carries a credential of its own —
+  a `redirect_uri` with userinfo or a token, encoded up to three times, or any
+  value with an `@` in it — is masked whole, since only its whole value is
+  certain to hide it. Input the URL parser rejects is scrubbed by the same rules
+  textually rather than returned as it came: the function fails closed, never
+  throws, and costs time linear in its input.
+
+  A parsed URL is re-serialised, which can change its spelling (a lowercased
+  host, a percent-encoded path). Run a build's secret redactor over text
+  before this, while a declared secret still reads as written. See the
+  module documentation for what it does not recognise.
+
+function redactUrls(text: string): string
+  `text` with every URL in it passed through {@link redactUrl} — for a message
+  that quotes a URL, such as a failed request's error. A URL starts at its
+  scheme — `https://`, `postgres://`, `https:\\`, or a web scheme the URL
+  parser also reads without slashes (`https:host`) — and runs to the next URL
+  or whitespace, less any closing punctuation (`).,"`) the sentence put after
+  it. Everything outside a URL is left as written.
 
 function remoteCacheKey(name: string, fingerprint: string): string
   The store key for a target's outputs: its name and input `fingerprint`. The
@@ -739,6 +857,34 @@ function resolveBuildRegistry(option: BuildRegistry | false | undefined, declare
   fallback, then — only when {@link ResolveRegistryOptions.enableDefault} — a
   filesystem registry under `<root>/.zuke/builds`.
 
+function resolveDocSpec(spec: string, cwd: string): string
+  Resolve a `zuke doc` argument to the specifier `deno doc` is given.
+
+  `cwd` is the caller's working directory, taken as an argument rather than
+  read here: `deno doc` is run from an isolated empty directory, so a relative
+  path has to be made absolute while the caller's directory is still known,
+  and passing it keeps this function pure and testable without one.
+
+  Bare names gain the `@zuke` scope (`core` becomes `jsr:@zuke/core`) and a
+  scoped name gains only the scheme (`@scope/pkg` becomes `jsr:@scope/pkg`).
+  Anything that looks like a path — leading `.`, an embedded `/`, or a module
+  file extension — is joined to `cwd` instead, and a specifier that already
+  carries a URL scheme or is absolute is returned untouched.
+
+  A joined path comes back normalised, through {@link absolutePath}: the
+  `.` and `..` segments are resolved rather than carried into the specifier,
+  so `deno doc` is handed a canonical path and an error that echoes it names
+  a path the reader recognises. `cwd` must itself be absolute, which is what
+  makes that possible; {@link absolutePath} throws if it is not.
+
+function resolveOutputMode(options: OutputModeOptions): OutputMode
+  Decide how decorated output should be, from the explicit flags and the
+  environment. Pure apart from its two injectable reads.
+
+  What counts as a set variable is {@link envFlag}'s business, so
+  `ZUKE_PLAIN=false` and `ZUKE_PLAIN=0` mean "not plain". `NO_COLOR` follows its
+  own convention instead: any non-empty value turns colour off.
+
 function resolveRemoteStore(option: RemoteCacheStore | false | undefined, declared: RemoteCacheStore | undefined, readEnv: (name: string) => string | undefined): RemoteCacheStore | undefined
   Pick the remote store for a run by precedence: an explicit `option` wins
   (`false` disables the remote cache entirely), then a `declared` store (a
@@ -761,7 +907,8 @@ async function restoreOutputs(artifact: Uint8Array, host: OutputHost, outputs?: 
   leaves no half-written, partially-trusted output tree. An entry is refused
   when its name is absolute or escapes the workspace with `..`, when it is a
   symlink or directory entry (which {@link archiveOutputs} never produces),
-  when it lands under `.git` or `.zuke`, when — given `outputs` — it falls
+  when it lands under `.git` or `.zuke` (`.zuke/tools` aside), when — given
+  `outputs` — it falls
   outside the target's declared outputs, and when the path it would be written
   to passes through, or is, a symlink that already exists on disk.
 
@@ -775,7 +922,8 @@ async function restoreOutputs(artifact: Uint8Array, host: OutputHost, outputs?: 
 
   @param maxBytes
       The most the artifact may decompress to before it is refused,
-      defaulting to 2 GiB. The bound is applied while decompressing, so a small
+      defaulting to 2 GiB; the executor passes the store's
+      {@link RemoteCacheStore.maxInflatedBytes}. The bound is applied while decompressing, so a small
       archive that expands without limit is refused rather than buffered first.
       It is larger than the bound a store puts on the compressed bytes because
       outputs compress; both exist to stop memory exhaustion.
@@ -850,13 +998,62 @@ function service(): ServiceBuilder
   dependents execute. Configure it with {@link ServiceBuilder.start} /
   {@link ServiceBuilder.readyWhen} and depend on it from a {@link target}.
 
+async function sha256Hex(data: string | Uint8Array): Promise<string>
+  The SHA-256 digest of `data` — a UTF-8 string or raw bytes — as a lowercase
+  hex string.
+
+  Bytes are copied into a fresh `ArrayBuffer`-backed view so the digest input
+  type is unambiguous whatever buffer the source view sits on (e.g. a
+  `SharedArrayBuffer`).
+
+function signJwtEs256(privateKeyPem: string, claims: Readonly<Record<string, unknown>>, keyId?: string): Promise<string>
+  Sign `claims` as a compact ES256 JWT with a PEM P-256 private key in
+  PKCS#8 — `BEGIN PRIVATE KEY`, as an App Store Connect `AuthKey_<id>.p8`
+  holds it.
+
+  The header is `{"alg":"ES256","typ":"JWT"}`, plus `"kid"` when `keyId` is
+  given (App Store Connect requires it). The claims are serialised as given:
+  the caller sets `iat`, `exp` and the rest. The signature is the raw r‖s
+  pair ES256 requires.
+
+  ```ts
+  const jwt = await signJwtEs256(p8, { iss: issuerId, iat, exp: iat + 1200 }, keyId);
+  ```
+
+  @throws {Error}
+      naming the problem — an empty key, a body that is not
+      base64, or one that is not a P-256 key — and never quoting the key.
+
+function signJwtRs256(privateKeyPem: string, claims: Readonly<Record<string, unknown>>, keyId?: string): Promise<string>
+  Sign `claims` as a compact RS256 JWT with a PEM RSA private key —
+  `BEGIN RSA PRIVATE KEY` (PKCS#1) or `BEGIN PRIVATE KEY` (PKCS#8).
+
+  The header is `{"alg":"RS256","typ":"JWT"}`, plus `"kid"` when `keyId` is
+  given (a Google service-account key's `private_key_id`). The claims are
+  serialised as given: the caller sets `iat`, `exp` and the rest.
+
+  ```ts
+  const jwt = await signJwtRs256(pem, { iss: "1234", iat, exp: iat + 540 });
+  ```
+
+  @throws {Error}
+      naming the problem — an empty key, a body that is not
+      base64, or one that is not an RSA key — and never quoting the key.
+
+async function signSigV4(request: AwsSignableRequest, credentials: AwsCredentials, region: string, service: string, now: number): Promise<AwsSignature>
+  Sign `request` for `service` in `region` at the instant `now` (epoch ms).
+  Pure apart from WebCrypto: the same inputs give the same signature.
+
 async function syncCiFiles(files: readonly CiFile[], options: CiSyncOptions): Promise<CiSyncResult[]>
   Bring each declared {@link CiFile} on disk in line with its definition. By
   default a changed file is rewritten; in `check` mode it is reported `stale`
   instead (so CI can fail when the committed config has drifted).
 
 function tar(entries: TarEntry[]): Uint8Array
-  Create a `ustar` archive from the given entries (in order).
+  Create a `ustar` archive from the given entries (in order). A name or
+  symlink target past ustar's 100 bytes is carried by a pax extended header
+  (typeflag `'x'`) ahead of its member, which {@link untar} and every modern
+  `tar` read back.
 
 function target(): TargetBuilder
   Create a new, empty target builder.
@@ -897,18 +1094,38 @@ function untar(archive: Uint8Array): TarEntry[]
 async function unzip(archive: Uint8Array): Promise<TarEntry[]>
   Read the entries of a `.zip` archive, decompressing `stored` and `deflate`
   members. The central directory is the source of truth. Directory entries (a
-  trailing `/`) are skipped. Encrypted, zip64, or otherwise-compressed entries
+  trailing `/`) are skipped. An entry from a zip made on Unix keeps its
+  permission bits as `mode`, and a Unix symlink entry comes back with its
+  target as `linkname`, so {@link extractZip} recreates it. Encrypted, zip64, or otherwise-compressed entries
   throw a friendly error naming the offending entry, and a header or data field
   that runs past the archive is reported as a malformed zip (not a raw
   out-of-bounds error). Every offset read from the archive is bounds-checked;
   for integrity against a tampered download, pin a `.checksum(...)`, which is
   verified before the archive is ever parsed.
 
+function uriEncode(value: string): string
+  `value` percent-encoded per RFC 3986 (unreserved characters kept).
+
 function validateGraph(targets: Map<string, TargetBuilder>): void
   Validate the whole graph: unknown references first, then cycles.
 
   @throws {GraphError}
       with a descriptive message including the cycle path.
+
+async function zip(entries: TarEntry[]): Promise<Uint8Array>
+  Create a `.zip` archive from the given entries (in order), each deflated —
+  the writer {@link unzip} reads. Like {@link tar}, every entry carries a
+  fixed timestamp, so the bytes depend only on the entries.
+
+  Only regular files are written: an entry with a `linkname` throws, since
+  zip has no portable symlink, and `mode` is ignored, since zip extractors
+  do not agree on reading one. An archive that would need zip64 (an entry or
+  the archive past 4 GiB, or 65535 entries or more) throws too.
+
+const ALLOW_INSECURE_ENV: "ZUKE_ALLOW_INSECURE_URL"
+  The environment variable that opts a deployment out of {@link
+  assertSecureBackendUrl}'s `https:` requirement, for a plaintext endpoint on a
+  network the operator has decided to trust.
 
 const AnnounceTasks: AnnounceTasksApi
   Announcement task functions for posting build status to chat platforms.
@@ -947,6 +1164,12 @@ const INVALID_TOKEN: McpAuthReject
   `invalid_token` to a client that simply has not logged in tells it its stored
   token was rejected, which is a different and misleading thing.
 
+const NO_BANNER_ENV: "ZUKE_NO_BANNER"
+  The environment variable that turns off a run's opening banner.
+
+const PLAIN_ENV: "ZUKE_PLAIN"
+  The environment variable that asks for plain output.
+
 const REDACTED: "[redacted]"
   The placeholder a {@link Redactor} substitutes for each secret value.
 
@@ -978,9 +1201,30 @@ const UNAUTHORIZED: McpAuthReject
   and rejected gets {@link INVALID_TOKEN} instead: the two are different facts
   about the caller, and only the second one is about a credential.
 
+const VERSION: string
+  The `@zuke/core` version. Kept in sync with deno.json by release-please.
+
+  Annotated `string` rather than left to inference on purpose. Without the
+  annotation the declared type is the version itself, as a string literal
+  type, and `deno doc` records a declared type verbatim — so the version
+  would be baked into `llms-full.txt` and the package README. release-please
+  rewrites the marked line below when it cuts a release but cannot run
+  `deno doc`, so those generated files would drift on every bump and
+  `apiDocsCheck` would fail on the release PR itself. Widening keeps a
+  version bump a self-contained edit.
+
 const ZUKE_ACTION: "zuke-build/zuke"
   The name a {@link CiPinResolver} is asked for the prelude action, so a
   repository that pins its own actions can pin this one the same way.
+
+const ZUKE_LOGO: `███████╗██╗   ██╗██╗  ██╗███████╗
+╚══███╔╝██║   ██║██║ ██╔╝██╔════╝
+  ███╔╝ ██║   ██║█████╔╝ █████╗
+ ███╔╝  ██║   ██║██╔═██╗ ██╔══╝
+███████╗╚██████╔╝██║  ██╗███████╗
+╚══════╝ ╚═════╝ ╚═╝  ╚═╝╚══════╝`
+  The Zuke wordmark in FIGlet's ANSI-shadow style. Solid `█` blocks form the
+  letters; box-drawing characters draw the shadow.
 
 const cliReporter: Reporter
   The sink every command-surface module writes through, neutralised for a
@@ -1525,12 +1769,17 @@ class FileSystemBuildRegistry implements BuildRegistry
 class FileSystemCacheStore implements RemoteCacheStore
   A {@link RemoteCacheStore} backed by a shared or mounted directory.
 
-  constructor(dir: string)
+  constructor(dir: string, options: FileSystemCacheStoreOptions)
     Build the store over a directory.
 
     @param dir
         The directory archives are read from and written to.
 
+    @param options
+        The restore bound.
+
+  readonly maxInflatedBytes?: number
+    The most an artifact may decompress to; see {@link RemoteCacheStore.maxInflatedBytes}.
   get(key: string): Promise<Uint8Array | null>
     Fetch the archived outputs stored under `key`, or `null` if there are none.
   async put(key: string, artifact: Uint8Array): Promise<void>
@@ -1619,6 +1868,26 @@ class ForeignRunError extends Error
   override name: string
     The error name.
 
+class GitHubActionsCacheStore implements RemoteCacheStore
+  A {@link RemoteCacheStore} over the GitHub Actions cache service. A `get`
+  asks the service for the entry's signed download URL and fetches it; a `put`
+  reserves the entry, uploads the archive to the signed upload URL it is given,
+  and finalizes it. A key another job finalized first is left as it is: entries
+  are immutable, and both jobs built the same outputs from the same inputs.
+
+  Restores are subject to the Actions cache's own scoping — a run sees entries
+  written on its branch and on the default branch — and the service's eviction,
+  so a miss after a quiet week is normal and costs one rebuild.
+
+  constructor(options: GitHubActionsCacheStoreOptions)
+    Build the store from the service URL, the runtime token, and the `fetch` seam.
+  readonly maxInflatedBytes?: number
+    The most an artifact may decompress to; see {@link RemoteCacheStore.maxInflatedBytes}.
+  async get(key: string): Promise<Uint8Array | null>
+    Fetch the archived outputs stored under `key`, or `null` if there are none.
+  async put(key: string, artifact: Uint8Array): Promise<void>
+    Store `artifact` (a gzipped tar of a target's outputs) under `key`.
+
 class GraphError extends Error
   Raised when the build graph is invalid (cycle or unknown dependency).
 
@@ -1676,7 +1945,9 @@ class HttpCacheStore implements RemoteCacheStore
   decompresses to.
 
   constructor(options: HttpCacheStoreOptions)
-    Build the store from its URL, optional token, size cap, and `fetch` seam.
+    Build the store from its URL, optional token, size caps, and `fetch` seam.
+  readonly maxInflatedBytes?: number
+    The most an artifact may decompress to; see {@link RemoteCacheStore.maxInflatedBytes}.
   async get(key: string): Promise<Uint8Array | null>
     Fetch the archived outputs stored under `key`, or `null` if there are none.
   async put(key: string, artifact: Uint8Array): Promise<void>
@@ -1726,6 +1997,19 @@ class HttpStateStore implements StateStore
   async releaseLock(key: string, token: string): Promise<void>
     `DELETE /locks/:key` releases; a missing lock (`404`) is not an error.
 
+class InsecureBackendUrlError extends Error
+  Raised by {@link assertSecureBackendUrl} when a backend is configured with a
+  plaintext URL. A distinct type so the CLI can report it as the configuration
+  mistake it is — a named message and exit code 1 — rather than letting a stack
+  trace escape as if the build had crashed.
+
+  constructor(setting: string, message: string)
+    Build the error from the offending setting and the full explanation.
+  override name: string
+    The error name.
+  readonly setting: string
+    The environment variable (or setting) carrying the plaintext URL.
+
 class LockConflictError extends Error
   Raised when a target's lock is already held by another run. Its `message` is
   the rendered guidance (from the target's `onConflict`, else a default), so it
@@ -1755,6 +2039,8 @@ class LockSettings
     How long to wait for a held lock; set by {@link waitUpTo}.
   pollEvery_?: string | number
     How often to retry while waiting; set by {@link pollEvery}.
+  holdForRun_: boolean
+    Hold the lock until the run settles; set by {@link holdForRun}.
   lockKey(...parts: Array<string | number>): this
     Set the lock key from parts, sanitised and joined via
     {@link "./state/lock.ts".lockKey} — e.g. `s.lockKey("deploy", repo)`.
@@ -1785,6 +2071,30 @@ class LockSettings
     Render the guidance shown to a run that loses the lock. Receives the
     current {@link "./state/lock.ts".LockHolder}; the returned string becomes
     the failure message. Defaults to a generic "held by … then retry" line.
+  holdForRun(): this
+    Hold the lock for the rest of the run, not just while this target's
+    body runs: it is released when the run settles — succeeded, failed or
+    cancelled — and kept while the run is parked at a `.waitsFor(...)` gate.
+    Use it for a resource a whole multi-step run must own, such as one rollout
+    of a service at a time, where a target-scoped lock would free itself the
+    moment the first step ends.
+
+    The lock is recorded on the run record, so a resumed process renews it and
+    every path that settles the run releases it. While the run is parked no
+    process heartbeats it, so {@link withTtl} is how long a parked run keeps
+    the lock with no process touching it; each `zuke resume --check` that
+    re-parks the run renews it. A resume that finds the lock lapsed and taken
+    by another run refuses to continue and leaves the run suspended. A
+    `zuke cancel` of a run still working leaves the lock with that run's
+    process until its body stops, rather than freeing it beside a running
+    deploy.
+
+    Any later target in the same run declaring the same key — run-held or
+    not, sequentially or in parallel — reuses the held lock rather than
+    conflicting with the run itself. The lock is taken where a lock is: just
+    before the body, so a target the incremental cache skips, a `.waitsFor`
+    gate or a `.forEach` fan-out takes none — put it on a step that always
+    runs. Requires a state store, like any lock.
 
 class Parameter<K extends ParamValue = ParamValue, T extends K | K[] | undefined = K | undefined> implements AnyParameter
   A typed build parameter. Declare one with {@link parameter} and configure it
@@ -1971,6 +2281,26 @@ class RunNotSuspendedError extends Error
   override name: string
     The error name.
 
+class S3CacheStore implements RemoteCacheStore
+  A {@link RemoteCacheStore} over an S3-compatible bucket: the HTTP store's
+  `GET`/`PUT <url>/<key>`, each request carrying `x-amz-content-sha256` and
+  a SigV4 `Authorization` for the service `s3`.
+
+  A miss is a `404`, which S3 answers only to a caller allowed `s3:ListBucket`
+  on the bucket; without it a missing key is a `403`, reported as a lookup
+  failure (and a rebuild) rather than a miss. Grant `s3:GetObject`,
+  `s3:PutObject` and `s3:ListBucket`. Entries are never evicted by the store:
+  put a lifecycle rule on the prefix.
+
+  constructor(options: S3CacheStoreOptions)
+    Build the store from the bucket URL, region, credentials and seams.
+  readonly maxInflatedBytes?: number
+    The most an artifact may decompress to; see {@link RemoteCacheStore.maxInflatedBytes}.
+  get(key: string): Promise<Uint8Array | null>
+    Fetch the archived outputs stored under `key`, or `null` if there are none.
+  put(key: string, artifact: Uint8Array): Promise<void>
+    Store `artifact` (a gzipped tar of a target's outputs) under `key`.
+
 class SecretError extends Error
   Raised when a {@link SecretSource} cannot produce a value.
 
@@ -2107,6 +2437,8 @@ class TargetBuilder
     Validations run before the body (set by {@link validateBefore}).
   readonly validateAfter_: Validation[]
     Validations run after the body (set by {@link validateAfter}).
+  validateDuring_?: Configure<ValidateDuringSettings>
+    Validations run on an interval while the body runs (set by {@link validateDuring}).
   readonly recoverWith_: Remediation[]
     Remediations run after the body fails (set by {@link recoverWith}).
   recoverAttempts_: number
@@ -2119,6 +2451,8 @@ class TargetBuilder
     Fan-out spec, set by {@link forEach}: materialises per-item sub-target pipelines.
   onCancel_?: () => TargetBuilder
     Compensation thunk, set by {@link onCancel}: runs on cancel iff this target succeeded.
+  onFailure_?: OnFailure
+    Failure disposition thunk, set by {@link onFailure}: what this target's failure does to the run.
   description(text: string): this
     Set the human-readable description shown in `zuke --list`.
   dependsOn(...targets: Array<TargetBuilder | Group>): this
@@ -2307,6 +2641,27 @@ class TargetBuilder
     Run one or more {@link Validation}s after the target body completes
     successfully. Each runs in declaration order; the first to throw fails the
     target. Repeatable.
+  validateDuring(configure: Configure<ValidateDuringSettings>): this
+    Run {@link Validation}s on an interval while the body runs, so a long
+    body — a canary bake, a soak test — stops as soon as a check goes red
+    instead of reporting the failure at the end.
+
+    ```ts
+    bake = target()
+      .executes((ctx) => soak(ctx.signal))
+      .validateDuring((s) => s.every("1m").check(errorRate, healthProbe));
+    ```
+
+    Each round runs the checks in order with the context the other
+    validations get, the run's redactor included, plus a `signal` that aborts
+    when the target ends or the run is cancelled. The first check to throw
+    fails the target with its error: the body's `ctx.signal` fires and its
+    shell commands are stopped, and the target does not wait for a body that
+    ignores the signal. That failure is the target's failure like any other, so
+    `.onFailure(...)` sees it and retries do not repeat it. No round starts
+    once the body settles; after a body that succeeded, a round still running
+    is awaited and its verdict counts. The checks never run under a dry run. The lambda runs when
+    the target starts, so it may read `this.<param>.value`.
   recoverWith(...remediations: Remediation[]): this
     Attach one or more {@link Remediation}s that run only if the body fails.
     Each is given the failure; if any returns `{ retry: true }`, the executor
@@ -2389,6 +2744,44 @@ class TargetBuilder
     rollback = target()
       .executes((ctx) => tearDown(ctx.state.get().slot)); // reads deploy's meta
     ```
+  onFailure(disposition: OnFailure): this
+    Decide what this target's failure does to the run. By default
+    (`"fail"`) a failed target fails the run, and nothing is undone. With
+    `"cancel-run"` the failure cancels the run instead: every target that
+    had succeeded has its {@link onCancel} compensation run, in reverse order —
+    the same walk `zuke cancel`, Ctrl-C and a timed-out wait take. A thunk
+    returning a sibling target runs that target as a compensation first (its
+    `ctx.state` holds this target's persisted metadata), then cancels.
+
+    The disposition applies once retries and remediations are exhausted, to the
+    target's final failure. A run that is already being cancelled is not
+    cancelled twice, and in-flight siblings are stopped as on any cancellation.
+    A named target is an extra step before the walk, not a replacement: the
+    failed target itself is never compensated, so name a cleanup for its
+    partial work, not a predecessor's rollback (which would then run twice).
+
+    The thunk is evaluated once, before the run starts. One that throws,
+    returns anything but `"fail"`, `"cancel-run"` or a target declared on the
+    build, names this target itself, or cancels on a target that is also
+    {@link proceedAfterFailure} refuses the run with a message naming the target.
+    The run settles `cancelled` with the target's error, so the record says both
+    that it was rolled back and why. Requires a state store, which a build using
+    it enables by default, exactly as for {@link onCancel}.
+
+    It is the counterpart of {@link WaitSettings.onTimeout}: a deploy chain
+    whose health check fails should unwind through the same rollback as an
+    operator's cancel, not through a second copy of it.
+
+    ```ts
+    deploy = target()
+      .executes((ctx) => ctx.state.set({ revision: "api-00042" }))
+      .onCancel(() => this.rollback);
+    verify = target()
+      .dependsOn(this.deploy)
+      .executes(() => checkHealth())
+      .onFailure(() => "cancel-run"); // a failed check rolls the deploy back
+    rollback = target().executes((ctx) => undo(ctx.state.get().revision));
+    ```
   forEach(items: () => readonly Item[], factory: ForEachFactory<Item>, configure?: Configure<ForEachSettings>): this
     Fan out over a runtime list: for each item, build an ordered pipeline of
     sub-targets and run them with per-item failure isolation and bounded
@@ -2465,8 +2858,8 @@ class ToolInstallSettings
   destDir(dir: PathLike): this
     The directory to install the binary into (created if missing).
   archive(format: DownloadFormat | ((platform: Platform) => DownloadFormat)): this
-    Treat the download as a `"tar.gz"` or `"zip"` to unpack (default `"raw"`,
-    the bare binary). Pair with {@link binaryPath} for the binary inside. Pass a
+    Treat the download as a `"tar.gz"`, `"tar.xz"` or `"zip"` to unpack
+    (default `"raw"`, the bare binary). Pair with {@link binaryPath} for the binary inside. Pass a
     `(platform) => format` resolver when the format is per-platform, as it is
     for most Go and Rust releases — `.tar.gz` on Linux and macOS, `.zip` on
     Windows (see {@link InstallReleaseOptions.archive}).
@@ -2480,7 +2873,9 @@ class ToolInstallSettings
     release tarball's `tool-v1.2.3/` directory. Ignored by a single-binary install.
   bins(...paths: string[]): this
     For a tree install, the paths (relative to the stripped root) to mark
-    executable on POSIX — a runtime's `bin/node`, `bin/npm`, … Ignored by a
+    executable on POSIX — a runtime's `bin/node`, `bin/npm`, … Extraction
+    already keeps the archive's mode bits, so this is a fallback for an
+    archive that ships them without the executable bit. Ignored by a
     single-binary install.
   checksum(sha256: string | ((platform: Platform) => string)): this
     The expected SHA-256 (hex) of the downloaded artifact — verifies and caches
@@ -2528,6 +2923,23 @@ class Toolchain
     release tool's or tree's pinned checksum, or an npm tool's `name@version`
     marker, matches — and return a map of tool name to installed
     {@link AbsolutePath}. A {@link tree}'s entry is its extracted root directory.
+
+class ValidateDuringSettings
+  Fluent configuration for {@link TargetBuilder.validateDuring}: how often to
+  run the checks while the body runs, and which {@link Validation}s they are —
+  `.validateDuring((s) => s.every("1m").check(errorRate, probe))`.
+
+  every_?: string | number
+    The interval between rounds of checks; set by {@link every}.
+  readonly checks_: Validation[]
+    The validations each round runs, in order; set by {@link check}.
+  every(interval: string | number): this
+    Run a round of checks this often while the body runs — a duration string
+    like `"1m"` or raw milliseconds (required). The first round runs one
+    interval after the body starts, and a round still running when the next is
+    due delays it rather than overlapping it.
+  check(...validations: Validation[]): this
+    The validations each round runs, in declaration order; repeatable, at least one.
 
 class WaitSettings
   Fluent configuration for {@link TargetBuilder.waitsFor}:
@@ -2671,6 +3083,40 @@ interface AnyParameter
   stringValue_(): string | undefined
     The resolved value as a string, or `undefined` if unset (for masking).
 
+interface AwsCredentials
+  An AWS access key, with the session token temporary credentials carry.
+
+  readonly accessKeyId: string
+    The access key id (`AKIA…` long-term, `ASIA…` temporary).
+  readonly secretAccessKey: string
+    The secret access key. Never sent; only used to derive the signing key.
+  readonly sessionToken?: string
+    The session token of temporary credentials.
+
+interface AwsSignableRequest
+  The outgoing request a signature is computed over — exactly what will be
+  sent, so the signature verifies.
+
+  readonly method: string
+    The HTTP method.
+  readonly url: string
+    The absolute URL, including the query string, percent-encoded as sent.
+  readonly headers: Readonly<Record<string, string>>
+    The headers set so far, with lower-case names. Every one of them is
+    signed, so a header added after signing fails the request.
+  readonly body: Uint8Array
+    The exact body bytes; empty for a request without one.
+
+interface AwsSignature
+  What signing produced: the intermediate strings and the headers to add.
+
+  readonly canonicalRequest: string
+    The canonical request (step 1).
+  readonly stringToSign: string
+    The string to sign (step 2).
+  readonly headers: Readonly<Record<string, string>>
+    The headers to add: `x-amz-date`, `x-amz-security-token`, `authorization`.
+
 interface BearerChallenge
   The parts of a `WWW-Authenticate: Bearer` challenge Zuke emits.
 
@@ -2758,14 +3204,17 @@ interface BuildResult
   executed: string[]
     Names of the targets that ran, in execution order.
   error?: unknown
-    The error that aborted the run, if any.
+    The error that aborted the run, if any. On a run a target's
+    `.onFailure(...)` cancelled, it is that target's error, set alongside
+    {@link cancelled}.
   suspended?: boolean
     True when the run suspended at a `.waitsFor(...)` gate rather than
     finishing — its state is saved and it can be resumed later. The process
     still exits 0.
   cancelled?: boolean
-    True when the run was cancelled (via `options.signal` / Ctrl-C, or by
-    another process running `zuke cancel`) rather than failing on its own.
+    True when the run was cancelled — via `options.signal` / Ctrl-C, by
+    another process running `zuke cancel`, or by a failed target whose
+    `.onFailure(...)` cancels the run (then {@link error} holds that failure).
     Its compensations have run and the record is `cancelled`. `ok` is `false`.
   runId?: string
     The run's id, when a run identity was established (always, in practice —
@@ -2863,6 +3312,11 @@ interface CiBootstrap
   denoVersion?: string
     Install this Deno version, for a job that runs `deno` directly rather than
     through the `./zuke` launcher (which bootstraps its own).
+  actionsCache?: boolean
+    Expose the GitHub Actions cache to the build, so `envCacheStore` shares
+    target outputs through it with no further configuration. The runner hands
+    the cache service's token and URL to JavaScript actions only; this has the
+    action export them to the job.
   name?: string
     The step name. Defaults to `"Harden and check out with Zuke"`.
 
@@ -2891,6 +3345,16 @@ interface CiConcurrency
     The group key (often interpolated, e.g. `ci-${{ github.ref }}`).
   cancelInProgress?: boolean
     Cancel an in-progress run in the same group when a new one starts.
+
+interface CiEnvironment
+  A deployment environment a job runs in, by name and optionally the URL the
+  deployment is reachable at. See {@link CiJob.environment}.
+
+  name: string
+    The environment's name, as the repository's settings define it.
+  url?: string
+    The deployment's URL, shown on the run and the environment page. A literal
+    or a provider expression; rendered verbatim either way.
 
 interface CiFileSpec
   A CI configuration file declared on a build: a pipeline bound to a path.
@@ -3000,8 +3464,12 @@ interface CiInvocation
     Override the display name (defaults to the target's description, else its name).
   runsOn?: string
     The runner, when it differs from the pipeline default.
-  matrix?: Record<string, Array<string | number>>
+  matrix?: CiMatrixAxes
     A build matrix — fanning one target out over several OSes, say.
+  matrixInclude?: CiMatrixRow[]
+    Matrix rows to add (see {@link CiJob.matrixInclude}).
+  matrixExclude?: CiMatrixRow[]
+    Matrix combinations to remove (see {@link CiJob.matrixExclude}).
   failFast?: boolean
     Let the other matrix legs finish when one fails.
   permissions?: Record<string, string>
@@ -3016,6 +3484,10 @@ interface CiInvocation
     The prelude action for this job, overriding the pipeline default.
   if?: string
     A condition gating the job.
+  environment?: string | CiEnvironment
+    The deployment environment the job runs in (see {@link CiJob.environment}).
+  outputs?: Record<string, string>
+    Values the job hands to the jobs that need it (see {@link CiJob.outputs}).
   env?: Record<string, string>
     Environment variables for the target's own step — where a secret is mapped
     in, e.g. `{ GITHUB_TOKEN: "${{ secrets.GITHUB_TOKEN }}" }`.
@@ -3042,11 +3514,27 @@ interface CiJob
   runsOn?: string
     The runner. Interpreted per provider: a GitHub runner label and Azure
     `vmImage` (default `ubuntu-latest`), or a GitLab Docker image (runner
-    default when omitted). Ignored when a matrix defines `os` on GitHub.
+    default when omitted). Ignored on GitHub when every matrix combination
+    sets `os`, which then picks the runner.
   needs?: string[]
     Other jobs (by {@link id}) that must finish before this one.
-  matrix?: Record<string, Array<string | number>>
+  matrix?: CiMatrixAxes
     A build matrix: each key fans out over its values.
+  matrixInclude?: CiMatrixRow[]
+    Matrix rows to add — GitHub's `matrix.include`. A row that agrees with an
+    axis combination on every axis it names extends that combination with its
+    other keys; a row that fits none becomes a combination of its own. With no
+    {@link matrix} at all, the rows are the matrix — the way to run exactly
+    the combinations you list (four Node lines on Ubuntu plus one on macOS)
+    rather than every pairing of two axes.
+
+    Rendered natively on GitHub. GitLab and Azure receive the expanded
+    combinations, so each provider runs the same jobs; Bitbucket has no matrix.
+  matrixExclude?: CiMatrixRow[]
+    Axis combinations to remove — GitHub's `matrix.exclude`. Each row is a
+    partial match over the {@link matrix} axes (`{ os: "windows-latest" }`
+    drops every Windows combination), and naming a key that is not an axis is
+    an error. Applied before {@link matrixInclude}, as on GitHub.
   failFast?: boolean
     Let the other matrix legs finish when one fails (`fail-fast: false`). Default
     GitHub behaviour cancels them, which hides whether a failure is
@@ -3067,6 +3555,27 @@ interface CiJob
     pass `false` to render hardening and checkout as separate steps instead.
   env?: Record<string, string>
     Environment variables for the job.
+  environment?: string | CiEnvironment
+    The deployment environment the job runs in: a name, or a name and the URL
+    the deployment is reachable at (often an expression such as
+    `${{ steps.deployment.outputs.page_url }}`, rendered verbatim). Not to be
+    confused with {@link env}: an environment is what the provider's
+    protection rules, required reviewers and environment-scoped secrets attach
+    to, and a GitHub Pages deployment needs one.
+
+    Declaring it grants nothing on its own — the provider still enforces the
+    environment's rules. Rendered on GitHub and GitLab, whose `environment:`
+    takes the same name and URL. Azure (whose environments belong to a
+    separate deployment-job form) and Bitbucket refuse it with an error rather
+    than drop it, because a job silently stripped of its environment would
+    also be stripped of the approval gate guarding it.
+  outputs?: Record<string, string>
+    Values this job hands to the jobs that `needs` it — GitHub's job
+    `outputs:`, keyed by output name, each usually a step output expression
+    (`${{ steps.deployment.outputs.page_url }}`). A consumer reads one as
+    `${{ needs.<job>.outputs.<name> }}`. Expressions are rendered verbatim.
+    GitHub only: the other providers have no job outputs, so they refuse it
+    with an error rather than render a pipeline whose consumers read nothing.
   if?: string
     A condition gating the job. A raw provider expression: GitHub `if:`, Azure
     `condition:`. Ignored on GitLab. Use it to e.g. skip forked pull requests.
@@ -3169,6 +3678,17 @@ interface CiTriggers
   pullRequest?: string[]
     Branches whose pull/merge requests trigger the pipeline. An empty array
     means every branch (no filter); omit the field to disable the trigger.
+  pushPaths?: CiPathFilter
+    Run the {@link push} trigger only for pushes that change these paths (see
+    {@link CiPathFilter}). Requires {@link push}. Rendered as `paths` /
+    `paths-ignore` on GitHub, `trigger.paths` on Azure and a `changes:` rule on
+    GitLab, which can express `paths` but not `pathsIgnore`; Bitbucket has no
+    trigger-level path filter, so a filter for either of those is an error
+    rather than a pipeline that runs on every change.
+  pullRequestPaths?: CiPathFilter
+    Run the {@link pullRequest} trigger only for pull/merge requests that change
+    these paths (see {@link CiPathFilter}). Requires {@link pullRequest}.
+    Provider support as for {@link pushPaths}.
   pullRequestTypes?: string[]
     Which pull-request activity types fire the pipeline, on top of the branch
     filter — GitHub's default is `opened`, `synchronize`, `reopened`. Add
@@ -3356,6 +3876,16 @@ interface ExecuteOptions
 
   silent?: boolean
     Suppress all banner/summary output (used by tests).
+  banner?: boolean
+    Print the opening banner — the wordmark (off CI), the framework, runtime
+    and platform versions, and this run's id and directory. Defaults to on;
+    `false` is the CLI's `--no-banner`, and `ZUKE_NO_BANNER` turns it off from
+    the environment. Plain output (`ZUKE_PLAIN`, or the CLI's `--plain`) turns
+    it off as well, whatever this says.
+
+    Only ever printed when the run writes to the real console. A `silent` run
+    or one given its own {@link ExecuteOptions.reporter} is embedding the
+    executor, and gets no banner whatever this says.
   reporter?: Reporter
     Custom reporter; overrides `silent`.
   plugins?: Plugin[]
@@ -3395,6 +3925,12 @@ interface ExecuteOptions
     Plan only: resolve and print every target that would run (honouring
     `--skip` and `onlyWhen` conditions) without executing any body or touching
     the cache (CLI `--dry-run`).
+  preflightOnly?: boolean
+    Run only the preflight phase — every planned validation's
+    {@link Validation.preflight} — and stop, executing no target (CLI
+    `--preflight`). The result is ok when every preflight passed. Missing or
+    invalid parameters do not fail it: the step that asks is meant to run
+    without the secrets they come from.
   affected?: AffectedOptions
     Restrict the run to the targets affected by files changed since a base git
     revision (CLI `--affected[=<base>]`). A target is affected when a changed
@@ -3448,7 +3984,7 @@ interface ExecuteOptions
     `resumeRun`.
 
 interface ExtractOptions
-  Options common to {@link extractTarGzip} and {@link extractZip}.
+  Options common to {@link extractTarGzip}, {@link extractTarXz} and {@link extractZip}.
 
   strip?: number
     Drop this many leading path components from every entry (like tar's
@@ -3477,6 +4013,13 @@ interface FanOutOptions
     Include targets hidden from `--list` via `.unlisted()`. Defaults to false.
   env?: Record<string, string>
     Environment variables set on every job (e.g. the remote-cache config).
+
+interface FileSystemCacheStoreOptions
+  Configuration for a {@link FileSystemCacheStore}.
+
+  maxInflatedBytes?: number
+    The most a fetched artifact may decompress to, in bytes — see
+    {@link RemoteCacheStore.maxInflatedBytes}. Defaults to 2 GiB.
 
 interface FileTasksApi
   The shape of {@link FileTasks}.
@@ -3582,6 +4125,25 @@ interface ForceResult
   override?: TargetOverride
     The override as recorded, when it was.
 
+interface GitHubActionsCacheStoreOptions
+  Configuration for a {@link GitHubActionsCacheStore}.
+
+  url: string
+    The cache service's base URL: the job's `ACTIONS_RESULTS_URL`.
+  token: string
+    The job's `ACTIONS_RUNTIME_TOKEN`, sent as a bearer token to the service.
+  fetch?: typeof fetch
+    The `fetch` implementation; defaults to the global. Overridable for tests.
+  maxArtifactBytes?: number
+    The most a fetched artifact may weigh on the wire, in bytes, before it is
+    refused. Defaults to 2 GiB — larger than the HTTP store's 512 MiB, because
+    this store is written only by the repository's own workflows and the
+    outputs worth caching here are the big ones (a 1.5 GB SDK). What the bytes
+    decompress to is bounded separately, by `restoreOutputs`.
+  maxInflatedBytes?: number
+    The most a fetched artifact may decompress to, in bytes — see
+    {@link RemoteCacheStore.maxInflatedBytes}. Defaults to 2 GiB.
+
 interface GlobOptions
   Options for {@link glob}.
 
@@ -3630,9 +4192,16 @@ interface HttpCacheStoreOptions
   Configuration for an {@link HttpCacheStore}.
 
   url: string
-    The base URL keys are appended to (any trailing slash is ignored).
+    The base URL keys are appended to (any trailing slash is ignored). A query
+    string is kept and the key goes before it, so an Azure Blob container's
+    SAS URL (`https://acct.blob.core.windows.net/container?sv=…`) works as
+    is.
   token?: string
     A bearer token sent as `Authorization: Bearer <token>`, if set.
+  headers?: Record<string, string>
+    Headers sent on every request: basic auth for a Gradle-protocol or WebDAV
+    cache, GitLab's `JOB-TOKEN`, or whatever else a server wants. The store's
+    own headers (the bearer token, the content type) win on a clash.
   fetch?: typeof fetch
     The `fetch` implementation; defaults to the global. Overridable for tests.
   maxArtifactBytes?: number
@@ -3641,6 +4210,9 @@ interface HttpCacheStoreOptions
     outputs are genuinely larger; a refusal is a warned rebuild, not a build
     failure. What the bytes decompress to is bounded separately, by
     {@link restoreOutputs}.
+  maxInflatedBytes?: number
+    The most a fetched artifact may decompress to, in bytes — see
+    {@link RemoteCacheStore.maxInflatedBytes}. Defaults to 2 GiB.
 
 interface HttpOptions
   Options shared by the HTTP helpers.
@@ -3693,8 +4265,8 @@ interface InstallReleaseOptions
     The directory to install the binary into (created if missing).
   archive?: DownloadFormat | ((platform: Platform) => DownloadFormat)
     The download format. `"raw"` (default) treats the download as the binary
-    itself; `"tar.gz"` and `"zip"` unpack it and take {@link binaryPath} from
-    inside. Many release assets ship one or the other.
+    itself; `"tar.gz"`, `"tar.xz"` and `"zip"` unpack it and take
+    {@link binaryPath} from inside. Many release assets ship one or the other.
 
     Like {@link url} and {@link checksum} this accepts a resolver, because the
     format is routinely per-platform: a Go or Rust project typically publishes
@@ -3702,7 +4274,7 @@ interface InstallReleaseOptions
     `(p) => p.os === "windows" ? "zip" : "tar.gz"` rather than declaring one
     format that is wrong on a third of the platforms.
   binaryPath?: string | ((platform: Platform) => string)
-    For a `"tar.gz"` or `"zip"` archive, the binary's path within the archive.
+    For a packed archive, the binary's path within the archive.
     Defaults to {@link name}.
 
     Also resolver-friendly, for the same reason: the same release usually names
@@ -3741,16 +4313,18 @@ interface InstallTreeOptions
   archive: ArchiveFormat | ((platform: Platform) => ArchiveFormat)
     The archive format — a multi-file runtime always ships packed. Accepts a
     per-platform resolver for the usual `.tar.gz` on Unix / `.zip` on Windows
-    split (see {@link InstallReleaseOptions.archive}).
+    split (see {@link InstallReleaseOptions.archive}); `"tar.xz"` covers the
+    Flutter SDK and Zig, which ship only that.
   strip?: number
     Leading path components to drop while unpacking (tar's `--strip-components`).
     A release tarball wraps everything in a `tool-v1.2.3/` directory, so `1`
     unwraps it; {@link bins} and the returned tree root are then relative to the
     stripped tree. Defaults to `0`.
   bins?: readonly string[]
-    Paths (relative to the stripped tree root) to mark executable on POSIX — the
-    tar reader does not preserve mode bits, so a runtime's `bin/node`,
-    `bin/npm`, … need it. Chmod follows a symlink to its real target, so listing
+    Paths (relative to the stripped tree root) to mark executable on POSIX — a
+    runtime's `bin/node`, `bin/npm`, … Extraction keeps the archive's mode
+    bits, so this is a fallback for an archive that ships a binary without the
+    executable bit. Chmod follows a symlink to its real target, so listing
     a symlinked bin makes the script it points at executable too.
   platform?: InstallPlatform
     The platform to resolve for. Defaults to {@link hostPlatform}.
@@ -3773,6 +4347,26 @@ interface LockHolder
     ISO-8601 timestamp when it was acquired.
   runUrl?: string
     A link to the holding run (e.g. its CI job), when known.
+
+interface LockedSpecifier
+  One `jsr:` entry of a lock file's `specifiers` map.
+
+  specifier: string
+    The specifier as written, e.g. `jsr:@zuke/git@^1`.
+  name: string
+    The package it names, e.g. `@zuke/git`.
+  resolved: string
+    The version the lock resolves it to.
+
+interface LogoOptions
+  Options for {@link logoLines} and `ConsoleTasks.logo`.
+
+  tagline?: string
+    A line printed dimmed under the art (e.g. a version or strapline).
+  letterStyle?: readonly StyleName[]
+    Styles for the solid letter blocks. Defaults to `["cyan", "bold"]`.
+  shadowStyle?: readonly StyleName[]
+    Styles for the shadow characters. Defaults to `["dim"]`.
 
 interface McpAuthReject
   Why a request was refused, and how the transport should say so.
@@ -3898,8 +4492,11 @@ interface OutputHost
 
   readFile(path: string): Promise<Uint8Array | null>
     File contents, or `null` if the path does not exist.
-  stat(path: string): Promise<{ isDirectory: boolean; } | null>
-    Whether a path exists and is a directory, or `null` if it is missing.
+  stat(path: string): Promise<{ isDirectory: boolean; mode?: number; } | null>
+    Whether a path exists and is a directory, or `null` if it is missing. A
+    host that has permission bits reports them as `mode`, so an archived
+    binary is restored executable; one that does not (Windows, a test double)
+    leaves it out and the entry takes the archive's default.
   lstat(path: string): Promise<{ isSymlink: boolean; isDirectory: boolean; } | null>
     Describe a path without following a final symlink, or `null` if it is
     missing. Distinct from {@link OutputHost.stat}, which resolves a link and so
@@ -3907,8 +4504,34 @@ interface OutputHost
     which is a question only an `lstat` can answer.
   readDir(path: string): Promise<string[]>
     The entry names within a directory.
-  writeFile(path: string, bytes: Uint8Array): Promise<void>
-    Write a file, creating parent directories as needed.
+  writeFile(path: string, bytes: Uint8Array, mode?: number): Promise<void>
+    Write a file, creating parent directories as needed, with the permission
+    bits `mode` where the platform has them.
+
+interface OutputMode
+  What {@link resolveOutputMode} decides.
+
+  rich: boolean
+    Decorate informational output — panels, glyphs, coloured headings. Only on
+    an interactive terminal that is not CI, and never when plain.
+  color: boolean
+    Emit ANSI colour: a terminal, `NO_COLOR` unset, and not plain.
+  banner: boolean
+    Print a run's opening banner: not plain, and not turned off.
+
+interface OutputModeOptions
+  Inputs to {@link resolveOutputMode}; every field has a real default.
+
+  plain?: boolean
+    An explicit `--plain`. Wins over `ZUKE_PLAIN` in both directions, the way
+    every explicit flag here wins over a standing preference in the shell.
+  banner?: boolean
+    An explicit banner choice (`--no-banner` is `false`). Wins over
+    `ZUKE_NO_BANNER`, but never over plain: plain means no banner.
+  readEnv?: (name: string) => string | undefined
+    Reads an environment variable; defaults to the process environment.
+  isTerminal?: () => boolean
+    Whether stdout is an interactive terminal; defaults to asking Deno.
 
 interface Platform extends InstallPlatform
   A platform with helpers to name it the way a tool's downloads do. `osLabel`
@@ -4018,6 +4641,11 @@ interface RemoteCacheStore
   point of view: the executor never fails a build because the store is
   unreachable — it just rebuilds and, where it can, re-uploads.
 
+  readonly maxInflatedBytes?: number
+    The most an artifact from this store may decompress to, in bytes, before
+    {@link restoreOutputs} refuses it. Defaults to 2 GiB; raise it for a target
+    whose outputs are genuinely larger, such as a whole SDK. The restore holds
+    the inflated archive in memory, so the bound is also its memory ceiling.
   get(key: string): Promise<Uint8Array | null>
     Fetch the archived outputs stored under `key`, or `null` if there are none.
   put(key: string, artifact: Uint8Array): Promise<void>
@@ -4098,6 +4726,10 @@ interface ResumeOptions
     The signal's JSON payload (defaults to `{}`); ignored without {@link signal}.
   params?: Record<string, string>
     Non-secret parameter overrides; the rest come from the record.
+  banner?: boolean
+    Print the opening banner (see {@link "./executor.ts".ExecuteOptions.banner}).
+  color?: boolean
+    Force ANSI colour on or off (see {@link "./executor.ts".ExecuteOptions.color}).
   readEnv?: (name: string) => string | undefined
     Reads an environment variable (secrets re-resolve from here).
   actor?: string
@@ -4203,6 +4835,19 @@ interface RunInitiator
     stamped at creation, and the original run's `createdAt` for one backfilled
     when a resume was about to overwrite the evidence — so it dates the
     attribution, not the write that recorded it.
+
+interface RunLock
+  One run-held lock on a {@link RunRecord}: the key, the store's ownership
+  token for it, the TTL it is renewed with, and the target that took it.
+
+  key: string
+    The lock key, as it was acquired.
+  token: string
+    The store's ownership token, which renewal and release present.
+  ttlMs: number
+    The TTL, in milliseconds, the lock is renewed with.
+  target: string
+    The dotted name of the target whose `.lock(...)` took it.
 
 interface RunOptions
   Options for {@link run}.
@@ -4377,6 +5022,17 @@ interface RunRecord
     leaves the run `cancelling`, and whoever recovers it has no other way to
     know whether an operator was cancelling the run or a sweep was failing an
     abandoned one.
+  locks?: RunLock[]
+    The run-held locks this run owns (see
+    {@link "../target.ts".LockSettings.holdForRun}), in acquisition order.
+    Absent when it holds none, and removed when the run settles.
+
+    Recorded so the lock outlives the process that took it: a resumed process
+    renews each one with its token, and whatever settles the run — the executor,
+    `zuke cancel`, a timed-out wait, a reaping sweep — releases them. The token
+    proves ownership of the lock to the state store, so it is masked wherever a
+    record is shown — `zuke runs show` and the MCP `show_run` tool — as a lock
+    listing never includes it either.
 
 interface RunSummary
   A compact run listing row, returned by {@link "./store.ts".StateStore.listRuns}.
@@ -4407,6 +5063,30 @@ interface RunningService
     The service's target name, for diagnostics.
   stop(): Promise<void>
     Stop the service; never rejects (failures are the registry's concern).
+
+interface S3CacheStoreOptions
+  Configuration for an {@link S3CacheStore}.
+
+  url: string
+    The bucket URL keys are appended to, with any prefix:
+    `https://my-bucket.s3.eu-west-1.amazonaws.com/zuke-cache` on AWS, or
+    `https://<account>.r2.cloudflarestorage.com/my-bucket` (path-style) on
+    R2, MinIO and the like.
+  region: string
+    The signing region: the bucket's on AWS, `auto` on R2.
+  credentials: AwsCredentials
+    The access key the requests are signed with.
+  fetch?: typeof fetch
+    The `fetch` implementation; defaults to the global. Overridable for tests.
+  now?: () => number
+    The clock the signatures are dated by (epoch ms); defaults to `Date.now`.
+  maxArtifactBytes?: number
+    The most a fetched artifact may weigh on the wire, in bytes, before it is
+    refused. Defaults to 512 MiB — see
+    {@link "./remote_cache.ts".HttpCacheStoreOptions.maxArtifactBytes}.
+  maxInflatedBytes?: number
+    The most a fetched artifact may decompress to, in bytes — see
+    {@link RemoteCacheStore.maxInflatedBytes}. Defaults to 2 GiB.
 
 interface ScheduleEntry
   A scheduled trigger: a 5-field cron expression in an optional IANA timezone.
@@ -4535,13 +5215,19 @@ interface TarEntry
   A single entry within a tar archive — a regular file or a symbolic link.
 
   name: string
-    The entry's path inside the archive (≤ 100 bytes).
+    The entry's path inside the archive.
   data: Uint8Array
     The file contents (empty for a symlink entry).
   linkname?: string
-    For a symbolic-link entry, its target (≤ 100 bytes); absent for a regular
-    file. Node's release tarballs, for one, ship `bin/npm`/`bin/npx` as symlinks
+    For a symbolic-link entry, its target; absent for a regular file. Node's release tarballs, for one, ship `bin/npm`/`bin/npx` as symlinks
     into `lib/node_modules`, so extracting a runtime tree must preserve them.
+  mode?: number
+    A regular file's permission bits, written into its header: `0o755` for an
+    executable, so a binary shipped in the archive runs once extracted. The
+    extractors apply them on POSIX, always owner-readable and -writable and
+    never group- or world-writable.
+    Defaults to `0o644`. Ignored for a symlink entry, which is always
+    `0o777`.
 
 interface TargetContext
   The context passed to every target body. Optional to receive — an existing
@@ -4808,12 +5494,42 @@ interface Validation
     A name for diagnostics (optional).
   validate(context: ValidationContext): void | Promise<void>
     Run the check; throw to fail the target. May be async.
+  preflight?(context: ValidationContext): void | Promise<void>
+    Decide whether the run may happen at all — called once per run, for every
+    validation in the plan, before any target starts, its dependencies
+    included. Throw to refuse the run: nothing executes, and no run record is
+    opened. Optional; most validations have nothing to decide this early. It
+    is the seam for a check that must stand in front of everything, such as
+    who may start a comment-triggered run. `zuke <target> --preflight` runs
+    only this phase. Skipped by a dry run, which executes nothing to guard.
 
 interface ValidationContext
   Context passed to a {@link Validation} when it runs.
 
   target: string
     The name of the target the validation is attached to.
+  signal?: AbortSignal
+    Set only for a `.validateDuring(...)` check: aborted when the target ends
+    or the run is cancelled, so a check that waits on the network — a metrics
+    query, a health probe — should pass it on (`fetch(url, { signal })`). A
+    `$` command the check runs is bound to it already.
+  runId?: string
+    The identity of the run the validation belongs to — the same id the run
+    record and `zuke runs` show, kept across a resume. Lets validations that
+    coordinate with each other (the `@zuke/ai` reviewers sharing their
+    reactions on a pull request) scope that to one run, even in a process
+    that executes several, such as `zuke mcp`. Set by the scheduler; absent
+    when a caller drives `validate(...)` directly.
+  peers?: readonly Validation[]
+    The validations attached beside this one: the whole list it was given in
+    — one `.validateBefore(...)` or `.validateAfter(...)` — in the order they
+    run, itself included. Lets validations that publish together find each
+    other without the build wiring them up: the `@zuke/ai` reviewers of one
+    target post one combined pull-request comment rather than one each, and
+    the last of them is the one that knows it is last. Set by the scheduler
+    for the before and after lists; absent for a `.validateDuring(...)` check
+    and when a caller drives `validate(...)` directly, where a validation
+    acts alone.
   redact(text: string): string
     Mask every resolved `secret` parameter in `text`.
 
@@ -4886,7 +5602,7 @@ type AnnouncementLevel = "success" | "failure" | "warning" | "info"
 type Architecture = "x86_64" | "aarch64"
   The CPU architectures Zuke recognises.
 
-type ArchiveFormat = "tar.gz" | "zip"
+type ArchiveFormat = "tar.gz" | "tar.xz" | "zip"
   A packed download format, unpacked after the checksum is verified.
 
 type BuildLocation = { kind: "module"; module: string; cwd: string; repo?: string; } | { kind: "command"; command: string[]; cwd: string; repo?: string; }
@@ -4911,6 +5627,23 @@ type CiHost = "github" | "gitlab" | "azure" | "bitbucket" | "local"
 
 type CiInvokes = TargetBuilder | CiInvocation
   A target to invoke, bare when the derived job needs no adjustment.
+
+type CiMatrixAxes = Record<string, Array<string | number>>
+  A matrix's independent axes: each key fans out over its values.
+
+type CiMatrixRow = Record<string, string | number>
+  One matrix combination, as an `include` or `exclude` entry spells it:
+  `{ node: "26", os: "macos-latest" }`.
+
+type CiPathFilter = { paths: string[]; pathsIgnore?: never; } | { pathsIgnore: string[]; paths?: never; }
+  Narrow a trigger to the changed files that matter: run only when a changed
+  file matches one of `paths`, or skip when every changed file matches one of
+  `pathsIgnore`. Exactly one of the two, as GitHub requires; the patterns are
+  passed through in the provider's own glob syntax.
+
+  Mind required status checks: a workflow the filter skips never reports, so a
+  check it would have produced stays pending and blocks the merge. Filter
+  workflows whose checks are not required, or decide inside the run instead.
 
 type CiPinResolver = (action: string) => CiUses
   Resolves an action's pinned reference by name, e.g. `"actions/checkout"`.
@@ -4993,6 +5726,15 @@ type OnCancel = TargetBuilder | (() => TargetBuilder)
   sibling target directly, or a thunk returning one. The thunk form defers
   evaluation so a compensation declared below the target it cleans up (class
   fields initialise top-to-bottom) can still be referenced.
+
+type OnFailure = OnTimeout
+  What a target does when it fails — resolved from {@link TargetBuilder.onFailure}.
+  `"fail"` (the default) fails the run as usual; `"cancel-run"` cancels it,
+  running the compensations of every target that succeeded; a thunk returning a
+  sibling target runs that target as a compensation first, then cancels.
+
+  The same shape as {@link OnTimeout} by design — the two are the failure and
+  deadline halves of one disposition vocabulary — so it is an alias, not a copy.
 
 type OnTimeout = () => TargetBuilder | "fail" | "cancel-run"
   What a timed-out wait does — resolved from {@link WaitSettings.onTimeout}.
@@ -5087,6 +5829,37 @@ function $(strings: TemplateStringsArray, ...values: Interpolatable[]): Command
 
   @example
       `await $\`deno test -A``
+
+function joinShellArgs(argv: readonly string[]): string
+  Render `argv` as a single command line a POSIX shell parses back into
+  exactly the same argv — for showing an operator a command to paste, or for
+  handing a command to something that runs it through `sh`.
+
+  Each token is written as it is when it holds only characters no shell treats
+  specially (letters, digits and `_@%+=:,./-`). Anything else — an empty token,
+  whitespace, a newline, `$`, a backtick, a quote, a glob character — is
+  wrapped in single quotes, with each embedded `'` written as `'\''`. Nothing
+  inside single quotes is special to the shell, so a token can never expand a
+  variable, substitute a command, or become a second command. Tokens are
+  joined by single spaces.
+
+  ```ts
+  joinShellArgs(["gcloud", "run", "services", "describe", "my svc"]);
+  // gcloud run services describe 'my svc'
+  joinShellArgs(["echo", "it's", ""]);
+  // echo 'it'\''s' ''
+  ```
+
+  The output round-trips through {@link splitShellArgs}. The quoting governs
+  how each token is split and expanded, not the grammar of the command
+  position: the first token should be the program to run, since a shell reads
+  a leading `NAME=value` as an assignment and a leading `if` as a keyword.
+
+  @param argv
+      The tokens to render, in order.
+
+  @return
+      The command line; an empty string for an empty argv.
 
 function splitShellArgs(input: string): string[]
   Split `input` into argv the way a POSIX shell would, honouring the quoting
@@ -5291,7 +6064,7 @@ function defineTool(tool: string, options: DefineToolOptions): ToolTask
   `arg`/`flag`/`option` for argv and the shared `cwd`/`env`/`noThrow`/… chainers.
 
   ```ts
-  import { defineTool } from "jsr:@zuke/core/tooling";
+  import { defineTool } from "@zuke/core/tooling";
 
   const terraform = defineTool("terraform");
   await terraform((s) => s.arg("plan").option("out", "plan.tfplan"));
@@ -5355,6 +6128,41 @@ class DynamicToolSettings extends ToolSettings
     Append a flag and its value as two tokens, e.g. `--output dist`.
   override protected buildArgs(): string[]
     The argv assembled from the `arg`/`flag`/`option` calls, in order.
+
+class SecretOutputSettings
+  What a wrapper knows about the output of a command that prints a secret —
+  which field the secret comes back under, and whether the caller reshaped the
+  answer — configured through the lambda handed to
+  `ToolSettings.markSecretsInOutput`:
+
+  ```ts
+  protected override onOutput(output: CommandOutput): void {
+    this.markSecretsInOutput(output.stdout, (s) =>
+      s.keys("SecretString", "SecretBinary").queried(this.queried));
+  }
+  ```
+
+  Neither setting is required: with no keys, a JSON answer has every scalar of
+  eight or more characters registered, and an answer that is not JSON (a bare
+  token) is registered whole.
+
+  keys_: string[]
+    The field names the command returns its secret under; see {@link keys}.
+  queried_: boolean
+    Whether the caller reshaped the output; see {@link queried}.
+  keys(...names: string[]): this
+    The field names the command returns its secret under, at any depth of the
+    JSON it prints — `SecretString`, `accessToken`, `value`. A string found
+    under one is registered whatever its length, since it is the secret.
+    Accumulates across calls.
+  queried(reshaped: boolean): this
+    Whether the caller passed a query (`--query`, a JMESPath projection) that
+    may have reshaped the output — renamed a key, or moved the secret under
+    another. When it did, the expected keys are no longer trusted to hold the
+    secret: every scalar of eight or more characters in the answer is
+    registered, and a short value under an expected key is treated like any
+    other derived value — `{accessToken: tokenType}` must not register
+    `Bearer`.
 
 abstract class SubcommandSettings extends ToolSettings
   Base for a wrapper over a CLI organised into subcommand groups — a command
@@ -5430,6 +6238,46 @@ abstract class ToolSettings
     Does nothing outside a run, where there is no redactor to register with —
     a wrapper used standalone in a script still works, it simply has nothing
     masking its output.
+  protected markSecretsInOutput(stdout: string, configure?: Configure<SecretOutputSettings>): void
+    Register the secrets in what a credential-bearing command printed, so the
+    build cannot print them back. Call it from {@link onOutput}, which sees the
+    output of every run — a failed one too:
+
+    ```ts
+    protected override onOutput(output: CommandOutput): void {
+      this.markSecretsInOutput(output.stdout, (s) =>
+        s.keys("SecretString").queried(this.queried));
+    }
+    ```
+
+    The lambda describes the output ({@link SecretOutputSettings}): the field
+    the secret comes back under, and whether the caller reshaped the answer
+    with a query. What is registered errs towards masking without masking
+    ordinary words, by what makes each value a secret:
+
+    - the answer — output that is not JSON, a JSON string, a number as
+      written; after a query, or with no expected key present, the document
+      whole and its only string — whatever its length;
+    - a keyed value — under an expected key or a credential name
+      (`password`, `clientSecret`, `accountKey`, `connectionString`, `auth`,
+      …) anywhere in the document, or any scalar of a document with none of
+      the expected keys (the secret moved, so `id` or `type` may hold it) —
+      from three characters, never a word such as `true` or `enabled`;
+    - a derived value — any other scalar of a queried document that still
+      has an expected key — from eight characters, never under ordinary
+      vocabulary such as `region`, `type`, an id, a date or an `error`, and at
+      most 2000 per output.
+
+    Each secret's parts are registered too: the leaves of a secret that is
+    itself JSON, the credential pairs of a connection string, query string,
+    dotenv, YAML or XML file, the password of a `scheme://user:pass@host` URL,
+    and the decoded text of a base64 credential. Every value is registered
+    trimmed as well, and in the JSON-escaped spellings the raw output carries.
+
+    Every value goes through {@link markSecret}, so it shares its scope: the
+    base one does nothing outside a run, and then the output is not even read.
+    Reading the output never throws, whatever it holds, as {@link onOutput}
+    must not.
   abstract protected defaultTool(): string
     The binary to spawn when {@link toolPath} is not set.
   abstract protected buildArgs(): string[]
@@ -5621,7 +6469,10 @@ interface WrapperConformanceOptions
 Primitive terminal rendering, shared by the executor's build reporting
 (`./report.ts`) and the `@zuke/console` package: ANSI styling, terminal-width
 detection, duration formatting, and the reusable `line`/`box`/`table`
-primitives that draw a build's output.
+primitives that draw a build's output — plus the palette the CLI's
+informational output is painted with ({@link cliPaint}) and its version
+panel ({@link versionPanel}), so the global `zuke` command paints with the
+same ones as the build.
 
 Everything here is pure — no I/O, no process state — so argv-free output can
 be unit-tested and reused without duplicating escape codes. Cells may already
@@ -5633,6 +6484,11 @@ function box(style: Style, content: string | readonly string[], options: BoxOpti
   A bordered panel around `content` (a string, split on newlines, or an array
   of lines). Content may carry ANSI codes; padding is measured on the visible
   text so the border stays flush.
+
+function cliPaint(mode: Pick<OutputMode, "rich" | "color">): CliPaint
+  The palette for `mode`: {@link PLAIN_PAINT} unless output is rich. Colour
+  follows `mode.color` separately, so `NO_COLOR` on a terminal still gets the
+  glyphs without the escape codes.
 
 function detectWidth(): number
   Read the terminal width if available, clamped to a sane range.
@@ -5727,8 +6583,23 @@ function table(style: Style, columns: readonly TableColumn[], rows: readonly (re
   one line per row. Column widths fit the widest visible cell; cells may already
   carry ANSI colour. Rows shorter than the columns are padded with empty cells.
 
+function versionPanel(rows: readonly VersionRow[], paint: CliPaint): string
+  A version panel: a box titled `zuke` with one aligned row per entry, the
+  first value emphasised. Colour follows `paint`, so `NO_COLOR` keeps the box
+  and drops the escape codes. The global `zuke` command prints its own
+  `--version` with it, so both panels look the same.
+
+  @param rows
+      The rows to print, in order; the first value is emphasised.
+
+  @param paint
+      The palette, from `cliPaint`.
+
 function visibleWidth(text: string): number
   The printable width of `text`, ignoring any ANSI colour codes it carries.
+
+const PLAIN_PAINT: CliPaint
+  Paint nothing: plain mode, and the default for every formatter.
 
 const SGR: { reset: string; bold: string; dim: string; italic: string; underline: string; black: string; red: string; green: string; yellow: string; blue: string; magenta: string; cyan: string; white: string; gray: string; }
   ANSI select-graphic-rendition codes, keyed by style name.
@@ -5746,6 +6617,30 @@ interface BoxOptions
     Styles for the border characters. Defaults to `["dim"]`.
   titleStyle?: readonly StyleName[]
     Styles for the title text. Defaults to `["bold"]`.
+
+interface CliPaint
+  How each kind of text in the CLI's informational output is painted.
+
+  rich: boolean
+    Whether decoration (glyphs, panels) is on, as opposed to colour alone.
+  color: boolean
+    Whether ANSI colour is on.
+  heading(text: string): string
+    A section heading such as `Commands:`.
+  command(text: string): string
+    A reserved command's name.
+  flag(text: string): string
+    A flag or parameter, such as `--plain`.
+  target(text: string): string
+    A target's name.
+  muted(text: string): string
+    Secondary detail: dependencies, tags, hints.
+  brand(text: string): string
+    The program's own name in a title line.
+  ok(text: string): string
+    A line reporting success: a green ✔ before it when rich.
+  fail(text: string): string
+    A line reporting failure or unfinished work: a red ✖ before it when rich.
 
 interface LineOptions
   Options for {@link line}.
@@ -5789,6 +6684,9 @@ interface TableOptions
 
 type StyleName = keyof typeof SGR
   A style name understood by {@link sgrCodes}, {@link paint}, and markup.
+
+type VersionRow = readonly [string, string]
+  One row of a version panel: its label and its value.
 
 A backend conformance kit for the state-api (`docs/state-api.md`).
 

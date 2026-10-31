@@ -62,6 +62,8 @@ export class LockSettings {
   waitUpTo_?: string | number;
   /** How often to retry while waiting; set by {@link pollEvery}. */
   pollEvery_?: string | number;
+  /** Hold the lock until the run settles; set by {@link holdForRun}. */
+  holdForRun_ = false;
 
   /**
    * Set the lock key from parts, sanitised and joined via
@@ -126,10 +128,80 @@ export class LockSettings {
     this.onConflict_ = render;
     return this;
   }
+
+  /**
+   * Hold the lock for the rest of the **run**, not just while this target's
+   * body runs: it is released when the run settles — succeeded, failed or
+   * cancelled — and kept while the run is parked at a `.waitsFor(...)` gate.
+   * Use it for a resource a whole multi-step run must own, such as one rollout
+   * of a service at a time, where a target-scoped lock would free itself the
+   * moment the first step ends.
+   *
+   * The lock is recorded on the run record, so a resumed process renews it and
+   * every path that settles the run releases it. While the run is parked no
+   * process heartbeats it, so {@link withTtl} is how long a parked run keeps
+   * the lock with no process touching it; each `zuke resume --check` that
+   * re-parks the run renews it. A resume that finds the lock lapsed and taken
+   * by another run refuses to continue and leaves the run suspended. A
+   * `zuke cancel` of a run still working leaves the lock with that run's
+   * process until its body stops, rather than freeing it beside a running
+   * deploy.
+   *
+   * Any later target in the same run declaring the same key — run-held or
+   * not, sequentially or in parallel — reuses the held lock rather than
+   * conflicting with the run itself. The lock is taken where a lock is: just
+   * before the body, so a target the incremental cache skips, a `.waitsFor`
+   * gate or a `.forEach` fan-out takes none — put it on a step that always
+   * runs. Requires a state store, like any lock.
+   */
+  holdForRun(): this {
+    this.holdForRun_ = true;
+    return this;
+  }
+}
+
+/**
+ * Fluent configuration for {@link TargetBuilder.validateDuring}: how often to
+ * run the checks while the body runs, and which {@link Validation}s they are —
+ * `.validateDuring((s) => s.every("1m").check(errorRate, probe))`.
+ */
+export class ValidateDuringSettings {
+  /** The interval between rounds of checks; set by {@link every}. */
+  every_?: string | number;
+  /** The validations each round runs, in order; set by {@link check}. */
+  readonly checks_: Validation[] = [];
+
+  /**
+   * Run a round of checks this often while the body runs — a duration string
+   * like `"1m"` or raw milliseconds (required). The first round runs one
+   * interval after the body starts, and a round still running when the next is
+   * due delays it rather than overlapping it.
+   */
+  every(interval: string | number): this {
+    this.every_ = interval;
+    return this;
+  }
+
+  /** The validations each round runs, in declaration order; repeatable, at least one. */
+  check(...validations: Validation[]): this {
+    this.checks_.push(...validations);
+    return this;
+  }
 }
 
 /** What a timed-out wait does — resolved from {@link WaitSettings.onTimeout}. */
 export type OnTimeout = () => TargetBuilder | "fail" | "cancel-run";
+
+/**
+ * What a target does when it fails — resolved from {@link TargetBuilder.onFailure}.
+ * `"fail"` (the default) fails the run as usual; `"cancel-run"` cancels it,
+ * running the compensations of every target that succeeded; a thunk returning a
+ * sibling target runs that target as a compensation first, then cancels.
+ *
+ * The same shape as {@link OnTimeout} by design — the two are the failure and
+ * deadline halves of one disposition vocabulary — so it is an alias, not a copy.
+ */
+export type OnFailure = OnTimeout;
 
 /**
  * A compensation registered with {@link TargetBuilder.onCancel}: either a
@@ -531,6 +603,34 @@ export interface ValidationContext {
    * credential the build never declared is not covered — declare it.
    */
   redact(text: string): string;
+  /**
+   * Set only for a `.validateDuring(...)` check: aborted when the target ends
+   * or the run is cancelled, so a check that waits on the network — a metrics
+   * query, a health probe — should pass it on (`fetch(url, { signal })`). A
+   * `$` command the check runs is bound to it already.
+   */
+  signal?: AbortSignal;
+  /**
+   * The identity of the run the validation belongs to — the same id the run
+   * record and `zuke runs` show, kept across a resume. Lets validations that
+   * coordinate with each other (the `@zuke/ai` reviewers sharing their
+   * reactions on a pull request) scope that to one run, even in a process
+   * that executes several, such as `zuke mcp`. Set by the scheduler; absent
+   * when a caller drives `validate(...)` directly.
+   */
+  runId?: string;
+  /**
+   * The validations attached beside this one: the whole list it was given in
+   * — one `.validateBefore(...)` or `.validateAfter(...)` — in the order they
+   * run, itself included. Lets validations that publish together find each
+   * other without the build wiring them up: the `@zuke/ai` reviewers of one
+   * target post one combined pull-request comment rather than one each, and
+   * the last of them is the one that knows it is last. Set by the scheduler
+   * for the before and after lists; absent for a `.validateDuring(...)` check
+   * and when a caller drives `validate(...)` directly, where a validation
+   * acts alone.
+   */
+  peers?: readonly Validation[];
 }
 
 /**
@@ -545,6 +645,16 @@ export interface Validation {
   name?: string;
   /** Run the check; throw to fail the target. May be async. */
   validate(context: ValidationContext): void | Promise<void>;
+  /**
+   * Decide whether the run may happen at all — called once per run, for every
+   * validation in the plan, **before any target starts**, its dependencies
+   * included. Throw to refuse the run: nothing executes, and no run record is
+   * opened. Optional; most validations have nothing to decide this early. It
+   * is the seam for a check that must stand in front of everything, such as
+   * who may start a comment-triggered run. `zuke <target> --preflight` runs
+   * only this phase. Skipped by a dry run, which executes nothing to guard.
+   */
+  preflight?(context: ValidationContext): void | Promise<void>;
 }
 
 /** Context passed to a {@link Remediation} after a target body fails. */
@@ -682,6 +792,8 @@ export class TargetBuilder {
   readonly validateBefore_: Validation[] = [];
   /** Validations run after the body (set by {@link validateAfter}). */
   readonly validateAfter_: Validation[] = [];
+  /** Validations run on an interval while the body runs (set by {@link validateDuring}). */
+  validateDuring_?: Configure<ValidateDuringSettings>;
   /** Remediations run after the body fails (set by {@link recoverWith}). */
   readonly recoverWith_: Remediation[] = [];
   /** Max fix-then-rerun cycles when the body fails (set by {@link recoverAttempts}). */
@@ -694,6 +806,8 @@ export class TargetBuilder {
   forEach_?: ForEachSpec;
   /** Compensation thunk, set by {@link onCancel}: runs on cancel iff this target succeeded. */
   onCancel_?: () => TargetBuilder;
+  /** Failure disposition thunk, set by {@link onFailure}: what this target's failure does to the run. */
+  onFailure_?: OnFailure;
 
   /** Set the human-readable description shown in `zuke --list`. */
   description(text: string): this {
@@ -1052,6 +1166,33 @@ export class TargetBuilder {
   }
 
   /**
+   * Run {@link Validation}s on an interval **while the body runs**, so a long
+   * body — a canary bake, a soak test — stops as soon as a check goes red
+   * instead of reporting the failure at the end.
+   *
+   * ```ts
+   * bake = target()
+   *   .executes((ctx) => soak(ctx.signal))
+   *   .validateDuring((s) => s.every("1m").check(errorRate, healthProbe));
+   * ```
+   *
+   * Each round runs the checks in order with the context the other
+   * validations get, the run's redactor included, plus a `signal` that aborts
+   * when the target ends or the run is cancelled. The first check to throw
+   * fails the target with its error: the body's `ctx.signal` fires and its
+   * shell commands are stopped, and the target does not wait for a body that
+   * ignores the signal. That failure is the target's failure like any other, so
+   * `.onFailure(...)` sees it and retries do not repeat it. No round starts
+   * once the body settles; after a body that succeeded, a round still running
+   * is awaited and its verdict counts. The checks never run under a dry run. The lambda runs when
+   * the target starts, so it may read `this.<param>.value`.
+   */
+  validateDuring(configure: Configure<ValidateDuringSettings>): this {
+    this.validateDuring_ = configure;
+    return this;
+  }
+
+  /**
    * Attach one or more {@link Remediation}s that run **only if the body fails**.
    * Each is given the failure; if any returns `{ retry: true }`, the executor
    * re-runs the body and, when it now passes, the target succeeds. This is the
@@ -1166,6 +1307,50 @@ export class TargetBuilder {
   }
 
   /**
+   * Decide what this target's **failure** does to the run. By default
+   * (`"fail"`) a failed target fails the run, and nothing is undone. With
+   * `"cancel-run"` the failure **cancels** the run instead: every target that
+   * had succeeded has its {@link onCancel} compensation run, in reverse order —
+   * the same walk `zuke cancel`, Ctrl-C and a timed-out wait take. A thunk
+   * returning a sibling target runs that target as a compensation first (its
+   * `ctx.state` holds **this** target's persisted metadata), then cancels.
+   *
+   * The disposition applies once retries and remediations are exhausted, to the
+   * target's final failure. A run that is already being cancelled is not
+   * cancelled twice, and in-flight siblings are stopped as on any cancellation.
+   * A named target is an extra step before the walk, not a replacement: the
+   * failed target itself is never compensated, so name a cleanup for *its*
+   * partial work, not a predecessor's rollback (which would then run twice).
+   *
+   * The thunk is evaluated once, before the run starts. One that throws,
+   * returns anything but `"fail"`, `"cancel-run"` or a target declared on the
+   * build, names this target itself, or cancels on a target that is also
+   * {@link proceedAfterFailure} refuses the run with a message naming the target.
+   * The run settles `cancelled` with the target's error, so the record says both
+   * that it was rolled back and why. Requires a state store, which a build using
+   * it enables by default, exactly as for {@link onCancel}.
+   *
+   * It is the counterpart of {@link WaitSettings.onTimeout}: a deploy chain
+   * whose health check fails should unwind through the same rollback as an
+   * operator's cancel, not through a second copy of it.
+   *
+   * ```ts
+   * deploy = target()
+   *   .executes((ctx) => ctx.state.set({ revision: "api-00042" }))
+   *   .onCancel(() => this.rollback);
+   * verify = target()
+   *   .dependsOn(this.deploy)
+   *   .executes(() => checkHealth())
+   *   .onFailure(() => "cancel-run"); // a failed check rolls the deploy back
+   * rollback = target().executes((ctx) => undo(ctx.state.get().revision));
+   * ```
+   */
+  onFailure(disposition: OnFailure): this {
+    this.onFailure_ = disposition;
+    return this;
+  }
+
+  /**
    * Fan out over a **runtime list**: for each item, build an ordered pipeline of
    * sub-targets and run them with per-item failure isolation and bounded
    * concurrency. `items` is a thunk (evaluated when the target runs, so it can
@@ -1250,6 +1435,15 @@ export class TargetBuilder {
                   `sweep can't reach a materialised sub-target), so it would be ` +
                   `silently swallowed. Put the wait on a separate target that ` +
                   `the fan-out .dependsOn(...).`,
+              );
+            }
+            if (sub.onFailure_ !== undefined) {
+              throw new Error(
+                `Fan-out target "${self}" stage "${stage}" uses .onFailure(): ` +
+                  `a materialised sub-target is not part of the run's plan, so ` +
+                  `its failure disposition would never be consulted. Put ` +
+                  `.onFailure(...) on the fan-out target itself — it fails ` +
+                  `when any item does.`,
               );
             }
             if (sub.effects_.length > 0) {

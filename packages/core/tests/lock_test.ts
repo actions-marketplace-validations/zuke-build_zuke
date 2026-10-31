@@ -1,6 +1,7 @@
 // Copyright (c) 2026 the Zuke contributors
 // SPDX-License-Identifier: MIT
 
+import { RunLockHolder } from "../src/run_locks.ts";
 import { testPlan } from "./_fakes.ts";
 import {
   assertEquals,
@@ -73,6 +74,8 @@ function envWith(store: StateStore, signal?: AbortSignal): RunEnv {
     actor: "bob",
     signals: new Map(),
     statuses: new Map(),
+    onTargetFailed: () => {},
+    runLocks: new RunLockHolder(undefined),
   };
 }
 

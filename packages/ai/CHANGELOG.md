@@ -1,5 +1,54 @@
 # Changelog
 
+## [2.12.1](https://github.com/zuke-build/zuke/compare/ai-v2.12.0...ai-v2.12.1) (2026-10-06)
+
+
+### Bug Fixes
+
+* **ai:** raise the @zuke/gh floor to 1.13.0, the release with the tasks it calls ([#718](https://github.com/zuke-build/zuke/issues/718)) ([e97e9ab](https://github.com/zuke-build/zuke/commit/e97e9abd8dfa0327514d749dac2494bd2870af11))
+
+## [2.12.0](https://github.com/zuke-build/zuke/compare/ai-v2.11.0...ai-v2.12.0) (2026-10-06)
+
+
+### Features
+
+* **ai:** one combined pull-request comment for a target's reviewers ([#702](https://github.com/zuke-build/zuke/issues/702)) ([adcfeb8](https://github.com/zuke-build/zuke/commit/adcfeb846c9e5f095b00124abaead2308e1093c8))
+
+## [2.11.0](https://github.com/zuke-build/zuke/compare/ai-v2.10.0...ai-v2.11.0) (2026-10-05)
+
+
+### Features
+
+* **ai:** add progress reactions on pull requests ([#693](https://github.com/zuke-build/zuke/issues/693)) ([949cb79](https://github.com/zuke-build/zuke/commit/949cb7970a73f56e3d1ba0d30c204ec88c9eddee))
+
+## [2.10.0](https://github.com/zuke-build/zuke/compare/ai-v2.9.0...ai-v2.10.0) (2026-09-21)
+
+
+### Features
+
+* **ai,gh:** wire the review with parameters and a token task, derive the command from the reviewers, choose its callers ([#651](https://github.com/zuke-build/zuke/issues/651)) ([9393c2e](https://github.com/zuke-build/zuke/commit/9393c2e4938a2baf602a9ea4fe2d7cc8a4683e13))
+
+## [2.9.0](https://github.com/zuke-build/zuke/compare/ai-v2.8.1...ai-v2.9.0) (2026-09-21)
+
+
+### Features
+
+* **ai:** inherit maintainer decisions across files, severities and reviewers, and add the accept command ([#647](https://github.com/zuke-build/zuke/issues/647)) ([51a2c0e](https://github.com/zuke-build/zuke/commit/51a2c0e0550fc2c2e22ab8b1d37c1519aefdaecd))
+
+## [2.8.1](https://github.com/zuke-build/zuke/compare/ai-v2.8.0...ai-v2.8.1) (2026-09-21)
+
+
+### Bug Fixes
+
+* **ai:** carry an App token on both review jobs so answered threads get resolved ([#634](https://github.com/zuke-build/zuke/issues/634)) ([7b2197f](https://github.com/zuke-build/zuke/commit/7b2197f36a2fa68a1c0170a81acef6afc348475e))
+
+## [2.8.0](https://github.com/zuke-build/zuke/compare/ai-v2.7.0...ai-v2.8.0) (2026-09-21)
+
+
+### Features
+
+* **ai:** remember refutations, adjudicate dropped findings, answer rebuttals on command ([#629](https://github.com/zuke-build/zuke/issues/629)) ([f63dd63](https://github.com/zuke-build/zuke/commit/f63dd6387f8a2b470e2f43572ecfb132028a4f89))
+
 ## [2.7.0](https://github.com/zuke-build/zuke/compare/ai-v2.6.0...ai-v2.7.0) (2026-09-17)
 
 

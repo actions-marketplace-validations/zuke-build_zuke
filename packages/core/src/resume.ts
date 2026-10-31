@@ -33,9 +33,15 @@ import type { JsonValue, TargetBuilder } from "./target.ts";
 import type { StateStore } from "./state/store.ts";
 import { resolveRunStore } from "./run_store.ts";
 import { resolveActor } from "./state/record.ts";
+import {
+  type ReclaimedLocks,
+  reclaimRunLocks,
+  releaseRunLocks,
+} from "./run_locks.ts";
 import { settleTargetRow, settleUnreachedTargets } from "./state/settle.ts";
 import type {
   RunGraphNode,
+  RunLock,
   RunRecord,
   RunStatus,
   WaitDisposition,
@@ -106,6 +112,10 @@ export interface ResumeOptions {
   data?: JsonValue;
   /** Non-secret parameter overrides; the rest come from the record. */
   params?: Record<string, string>;
+  /** Print the opening banner (see {@link "./executor.ts".ExecuteOptions.banner}). */
+  banner?: boolean;
+  /** Force ANSI colour on or off (see {@link "./executor.ts".ExecuteOptions.color}). */
+  color?: boolean;
   /** Reads an environment variable (secrets re-resolve from here). */
   readEnv?: (name: string) => string | undefined;
   /** Who to attribute the resumption to (stamped on the run). */
@@ -236,6 +246,22 @@ export async function resumeRun(
     );
   }
 
+  // Re-claim the run's run-held locks before it moves back to `running`: the
+  // run was promised exclusivity, and a lock that lapsed while it was parked
+  // and went to another run means it no longer has it. Refusing here leaves the
+  // run suspended, which is where the operator can see it and decide.
+  let reclaimed: ReclaimedLocks;
+  try {
+    reclaimed = await reclaimRunLocks(store, initial.record.locks, {
+      actor: resumerActor,
+      runId: options.runId,
+      since: now(),
+    });
+  } catch (error) {
+    await lease.release();
+    throw error;
+  }
+
   // Transition suspended → running (exactly one resumer wins).
   let record: RunRecord;
   let version: string;
@@ -248,11 +274,17 @@ export async function resumeRun(
       now,
       options.signal,
       options.data ?? {},
+      reclaimed.locks,
     ));
   } catch (error) {
     // Losing the compare-and-swap means this process never owned the run, so it
     // must not keep a claim on it — otherwise the winner's own lease attempt, or
-    // a later sweep, would see a holder that is doing nothing.
+    // a later sweep, would see a holder that is doing nothing. The same goes for
+    // the locks taken afresh above, under tokens only this process knows, which
+    // nothing else could ever release. The renewed ones stay: the record still
+    // lists them, so the run — parked, or settled by whoever beat this resume —
+    // keeps them until whatever settles it releases them.
+    await releaseRunLocks(store, reclaimed.retaken);
     await lease.release();
     throw error;
   }
@@ -279,6 +311,8 @@ export async function resumeRun(
       actor: resumerActor,
       silent: options.silent,
       reporter: options.reporter,
+      banner: options.banner,
+      color: options.color,
       plugins: options.plugins,
       resume: { record, version, done, lease },
     });
@@ -300,6 +334,7 @@ async function transitionToRunning(
   now: () => string,
   signal: string | undefined,
   data: JsonValue,
+  locks: RunLock[],
 ): Promise<{ record: RunRecord; version: string }> {
   let record = initial.record;
   let version = initial.version;
@@ -348,6 +383,10 @@ async function transitionToRunning(
     if (signal !== undefined) {
       next.signals[signal] = { data, receivedAt: at };
     }
+    // The re-claimed locks, some possibly under fresh tokens. Written in the same
+    // compare-and-swap that claims the run, so the record never says `running`
+    // with tokens the store no longer honours.
+    if (locks.length > 0) next.locks = locks;
     const result = await store.putRun(next, version);
     if (result.ok) return { record: next, version: result.version };
     // Someone else moved it: re-read and re-check (they may have won the race).
@@ -485,9 +524,12 @@ async function failTimedOut(
     settleUnreachedTargets(next, at);
     next.status = "failed";
     next.updatedAt = at;
+    // A settled run holds nothing; see `finalizeCancelled` in ./cancel.ts.
+    delete next.locks;
     const result = await store.putRun(next, version);
     if (result.ok) {
       settled = next;
+      await releaseRunLocks(store, record.locks);
       break;
     }
     const fresh = await store.getRun(record.id);

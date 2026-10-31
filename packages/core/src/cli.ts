@@ -22,11 +22,7 @@ import {
   graphCommand,
   type GraphHost,
 } from "./graph_view.ts";
-import {
-  findOutdated,
-  formatOutdated,
-  type OutdatedOptions,
-} from "./outdated.ts";
+import { findOutdated, formatOutdated } from "./outdated.ts";
 import {
   type AnyParameter,
   discoverParameters,
@@ -41,18 +37,27 @@ import {
   formatCompletions,
   isCompletionShell,
 } from "./completions.ts";
+import { resolveDocSpec } from "./doc_spec.ts";
+import { VERSION } from "./version.ts";
+import { type CliPaint, cliPaint, PLAIN_PAINT } from "./cli_paint.ts";
+import { formatVersionPanel, versionFacts } from "./cli_version.ts";
+import { resolveOutputMode } from "./output_mode.ts";
 import {
   BUILTIN_FLAG_NAMES,
+  BUILTIN_FLAGS,
+  type BuiltinFlag,
   CANCEL_COMMAND,
   COMPLETIONS_COMMAND,
   DEFAULT_TARGET,
   DOC_COMMAND,
+  FLAG_SECTIONS,
   FORCE_COMMAND,
   GENERATE_CI_COMMAND,
   GRAPH_COMMAND,
   MCP_COMMAND,
   OUTDATED_COMMAND,
   REGISTER_COMMAND,
+  RESERVED_COMMANDS,
   RESUME_COMMAND,
   RUNS_COMMAND,
 } from "./cli_spec.ts";
@@ -74,6 +79,11 @@ import {
   type InstallOptions,
 } from "./completions_install.ts";
 import { describeBuildSurface } from "./describe.ts";
+import {
+  formatUpdate,
+  type UpdateOptions,
+  updateOutdated,
+} from "./outdated_update.ts";
 
 /** `completions` sub-action: print the script to stdout. */
 const PRINT_SUBCOMMAND = "print";
@@ -148,6 +158,13 @@ export interface ParsedArgs {
   parallel?: boolean | number;
   /** Disable the incremental cache (`--no-cache`); undefined leaves it on. */
   cache?: boolean;
+  /** Suppress the opening banner (`--no-banner`); undefined leaves it on. */
+  banner?: boolean;
+  /**
+   * Plain output (`--plain`): no banner, no colour, no decoration. Undefined
+   * leaves the decision to `ZUKE_PLAIN` and the terminal.
+   */
+  plain?: boolean;
   /** Disable only the remote cache store (`--no-remote-cache`); undefined leaves it on. */
   remoteCache?: boolean;
   /** Restrict the run to targets affected since a git base (`--affected[=<base>]`). */
@@ -156,6 +173,8 @@ export interface ParsedArgs {
   affectedBase?: string;
   /** Print the plan without running any target bodies (`--dry-run`). */
   dryRun: boolean;
+  /** Run only the plan's validation preflights, then stop (`--preflight`). */
+  preflight: boolean;
   /** Persist durable run state to `.zuke/runs` when nothing else configures a store (`--state`). */
   state: boolean;
   /** Attribute the run to this actor in its state record (`--actor <name>`). */
@@ -222,9 +241,25 @@ export interface ParsedArgs {
   outdated: boolean;
   /** Exit non-zero when `outdated` found something (`--exit-code`). */
   exitCode: boolean;
+  /** `outdated --update`: move the lock's resolved versions up, don't just report. */
+  update: boolean;
+  /**
+   * Package names after `outdated`, restricting `--update` to those.
+   *
+   * Collected even without `--update` so `outdated @zuke/git --update` and
+   * `outdated --update @zuke/git` mean the same thing, and so a name given to
+   * a plain report is rejected rather than silently ignored.
+   */
+  updateOnly: string[];
+  /** `outdated --min-dep-age <value>`: the release age to honour, as Deno takes it. */
+  minDepAge?: string;
+  /** `outdated --update --entrypoint <file>`: further graphs sharing the lock. */
+  entrypoints: string[];
   /** Raw parameter values from declared flags, keyed by property name. */
   values: Record<string, string>;
   help: boolean;
+  /** Whether `--version` (or `-V`) asked for the core version and nothing else. */
+  version: boolean;
 }
 
 /** Parse a `--parallel=N` value (the inline text after `=`): a positive count, or `true`. */
@@ -379,6 +414,8 @@ const VALUE_FLAGS: ReadonlyMap<string, ValueFlag> = new Map([
   }],
   ["http", { set: (p, v) => (p.httpAddr = v) }],
   ["output", { set: (p, v) => (p.output = parseOutput(v)) }],
+  ["min-dep-age", { set: (p, v) => (p.minDepAge = v), keepEmpty: true }],
+  ["entrypoint", { set: (p, v) => p.entrypoints.push(v), keepEmpty: true }],
 ]);
 
 /**
@@ -410,6 +447,7 @@ export function parseArgs(
     values: {},
     affected: false,
     dryRun: false,
+    preflight: false,
     state: false,
     resume: false,
     forceGraph: false,
@@ -421,9 +459,13 @@ export function parseArgs(
     doc: false,
     outdated: false,
     exitCode: false,
+    update: false,
+    updateOnly: [],
+    entrypoints: [],
     confirmDestructive: false,
     mcpRegistry: false,
     help: false,
+    version: false,
   };
   const byFlag = new Map<string, ParamFlag>();
   for (const pf of paramFlags) byFlag.set(pf.flag, pf);
@@ -445,6 +487,10 @@ export function parseArgs(
       parsed.open = false;
     } else if (arg === "--no-cache") {
       parsed.cache = false;
+    } else if (arg === "--no-banner") {
+      parsed.banner = false;
+    } else if (arg === "--plain") {
+      parsed.plain = true;
     } else if (arg === "--no-remote-cache") {
       parsed.remoteCache = false;
     } else if (arg === "--affected") {
@@ -454,6 +500,8 @@ export function parseArgs(
       parsed.affectedBase = arg.slice("--affected=".length);
     } else if (arg === "--dry-run") {
       parsed.dryRun = true;
+    } else if (arg === "--preflight") {
+      parsed.preflight = true;
     } else if (arg === "--state") {
       parsed.state = true;
     } else if (arg === "--force-graph") {
@@ -466,6 +514,8 @@ export function parseArgs(
       parsed.check = true;
     } else if (arg === "--exit-code") {
       parsed.exitCode = true;
+    } else if (arg === "--update") {
+      parsed.update = true;
     } else if (arg === "--allow-run") {
       parsed.allowRun = true;
     } else if (arg.startsWith("--allow-run=")) {
@@ -481,6 +531,8 @@ export function parseArgs(
       parsed.parallel = parseParallel(arg.slice("--parallel=".length));
     } else if (arg === "--help" || arg === "-h") {
       parsed.help = true;
+    } else if (arg === "--version" || arg === "-V") {
+      parsed.version = true;
     } else if (arg === "--skip") {
       // Not in VALUE_FLAGS on purpose: `--skip=dep` has never parsed, and must
       // keep falling through to unknownFlagError rather than gaining a form.
@@ -558,6 +610,11 @@ export function parseArgs(
     } else if (parsed.doc && parsed.docSpec === undefined) {
       // `doc` takes the spec to document as its positional.
       parsed.docSpec = arg;
+    } else if (parsed.outdated) {
+      // `outdated` takes any number of package names, narrowing --update to
+      // them. Repeatable rather than comma-separated: a scoped name already
+      // contains punctuation, and a shell splits arguments for us.
+      parsed.updateOnly.push(arg);
     } else if (
       parsed.target === undefined && !parsed.graph && !parsed.generateCi &&
       !parsed.completions && !parsed.mcp && !parsed.resume && !parsed.runs &&
@@ -582,182 +639,198 @@ export function parseArgs(
   return parsed;
 }
 
+/**
+ * The reserved command this invocation named, if any.
+ *
+ * Derived from the parsed flags rather than re-scanning argv, so the two can
+ * never disagree about which command was typed.
+ */
+function namedCommand(parsed: ParsedArgs): string | undefined {
+  if (parsed.graph) return GRAPH_COMMAND;
+  if (parsed.generateCi) return GENERATE_CI_COMMAND;
+  if (parsed.completions) return COMPLETIONS_COMMAND;
+  if (parsed.mcp) return MCP_COMMAND;
+  if (parsed.resume) return RESUME_COMMAND;
+  if (parsed.runs) return RUNS_COMMAND;
+  if (parsed.cancel) return CANCEL_COMMAND;
+  if (parsed.force) return FORCE_COMMAND;
+  if (parsed.register) return REGISTER_COMMAND;
+  if (parsed.doc) return DOC_COMMAND;
+  if (parsed.outdated) return OUTDATED_COMMAND;
+  return undefined;
+}
+
 /** Names of a target's direct dependencies, in declaration order. */
 function depNames(t: TargetBuilder): string[] {
   return t.dependsOn_.map((d) => d.name_ ?? "?");
 }
 
-const USAGE = `zuke — code-first build automation
+/** The program as it is typed, used in the usage lines help prints. */
+const PROGRAM = "zuke";
 
-Usage:
-  deno run -A zuke.ts <target> [--skip <dep>] [--parallel[=N]] [--affected[=<base>]]
-  deno run -A zuke.ts --list [--json]
-  deno run -A zuke.ts graph [--output=html] [--no-open]
-  deno run -A zuke.ts generate-ci [--check]
-  deno run -A zuke.ts completions <install|print> <bash|zsh|fish>
-  deno run -A zuke.ts mcp [--allow-run] [--registry] [--http <host:port>]
-  deno run -A zuke.ts resume <run-id> [--signal <name>] [--data <json>]
-  deno run -A zuke.ts resume --check [<run-id>]
-  deno run -A zuke.ts runs list [--status <s>] [--target <t>] [--since <iso>] [--initiator <n>] [--limit <n>] [--counts] [--json]
-  deno run -A zuke.ts runs show <run-id> [--json]
-  deno run -A zuke.ts runs prune [--keep <age>] [--keep-last <n>] [--dry-run]
-  deno run -A zuke.ts cancel <run-id> [--actor <name>]
-  deno run -A zuke.ts force <run-id> <target> --outcome skipped|succeeded [--reason <why>]
-  deno run -A zuke.ts register [--actor <name>] [--json]
-  deno run -A zuke.ts doc <spec>
-  deno run -A zuke.ts outdated [--exit-code]
+/** Indent and wrap `text` to the help's column, under a `width`-wide label. */
+function wrapDetail(text: string, indent: number, width = 80): string[] {
+  const pad = " ".repeat(indent);
+  const lines: string[] = [];
+  for (const paragraph of text.split("\n\n")) {
+    if (lines.length > 0) lines.push("");
+    let line = "";
+    for (const word of paragraph.split(/\s+/)) {
+      if (line === "") line = word;
+      else if (`${line} ${word}`.length + indent <= width) line += ` ${word}`;
+      else {
+        lines.push(pad + line);
+        line = word;
+      }
+    }
+    if (line !== "") lines.push(pad + line);
+  }
+  return lines;
+}
 
-Options:
-  <target>          Run the target and its transitive dependencies.
-  --skip <dep>      Skip the named dependency (repeatable).
-  --parallel[=N]    Run independent targets concurrently (N = max in flight,
-                    default = CPU count).
-  --no-cache        Ignore the incremental cache; re-run every target.
-  --no-remote-cache Use the local cache only; do not restore from or upload to
-                    the configured remote cache store.
-  --affected[=<base>]
-                    Run only targets affected by files changed since <base>
-                    (a git revision; default HEAD). A target is affected when a
-                    changed file is under its declared inputs or a dependency is
-                    affected; targets with no declared inputs always run.
-  --dry-run         Print the execution plan without running target bodies.
-  --state           Persist durable run state under .zuke/runs (a run record
-                    with per-target status and metadata), unless a store is
-                    already configured via ZUKE_STATE_URL/ZUKE_STATE_DIR or the
-                    build's stateStore(). See docs/state.md.
-  --actor <name>    Attribute the run to <name> in its state record (else
-                    ZUKE_ACTOR, the CI actor, or "anonymous"). Every resume
-                    rewrites it with whoever picked the run up.
-  --actor-kind <k>  Whether a person or a machine asked: human (default) or
-                    service (else ZUKE_ACTOR_KIND). Recorded on the run's
-                    initiator, which — unlike --actor — is stamped once at
-                    creation and never rewritten.
-  --list, -l        List all targets with descriptions and dependencies.
-  --json            With --list, print the build surface (commands, flags,
-                    targets, parameters) as JSON for tools and agents.
-  graph             Show the dependency graph. Default output is the terminal
-                    adjacency listing; --output=html writes an interactive
-                    page to .zuke/ and opens it in a browser.
-  generate-ci       Write the CI configuration files declared on the build
-                    (via cicd()). Running any target regenerates them too.
-  completions       Shell completion for bash, zsh, or fish, completing target
-                    names, commands, and flags. 'print <shell>' writes the
-                    script to stdout (source it, e.g.
-                    source <(deno run -A zuke.ts completions print bash));
-                    'install <shell>' writes it and wires it into your shell's
-                    startup automatically.
-  --check           With generate-ci, verify the files are current instead of
-                    writing them, failing if any has drifted (use on CI).
-  --output <fmt>    Graph output format: text (default) or html.
-  --no-open         With --output=html, do not open a browser.
-  mcp               Run an MCP server over the build on stdio, exposing its
-                    targets to AI agents as typed tools. Read-only by default
-                    (inspect the targets, parameters, and graph); add
-                    --allow-run to let agents execute targets too.
-  --allow-run[=<globs>]
-                    With mcp, allow agents to execute targets (not just inspect
-                    them). An optional =<comma,globs> allow-list exposes only the
-                    matching targets as run tools; others are invisible.
-  --protect <globs> With mcp, require an operator token (ZUKE_OPERATOR_TOKEN) as
-                    a tool-call argument to run the matching targets.
-  --confirm-destructive
-                    With mcp, make a destructive run tool return its plan unless
-                    called with confirm:true (a .readOnly() target is exempt).
-  --registry        With mcp, serve the build registry instead of this one build:
-                    expose every registered pipeline's targets as tools, re-read
-                    live so a newly-registered build appears with no restart. A
-                    run tool spawns the registered build's launch command (behind
-                    --allow-run + the same authz). See docs/registry.md.
-  --max-concurrent-runs <n>
-                    With mcp --registry, the most run-tool spawns allowed at
-                    once (default 4). A call past the cap gets an immediate busy
-                    error; read tools are never blocked or counted.
-  --http <host:port>
-                    With mcp, serve the streamable-HTTP transport on the given
-                    address instead of stdio. Just <port> binds 127.0.0.1. A
-                    non-loopback host must authenticate its callers: a bearer
-                    token (ZUKE_MCP_TOKEN) or an mcpAuth() authenticator on the
-                    build. Put real TLS in front for production. See docs/mcp.md.
-  --allowed-origin <origin>
-                    With mcp --http, permit this browser Origin (repeatable). By
-                    default a loopback bind accepts only loopback origins (the
-                    drive-by / DNS-rebinding guard); a request with no Origin (a
-                    CLI client) is always allowed.
-  resume            Continue a suspended run (a .waitsFor() gate). Exactly one
-                    resumer wins; the rest report "already resumed". With
-                    --check [<run-id>] it re-checks suspended runs (predicate
-                    waits, timeouts) — the cron/webhook entry point.
-  --signal <name>   With resume, deliver a named external signal to the run.
-  --data <json>     With resume --signal, the signal's JSON payload (default {}).
-  --force-graph     With resume, continue even if the build graph changed since
-                    the run was suspended.
-  --resume-degraded With resume, continue even though the record is degraded — a
-                    state write was permanently lost while the run executed, so a
-                    target that succeeded may still be recorded running. Such a
-                    target is re-run, so only use this once you know it is safe
-                    to repeat.
-  runs              Inspect persisted run records from the state store. 'list'
-                    prints one row per run (newest first); 'show <run-id>'
-                    reconstructs a run's full per-target status and metadata.
-                    Both accept --json for tools. See docs/state.md.
-  cancel            Cancel a run <run-id>: stop it (a live run aborts), run the
-                    compensations of every target that had succeeded — in
-                    reverse order — and mark the record cancelled. Idempotent:
-                    cancelling a finished run is a no-op. See docs/orchestration.md.
-  register          Record this build in the build registry (its targets,
-                    parameters, and launch location) so a registry-backed MCP
-                    server can discover it. Idempotent; excludes secrets. Writes
-                    to .zuke/builds unless ZUKE_REGISTRY_URL/DIR or the build's
-                    registry() configures a store. See docs/registry.md.
-  doc <spec>        Print a package's API docs by running 'deno doc <spec>' from
-                    an isolated empty directory (e.g. doc jsr:@zuke/deno). Run in
-                    a Node repo, deno doc otherwise resolves node_modules/@types
-                    and buries the API under type-resolution warnings; the empty
-                    cwd has nothing to resolve. A relative path (./mod.ts) is
-                    resolved against the real working directory first.
-  outdated          Report the JSR packages the lock resolves to a version
-                    older than the registry's latest. Needs the network, which
-                    is why it is a command rather than a line in --list: a
-                    build whose specifiers are written inline (jsr:@zuke/x@^1)
-                    gets no signal from deno outdated, which reads manifests.
-  --exit-code       With outdated, exit non-zero when a package is behind or
-                    could not be checked, so a gate can fail on either — a run
-                    that reached nothing has not answered the question.
-  --status <s>      With runs list, keep only runs with this status (running,
-                    suspended, succeeded, failed, cancelled).
-  --target <t>      With runs list, keep only runs whose graph contains this
-                    target.
-  --since <iso>     With runs list, keep only runs created at or after this
-                    ISO-8601 timestamp.
-  --initiator <n>   With runs list, keep only runs <n> started. Matches the
-                    recorded initiator, falling back to the actor on a run
-                    recorded before initiators existed.
-  --outcome <o>     With force, what the target settles to without running:
-                    skipped (take the step off the plan) or succeeded (a person
-                    did it by hand — a later cancel compensates it).
-  --reason <why>    With force, why — recorded on the run beside who forced it,
-                    and shown by runs show.
-  --limit <n>       With runs list, return at most this many runs (the newest).
-  --counts          With runs list, print aggregate counts (total + per status).
-  --keep <age>      With runs prune, keep runs newer than this age (e.g. 90d);
-                    older terminal runs become eligible for deletion.
-  --keep-last <n>   With runs prune, always keep the newest N terminal runs.
-                    Non-terminal runs (suspended, running) are never pruned.
-  --<param> <val>   Set a declared build parameter (see Parameters below).
-  --help, -h        Show this help.`;
+/**
+ * One `  name   description` row, wrapped under the name column. `paintName`
+ * is applied after padding, so the escape codes never count toward the column.
+ */
+function row(
+  name: string,
+  description: string,
+  width: number,
+  paintName: (text: string) => string = (text) => text,
+): string[] {
+  const indent = width + 4;
+  const label = `  ${paintName(name.padEnd(width))}  `;
+  const wrapped = wrapDetail(description, indent);
+  if (wrapped.length === 0) return [label.trimEnd()];
+  return [label + wrapped[0].trimStart(), ...wrapped.slice(1)];
+}
+
+/** A flag as the help shows it: its name, then the value it takes, if any. */
+function flagLabel(flag: BuiltinFlag): string {
+  return `${flag.name}${flag.value ?? ""}`;
+}
+
+/** The flags that apply to any run, rather than qualifying one command. */
+function generalFlags(): BuiltinFlag[] {
+  return BUILTIN_FLAGS.filter((f) => f.command === undefined);
+}
+
+/**
+ * The main `--help`: what exists, one short line each, in labelled groups.
+ *
+ * Commands and options are separate sections rather than one list — they are
+ * different kinds of thing, and interleaving them was what made the old help
+ * hard to scan. The per-entry prose lives in each command's own help, so this
+ * stays a map of the surface rather than the manual.
+ */
+function usageText(paint: CliPaint): string {
+  const commandWidth = Math.max(
+    ...RESERVED_COMMANDS.map((c) => c.name.length),
+  );
+  const flags = generalFlags();
+  const flagWidth = Math.max(
+    ...flags.map((f) => flagLabel(f).length),
+    "<target>".length,
+  );
+  const program = paint.brand(PROGRAM);
+  const lines = [
+    `${program} — code-first build automation`,
+    "",
+    paint.heading("Usage:"),
+    `  ${program} <target> [options]`,
+    `  ${program} <command> [options]`,
+    `  ${program} --list [--json]`,
+    "",
+    paint.heading("Commands:"),
+  ];
+  for (const command of RESERVED_COMMANDS) {
+    lines.push(
+      ...row(command.name, command.description, commandWidth, paint.command),
+    );
+  }
+  for (const [section, heading] of FLAG_SECTIONS) {
+    lines.push("", paint.heading(heading));
+    if (section === "run") {
+      lines.push(
+        ...row(
+          "<target>",
+          "Run the target and its transitive dependencies.",
+          flagWidth,
+          paint.target,
+        ),
+      );
+    }
+    for (const flag of flags.filter((f) => f.section === section)) {
+      lines.push(
+        ...row(flagLabel(flag), flag.description, flagWidth, paint.flag),
+      );
+    }
+  }
+  lines.push(
+    "",
+    paint.muted(
+      `Run \`${PROGRAM} <command> --help\` for a command's own options and detail.`,
+    ),
+  );
+  return lines.join("\n");
+}
+
+/**
+ * A single command's help: its usage, its explanation, and the flags that
+ * qualify it — the detail the main help deliberately leaves out.
+ *
+ * Returns `undefined` for a name that is not a reserved command, so the caller
+ * can fall back to the main help rather than print an empty page.
+ */
+export function formatCommandHelp(
+  name: string,
+  paint: CliPaint = PLAIN_PAINT,
+): string | undefined {
+  const command = RESERVED_COMMANDS.find((c) => c.name === name);
+  if (command === undefined) return undefined;
+  const program = paint.brand(PROGRAM);
+  const lines = [
+    `${program} ${paint.command(command.name)} — ${command.description}`,
+    "",
+  ];
+  const usage = command.usage ?? [command.name];
+  lines.push(paint.heading("Usage:"));
+  for (const line of usage) lines.push(`  ${program} ${line}`);
+  if (command.detail !== undefined) {
+    lines.push("", ...wrapDetail(command.detail, 0));
+  }
+  const own = BUILTIN_FLAGS.filter((f) => f.command === command.name);
+  if (own.length > 0) {
+    const width = Math.max(...own.map((f) => flagLabel(f).length));
+    lines.push("", paint.heading("Options:"));
+    for (const flag of own) {
+      lines.push(
+        ...row(
+          flagLabel(flag),
+          flag.detail ?? flag.description,
+          width,
+          paint.flag,
+        ),
+      );
+    }
+  }
+  return lines.join("\n");
+}
 
 /** Render `--help`, including the available targets and parameters. */
 export function formatHelp(
   targets: Map<string, TargetBuilder>,
   params: Map<string, AnyParameter> = new Map(),
+  paint: CliPaint = PLAIN_PAINT,
 ): string {
-  return `${USAGE}\n\n${formatList(targets, params)}`;
+  return `${usageText(paint)}\n\n${formatList(targets, params, paint)}`;
 }
 
 /** Render `--list`: each target with its description and dependencies, then parameters. */
 export function formatList(
   targets: Map<string, TargetBuilder>,
   params: Map<string, AnyParameter> = new Map(),
+  paint: CliPaint = PLAIN_PAINT,
 ): string {
   // `unlisted` targets stay runnable by name but are hidden from the listing.
   const listed = new Map(
@@ -765,56 +838,76 @@ export function formatList(
   );
   const targetText = listed.size === 0
     ? "No targets defined."
-    : renderTargets(listed);
-  const paramText = formatParameters(params);
+    : renderTargets(listed, paint);
+  const paramText = formatParameters(params, paint);
   return paramText === "" ? targetText : `${targetText}\n\n${paramText}`;
 }
 
-/** Render the target listing (non-empty). */
-function renderTargets(targets: Map<string, TargetBuilder>): string {
+/**
+ * Render the target listing (non-empty), sorted by name so a long build is
+ * scannable; dependencies stay in declaration order.
+ */
+function renderTargets(
+  targets: Map<string, TargetBuilder>,
+  paint: CliPaint,
+): string {
   const width = Math.max(...[...targets.keys()].map((n) => n.length));
-  const lines = ["Targets:"];
-  for (const [name, t] of targets) {
+  const lines = [paint.heading("Targets:")];
+  const sorted = [...targets].sort(([a], [b]) => a.localeCompare(b, "en"));
+  for (const [name, t] of sorted) {
     const deps = depNames(t);
     const desc = t.description_ ?? "";
-    const fanOut = t.forEach_ !== undefined ? "  [fan-out]" : "";
-    const suffix = deps.length ? `  (depends on: ${deps.join(", ")})` : "";
-    lines.push(`  ${name.padEnd(width)}  ${desc}${fanOut}${suffix}`);
+    const fanOut = t.forEach_ !== undefined ? paint.muted("  [fan-out]") : "";
+    const suffix = deps.length
+      ? paint.muted(`  (depends on: ${deps.join(", ")})`)
+      : "";
+    lines.push(
+      `  ${paint.target(name.padEnd(width))}  ${desc}${fanOut}${suffix}`,
+    );
   }
   return lines.join("\n");
 }
 
 /** Render the parameters section, or `""` when no parameters are declared. */
-function formatParameters(params: Map<string, AnyParameter>): string {
+function formatParameters(
+  params: Map<string, AnyParameter>,
+  paint: CliPaint,
+): string {
   if (params.size === 0) return "";
   const flags = [...params].map(([n, p]) => flagOf(n, p));
   const width = Math.max(...flags.map((f) => f.length));
-  const lines = ["Parameters:"];
+  const lines = [paint.heading("Parameters:")];
   for (const [name, p] of params) {
     const bits: string[] = [];
     if (p.required_) bits.push("required");
     if (p.options_ && p.options_.length > 0) {
       bits.push(`one of: ${p.options_.join(", ")}`);
     }
-    const meta = bits.length > 0 ? `  (${bits.join("; ")})` : "";
+    const meta = bits.length > 0 ? paint.muted(`  (${bits.join("; ")})`) : "";
     const desc = p.description_ ?? "";
-    lines.push(`  --${flagOf(name, p).padEnd(width)}  ${desc}${meta}`);
+    const flag = paint.flag(`--${flagOf(name, p).padEnd(width)}`);
+    lines.push(`  ${flag}  ${desc}${meta}`);
   }
   return lines.join("\n");
 }
 
 /** Render the `graph` text output: an adjacency listing of `target → deps`. */
-export function formatGraph(targets: Map<string, TargetBuilder>): string {
+export function formatGraph(
+  targets: Map<string, TargetBuilder>,
+  paint: CliPaint = PLAIN_PAINT,
+): string {
   if (targets.size === 0) return "No targets defined.";
-  const lines = ["Dependency graph:"];
+  const lines = [paint.heading("Dependency graph:")];
   for (const [name, t] of targets) {
     const deps = depNames(t);
     const group = t.group_?.name_ !== undefined
-      ? `  [group: ${t.group_.name_}]`
+      ? paint.muted(`  [group: ${t.group_.name_}]`)
       : "";
-    const fanOut = t.forEach_ !== undefined ? "  [fan-out]" : "";
-    const arrow = deps.length ? ` → ${deps.join(", ")}` : "";
-    lines.push(`  ${name}${arrow}${group}${fanOut}`);
+    const fanOut = t.forEach_ !== undefined ? paint.muted("  [fan-out]") : "";
+    const arrow = deps.length
+      ? ` ${paint.muted("→")} ${deps.map(paint.command).join(", ")}`
+      : "";
+    lines.push(`  ${paint.target(name)}${arrow}${group}${fanOut}`);
   }
   return lines.join("\n");
 }
@@ -862,16 +955,24 @@ export interface MainOptions {
   /** Runner for the `doc` command's `deno doc` spawn (injected in tests). */
   docRunner?: DocRunner;
   /**
-   * Lock path, registry origin and `fetch` for the `outdated` command
-   * (injected in tests, which have neither a lock nor a network).
+   * Lock path, registry origin and `fetch` for the `outdated` command, plus
+   * the re-resolution seam `--update` drives (injected in tests, which have
+   * neither a lock, a network, nor a `deno` to spawn).
    */
-  outdatedOptions?: OutdatedOptions;
+  outdatedOptions?: UpdateOptions;
   /** Lifecycle observers to run alongside the build's own hooks. */
   plugins?: Plugin[];
   /** Overrides for `completions install` (home/config dir), injected in tests. */
   installOptions?: InstallOptions;
   /** Renderer for the build's banners and summary (see {@link RunOptions}). */
   renderer?: Renderer;
+  /**
+   * Whether stdout is an interactive terminal, which decides whether the
+   * informational commands (`--help`, `--list`, `graph`, `--version`) print
+   * their rich form. Defaults to asking Deno; injected in tests, which never
+   * run on a terminal.
+   */
+  isTerminal?: () => boolean;
   /**
    * Where the run narrates its progress — the lock-wait notice, cancellation
    * lines, and the like. Injected in tests, which need to observe those lines
@@ -944,6 +1045,17 @@ async function installCompletionScript(
 const MAX_SIGNAL_DATA_BYTES = 64 * 1024;
 
 /**
+ * The run options `--plain` overrides: no banner and no colour. Spread after the
+ * run's own `banner` so the flag wins over `--no-banner`'s absence; without the
+ * flag it adds nothing, and `ZUKE_PLAIN` is the executor's own to read.
+ */
+function plainOverrides(
+  parsed: ParsedArgs,
+): { banner?: boolean; color?: boolean } {
+  return parsed.plain ? { banner: false, color: false } : {};
+}
+
+/**
  * Parse a `--data` JSON payload. Its *shape* is intentionally free-form (the
  * build interprets its own signals, like parameters), but its size is capped so
  * a webhook forwarding a large body can't bloat the persisted run record.
@@ -1004,6 +1116,8 @@ async function runResume(
       actor: parsed.actor,
       forceGraph: parsed.forceGraph,
       resumeDegraded: parsed.resumeDegraded,
+      banner: parsed.banner,
+      ...plainOverrides(parsed),
       plugins,
     });
     return result.ok ? 0 : 1;
@@ -1180,42 +1294,31 @@ const defaultDocRunner: DocRunner = async (spec) => {
 };
 
 /**
- * Whether a `deno doc` spec is a URL or an absolute path — i.e. not something to
- * resolve against the working directory. A URL has a multi-character scheme
- * (`jsr:`, `npm:`, `https:`, …); a lone drive letter (`C:`) is a Windows
- * absolute path, not a scheme; a leading `/` is a POSIX absolute path.
- */
-function isUrlOrAbsolute(spec: string): boolean {
-  const normalized = spec.replace(/\\/g, "/");
-  if (normalized.startsWith("/")) return true; // POSIX absolute
-  if (/^[A-Za-z]:/.test(normalized)) return true; // Windows drive absolute
-  return /^[a-z][a-z0-9+.-]+:/i.test(normalized); // URL scheme (2+ chars)
-}
-
-/**
  * Run the `doc` command: print a package's API docs via `deno doc`, isolated
- * from the repo so type-resolution noise doesn't bury the output. Any relative
- * spec (a file path, not a `jsr:`/`npm:`/`https:` URL or absolute path) is
- * resolved against the real working directory first, since the runner documents
- * from a different (empty) directory. Errors resolve to a non-zero exit with a
- * friendly message, matching the other commands.
+ * from the repo so type-resolution noise doesn't bury the output. The argument
+ * is resolved by {@link resolveDocSpec} — the same rule the installed `zuke`
+ * applies, so `zuke doc core` and `./zuke doc core` name the same package
+ * rather than one of them looking for a file. Errors resolve to a non-zero
+ * exit with a friendly message, matching the other commands.
  */
 async function runDoc(
   parsed: ParsedArgs,
   runner: DocRunner = defaultDocRunner,
 ): Promise<number> {
-  let spec = parsed.docSpec;
-  if (spec === undefined) {
+  const spec = parsed.docSpec;
+  // An empty spec is a missing one, not a package name: resolving "" would
+  // build `jsr:@zuke/` and hand deno doc a malformed specifier to complain
+  // about. The installed CLI already refuses it, and these two agree.
+  if (spec === undefined || spec === "") {
     cliReporter.error(
-      "Usage: zuke doc <spec>   (e.g. zuke doc jsr:@zuke/deno, or ./mod.ts)",
+      "Usage: zuke doc <spec>   (e.g. zuke doc core, jsr:@zuke/deno, or ./mod.ts)",
     );
     return 1;
   }
-  // A file path is relative to the caller's cwd, but the runner documents from
-  // an isolated empty directory — resolve it to absolute before it changes.
-  if (!isUrlOrAbsolute(spec)) spec = `${Deno.cwd()}/${spec}`;
+  // A path is relative to the caller's cwd, but the runner documents from an
+  // isolated empty directory — resolve it while that directory is still ours.
   try {
-    return await runner(spec);
+    return await runner(resolveDocSpec(spec, Deno.cwd()));
   } catch (error) {
     cliReporter.error(messageOf(error));
     return 1;
@@ -1235,10 +1338,25 @@ async function runDoc(
  */
 async function runOutdated(
   parsed: ParsedArgs,
-  options: OutdatedOptions = {},
+  options: UpdateOptions = {},
 ): Promise<number> {
   try {
-    const report = await findOutdated(options);
+    if (parsed.update) return await runOutdatedUpdate(parsed, options);
+    if (parsed.updateOnly.length > 0) {
+      // Names only mean something to --update. Accepting them silently on a
+      // plain report would read as a filter that quietly did nothing.
+      cliReporter.error(
+        `outdated: package names only apply with --update ` +
+          `(got ${parsed.updateOnly.join(", ")}).`,
+      );
+      return 1;
+    }
+    if (parsed.entrypoints.length > 0) {
+      // Entrypoints only steer the re-resolution; a report resolves nothing.
+      cliReporter.error("outdated: --entrypoint only applies with --update.");
+      return 1;
+    }
+    const report = await findOutdated(withMinDepAge(parsed, options));
     cliReporter.info(formatOutdated(report));
     // A package that could not be checked counts as a failure under
     // --exit-code: a gate asking "are we current?" has not been told yes, and
@@ -1250,6 +1368,42 @@ async function runOutdated(
     cliReporter.error(messageOf(error));
     return 1;
   }
+}
+
+/** `options` with `--min-dep-age` applied, when it was given. */
+function withMinDepAge(
+  parsed: ParsedArgs,
+  options: UpdateOptions,
+): UpdateOptions {
+  return parsed.minDepAge === undefined
+    ? options
+    : { ...options, minDepAge: parsed.minDepAge };
+}
+
+/**
+ * Run `outdated --update`: move the lock's resolved versions up, then report
+ * what moved and what its specifier held back.
+ *
+ * `--exit-code` answers a different question here than it does on the report.
+ * There it means "something is behind"; after an update, being behind is the
+ * expected state of anything a specifier pins, and failing on it would make
+ * the flag impossible to use in the scheduled pipeline the command is meant
+ * for. So it fails on what is *still* actionable: a package held back, or one
+ * that could not be checked. A clean update exits 0.
+ */
+async function runOutdatedUpdate(
+  parsed: ParsedArgs,
+  options: UpdateOptions,
+): Promise<number> {
+  const only = parsed.updateOnly.length > 0 ? parsed.updateOnly : undefined;
+  const report = await updateOutdated({
+    ...withMinDepAge(parsed, options),
+    only,
+    entrypoints: parsed.entrypoints,
+  });
+  cliReporter.info(formatUpdate(report));
+  const unresolved = report.held.length + report.unchecked.length;
+  return parsed.exitCode && unresolved > 0 ? 1 : 0;
 }
 
 /** Run the `runs` command: build the query (validating `--status`) and dispatch. */
@@ -1375,8 +1529,35 @@ async function runCommand(
     return 1;
   }
 
+  // How decorated the informational commands below are: rich on an
+  // interactive terminal, plain under `--plain`/`ZUKE_PLAIN`, on CI, or piped.
+  const paint = cliPaint(
+    resolveOutputMode({
+      plain: parsed.plain,
+      isTerminal: options.isTerminal,
+    }),
+  );
+
   if (parsed.help) {
-    cliReporter.info(formatHelp(targets, params));
+    // `zuke mcp --help` asks about mcp, not about the build. The parser has
+    // already recorded which command was named, so the detail the main help
+    // leaves out is one lookup away.
+    const command = namedCommand(parsed);
+    const detail = command === undefined
+      ? undefined
+      : formatCommandHelp(command, paint);
+    cliReporter.info(detail ?? formatHelp(targets, params, paint));
+    return 0;
+  }
+
+  if (parsed.version) {
+    // Bare unless rich, so a script — which reads through a pipe, and is
+    // therefore never rich — gets a number it need not parse around. Help wins
+    // when both are given, matching how `--help` beats an unknown flag:
+    // whoever asked for help is the one who needs it.
+    cliReporter.info(
+      paint.rich ? formatVersionPanel(versionFacts(), paint) : VERSION,
+    );
     return 0;
   }
 
@@ -1399,14 +1580,14 @@ async function runCommand(
     return 0;
   }
   if (parsed.list) {
-    cliReporter.info(formatList(targets, params));
+    cliReporter.info(formatList(targets, params, paint));
     return 0;
   }
   if (parsed.graph) {
     if (parsed.output === "html") {
       return await graphCommand(targets, { open: parsed.open }, graphHost);
     }
-    cliReporter.info(formatGraph(targets));
+    cliReporter.info(formatGraph(targets, paint));
     return 0;
   }
   if (parsed.completions) {
@@ -1458,7 +1639,7 @@ async function runCommand(
     if (targets.has(DEFAULT_TARGET)) {
       name = DEFAULT_TARGET;
     } else {
-      cliReporter.info(formatList(targets, params));
+      cliReporter.info(formatList(targets, params, paint));
       return 0;
     }
   }
@@ -1517,9 +1698,12 @@ async function runCommand(
       params: parsed.values,
       parallel: parsed.parallel,
       cache: parsed.cache,
+      banner: parsed.banner,
+      ...plainOverrides(parsed),
       remoteCache: parsed.remoteCache === false ? false : undefined,
       affected: parsed.affected ? { base: parsed.affectedBase } : undefined,
       dryRun: parsed.dryRun,
+      preflightOnly: parsed.preflight,
       state: parsed.state,
       actor: parsed.actor,
       actorKind,

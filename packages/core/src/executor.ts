@@ -22,6 +22,7 @@
 
 import type { Build, BuildResult } from "./build.ts";
 import { defaultReadEnv, messageOf } from "./internal.ts";
+import { resolveOutputMode } from "./output_mode.ts";
 import { escapingReporter, type Reporter } from "./reporter.ts";
 export type { Reporter } from "./reporter.ts";
 import {
@@ -41,6 +42,7 @@ import { openRunState } from "./execute_state.ts";
 import { paramOverrideEvent, recordedParams } from "./state/record.ts";
 import type { HeldLease } from "./state/run_lease.ts";
 import { settleCancelledRun } from "./execute_cancel.ts";
+import { resolveFailureDispositions } from "./on_failure.ts";
 import { cancelledElsewhere } from "./cancel.ts";
 import { makeLifecycle } from "./lifecycle.ts";
 import type { RunOutcome } from "./run_support.ts";
@@ -70,14 +72,30 @@ import type { TargetBuilder } from "./target.ts";
 import type { ActorKind, RunRecord } from "./state/types.ts";
 import { withAmbientSignal } from "./ambient_signal.ts";
 import { withAmbientRedactor } from "./ambient_redactor.ts";
+import { runPreflights } from "./preflight.ts";
 import type { StateStore } from "./state/store.ts";
 import type { Plugin, RunInfo } from "./plugin.ts";
 import type { Renderer } from "./renderer.ts";
+import { type BannerFacts, bannerLines } from "./banner.ts";
+import { detectCiHost, isCI } from "./host.ts";
+import { VERSION } from "./version.ts";
 
 /** Options for {@link execute}. */
 export interface ExecuteOptions {
   /** Suppress all banner/summary output (used by tests). */
   silent?: boolean;
+  /**
+   * Print the opening banner — the wordmark (off CI), the framework, runtime
+   * and platform versions, and this run's id and directory. Defaults to on;
+   * `false` is the CLI's `--no-banner`, and `ZUKE_NO_BANNER` turns it off from
+   * the environment. Plain output (`ZUKE_PLAIN`, or the CLI's `--plain`) turns
+   * it off as well, whatever this says.
+   *
+   * Only ever printed when the run writes to the real console. A `silent` run
+   * or one given its own {@link ExecuteOptions.reporter} is embedding the
+   * executor, and gets no banner whatever this says.
+   */
+  banner?: boolean;
   /** Custom reporter; overrides `silent`. */
   reporter?: Reporter;
   /**
@@ -136,6 +154,14 @@ export interface ExecuteOptions {
    * the cache (CLI `--dry-run`).
    */
   dryRun?: boolean;
+  /**
+   * Run only the preflight phase — every planned validation's
+   * {@link Validation.preflight} — and stop, executing no target (CLI
+   * `--preflight`). The result is ok when every preflight passed. Missing or
+   * invalid parameters do not fail it: the step that asks is meant to run
+   * without the secrets they come from.
+   */
+  preflightOnly?: boolean;
   /**
    * Restrict the run to the targets affected by files changed since a base git
    * revision (CLI `--affected[=<base>]`). A target is affected when a changed
@@ -279,7 +305,11 @@ export async function execute(
     }
     emitActionsMasks(secrets, baseReporter);
   }
-  if (paramErrors.length > 0) {
+  // A preflight-only run is how a workflow asks "may this run?" in a step that
+  // deliberately holds no secrets, so the parameters those secrets fill are
+  // missing by design there. Nothing runs that would read them; a preflight
+  // that needs one reads it unresolved and says so itself.
+  if (paramErrors.length > 0 && options.preflightOnly !== true) {
     messages.error("Invalid or missing parameters:");
     for (const message of paramErrors) messages.error(`  ${message}`);
     return {
@@ -349,6 +379,24 @@ export async function execute(
   const runId = options.resume ? options.resume.record.id : crypto.randomUUID();
   const runInfo: RunInfo = { runId, dryRun };
 
+  // The opening banner, printed once the run has an identity to report and
+  // before the first target header.
+  //
+  // Gated on `writesToConsole` for the same reason the job-summary write is:
+  // when a caller supplies its own reporter it is embedding the executor, and
+  // painting six lines of ASCII into somebody else's sink is not this module's
+  // decision to make. That also covers `silent`, which clears the same flag.
+  //
+  // Through `messages`, not `reporter`: the banner composes no workflow
+  // command of its own, and it carries text this process did not author — the
+  // working directory, and on a resume a run id read from the shared state
+  // store. A directory named `::error::…` would otherwise reach a runner's log
+  // as a live command.
+  if (writesToConsole && showBanner(options.banner, readEnv)) {
+    const facts = runtimeFacts(runId, readEnv, style.width);
+    for (const line of bannerLines(facts, style.color)) messages.info(line);
+  }
+
   const life = makeLifecycle(
     build,
     options.plugins ?? [],
@@ -390,6 +438,63 @@ export async function execute(
     runController.abort();
   };
 
+  // Every `.onFailure(...)` thunk is evaluated once, here, before anything runs:
+  // a thunk is user code, and the settle path that consults it must not be able
+  // to throw. A bad disposition refuses the run up front, naming the target.
+  const failures = resolveFailureDispositions(order);
+  if (!failures.ok) {
+    messages.error(failures.error.message);
+    return { ok: false, executed: [], error: failures.error };
+  }
+
+  // Preflight: every validation in the plan may refuse the run before any
+  // target — a dependency included — has started, and before the run record
+  // exists. A dry run executes nothing, so it has nothing to guard.
+  if (!dryRun) {
+    const preflight = await withAmbientRedactor(
+      redactor,
+      () => runPreflights(order, runId),
+    );
+    if (!preflight.ok) {
+      const error = preflight.error instanceof Error
+        ? preflight.error
+        : new Error(String(preflight.error));
+      messages.error(
+        `preflight refused the run (${preflight.target}): ${error.message}`,
+      );
+      return { ok: false, executed: [], error };
+    }
+    if (options.preflightOnly === true) {
+      messages.info(
+        `preflight passed — ${preflight.checked} check(s); no target was run.`,
+      );
+      return { ok: true, executed: [] };
+    }
+  }
+  // A target whose `.onFailure(...)` cancels the run turns its failure into a
+  // cancellation of the run this process owns: the same abort Ctrl-C takes, so
+  // in-flight siblings stop and the settlement below runs the compensation walk.
+  // Only the first such failure counts, and never one that arrives after the run
+  // was already stopping — a target failing *because* the run was cancelled is a
+  // symptom of that cancellation, not a second reason for it. A dry run never
+  // cancels: it has no record, so there is nothing to roll back.
+  let failureCancel:
+    | { target: string; error: unknown; first?: TargetBuilder }
+    | undefined;
+  const onTargetFailed = (name: string, error: unknown): void => {
+    if (dryRun || runController.signal.aborted) return;
+    const disposition = failures.cancelling.get(name);
+    if (disposition === undefined) return;
+    failureCancel = disposition === "cancel-run"
+      ? { target: name, error }
+      : { target: name, error, first: disposition };
+    runController.abort();
+    messages.info(
+      `${name} failed and its .onFailure(...) cancels the run — rolling back ` +
+        `run ${runId}.`,
+    );
+  };
+
   const nowIso = () => new Date().toISOString();
   const opened = await openRunState({
     build,
@@ -405,6 +510,8 @@ export async function execute(
     readEnv,
     nowIso,
     onExternalCancel,
+    cancelsOnFailure: failures.cancelling.size > 0,
+    onTargetFailed,
     stateStore: options.stateStore,
     state: options.state,
     actor: options.actor,
@@ -417,6 +524,12 @@ export async function execute(
   }
   const { writer, env } = opened.state;
   const actor = env.actor;
+  // A resumed run's run-held locks were re-claimed by the resume before the
+  // record moved back to `running`, so its record carries their current tokens.
+  // This process keeps them alive from here.
+  for (const lock of options.resume?.record.locks ?? []) {
+    env.runLocks.adopt(lock);
+  }
   // The run's lease: this process's claim that it is the one working on this
   // run. Losing it means another process has taken the run over, so this one
   // stops rather than carrying on in parallel with it — whoever holds the claim
@@ -551,12 +664,17 @@ export async function execute(
     messages.error(lost.message);
     result = { ok: false, executed: run.executed, error: lost, runId };
   } else if (cancelled) {
-    result = {
-      ok: false,
-      executed: run.executed,
-      cancelled: true,
-      runId,
-    };
+    // A cancellation a failure asked for keeps that failure as the run's error,
+    // so the result says both that the run was rolled back and why.
+    result = failureCancel === undefined
+      ? { ok: false, executed: run.executed, cancelled: true, runId }
+      : {
+        ok: false,
+        executed: run.executed,
+        cancelled: true,
+        error: failureCancel.error,
+        runId,
+      };
     if (externallyCancelled) {
       // Another process owns the cancellation: it runs the compensations and
       // settles the record. We stop and leave the run `cancelling`, draining any
@@ -577,6 +695,10 @@ export async function execute(
         nowIso,
         isExternallyCancelled: () => externallyCancelled,
         isLeaseLost: () => leaseLost,
+        failure: failureCancel === undefined ? undefined : {
+          target: failureCancel.target,
+          first: failureCancel.first,
+        },
       });
       // A cancellation only invalidates the cache if something was actually
       // undone. A target records its fingerprint when its body returns, and a
@@ -626,6 +748,20 @@ export async function execute(
       result = { ok: false, executed: run.executed, error: settled, runId };
     }
   }
+
+  // Run-held locks follow the run, not this process. A run another process has
+  // taken over is that process's: it holds the same tokens, so this one only
+  // stops renewing. A run that parked keeps them, renewed for a full TTL so they
+  // outlast the gap until it is resumed. Every other ending gives them back —
+  // including a run cancelled or settled from outside, whose settler leaves a
+  // running run's locks to this process, since only this process knows when its
+  // body has actually stopped. Read last, so a lease lost during the settle
+  // write still counts.
+  if (leaseLost) env.runLocks.stop();
+  else if (
+    run.suspended && !cancelled && writer?.settledElsewhere() !== true
+  ) await env.runLocks.park();
+  else await env.runLocks.release();
 
   // Persist the incremental cache, unless this run's fingerprints have been
   // overtaken by events: a rollback that undid the work they describe, or a new
@@ -704,4 +840,47 @@ async function resolveCache(
     remote,
     warn: (message) => reporter.info(message),
   });
+}
+
+/**
+ * Whether to print the opening banner: on unless the caller turned it off
+ * (`--no-banner`, or `banner: false` programmatically), the environment did
+ * (`ZUKE_NO_BANNER`), or plain output was asked for (`ZUKE_PLAIN`), which
+ * implies no banner.
+ *
+ * The explicit option wins over `ZUKE_NO_BANNER`, so a decision made for one
+ * run is not overridden by a standing preference exported in the shell it runs
+ * from — in either direction. Plain is the one level above it: a caller who
+ * wants plain output and a banner is asking for two contradictory things, and
+ * plain is the stronger request. {@link resolveOutputMode} owns all of it.
+ */
+function showBanner(
+  option: boolean | undefined,
+  readEnv: (name: string) => string | undefined,
+): boolean {
+  return resolveOutputMode({ banner: option, readEnv }).banner;
+}
+
+/**
+ * The facts the banner reports, read from the runtime here so
+ * {@link bannerLines} stays pure and unit-testable without an environment.
+ */
+function runtimeFacts(
+  runId: string,
+  readEnv: (name: string) => string | undefined,
+  width: number,
+): BannerFacts {
+  return {
+    version: VERSION,
+    deno: Deno.version.deno,
+    platform: `${Deno.build.os}-${Deno.build.arch}`,
+    // Both, because they answer different questions: `isCI` knows the systems
+    // with no `CiHost` name (Jenkins, CircleBuild, a bare `CI=true`) and
+    // decides the art; `detectCiHost` names the four Zuke supports.
+    ci: isCI(readEnv),
+    host: detectCiHost(readEnv),
+    runId,
+    cwd: Deno.cwd(),
+    width,
+  };
 }

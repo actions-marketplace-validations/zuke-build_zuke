@@ -56,13 +56,13 @@ Deno.test("the generated YAML carries the right triggers, permissions, concurren
     yaml,
     "    permissions:\n      contents: read\n      pull-requests: write",
   );
-  // Concurrency on the job, cancel-in-progress true.
+  // Concurrency on the job; the push-started job cancels a superseded run.
   assertStringIncludes(yaml, "    concurrency:\n      group:");
   assertStringIncludes(yaml, "cancel-in-progress: true");
   // Fork gating, on the pull_request event by name.
   assertStringIncludes(
     yaml,
-    "if: \"${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.fork == false }}\"",
+    "if: \"${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository }}\"",
   );
   // Job-level timeout matches the original hand-written workflow.
   assertStringIncludes(yaml, "timeout-minutes: 15");
@@ -464,7 +464,7 @@ function commandBuild(
   return b.wf.render();
 }
 
-Deno.test("command adds the issue_comment trigger and a job gated on the command, a human maintainer and a pull request", () => {
+Deno.test("command adds the issue_comment trigger and a job gated on the command, a human account and a pull request", () => {
   const yaml = commandBuild();
   assertStringIncludes(yaml, "pull_request: {}");
   assertStringIncludes(yaml, "issue_comment:\n    types:\n      - created");
@@ -478,13 +478,11 @@ Deno.test("command adds the issue_comment trigger and a job gated on the command
     ) ?? "";
   assertStringIncludes(gate, "github.event.issue.pull_request &&");
   assertStringIncludes(gate, "github.event.comment.user.type != 'Bot'");
-  for (const association of ["OWNER", "MEMBER", "COLLABORATOR"]) {
-    assertStringIncludes(
-      gate,
-      `github.event.comment.author_association == '${association}'`,
-    );
-  }
-  assertEquals(gate.includes("CONTRIBUTOR"), false);
+  // No association clause: GitHub reports a private organisation member as
+  // CONTRIBUTOR on this event, so the field turned maintainers away, and
+  // MEMBER/COLLABORATOR admit read-only accounts. The collaborators API
+  // decides, in the job's first step.
+  assertEquals(gate.includes("author_association"), false);
   assertStringIncludes(
     gate,
     "startsWith(github.event.comment.body, '@zuke-build review')",
@@ -527,14 +525,14 @@ Deno.test("the command job carries the named secrets and no base fetch; the pull
   // The pull_request job now states its event, since the workflow has two.
   assertStringIncludes(
     reviewJob,
-    "if: \"${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.fork == false }}\"",
+    "if: \"${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository }}\"",
   );
   // Same prelude and timeout on both.
   assertEquals(commandJob.includes("uses: zuke-build/zuke@"), true);
   assertStringIncludes(commandJob, "timeout-minutes: 15");
 });
 
-Deno.test("concurrency is per job and keyed on the pull request, never on the workflow", () => {
+Deno.test("concurrency is one group per pull request, declared on the jobs, never on the workflow", () => {
   // The review's own comment, posted as an app, fires `issue_comment` again.
   // That run is skipped by the bot check — but a workflow-level group would
   // still admit it, and cancel-in-progress would cancel the review mid-post.
@@ -544,21 +542,136 @@ Deno.test("concurrency is per job and keyed on the pull request, never on the wo
   assertEquals(yaml.includes("\nconcurrency:"), false);
   assertEquals(yaml.includes("${{ github.ref }}"), false);
   const [reviewJob, commandJob] = yaml.split("  commandReview:");
+  // The same group on both jobs — the pull request's number, however the
+  // event names it — so a comment-started run never overlaps a push-started
+  // one: both rewrite the reviewer's state block, and the later post would
+  // drop whatever the earlier run recorded. Only the push cancels what is
+  // in flight; the command queues behind it.
   assertStringIncludes(
     reviewJob,
-    '    concurrency:\n      group: "ai-review-${{ github.workflow }}-review-${{ github.event.pull_request.number }}"\n      cancel-in-progress: true',
+    '    concurrency:\n      group: "ai-review-${{ github.workflow }}-${{ github.event.pull_request.number }}"\n      cancel-in-progress: true',
   );
   assertStringIncludes(
     commandJob,
-    '    concurrency:\n      group: "ai-review-${{ github.workflow }}-commandReview-${{ github.event.issue.number }}"\n      cancel-in-progress: true',
+    '    concurrency:\n      group: "ai-review-${{ github.workflow }}-${{ github.event.issue.number }}"\n      cancel-in-progress: false',
   );
-  // The same shape without a command: one job, its own group.
+  // The same shape without a command: one job, the same group.
   const plain = dualBuild().wf.render();
   assertEquals(plain.includes("\nconcurrency:"), false);
   assertStringIncludes(
     plain,
-    "-review-${{ github.event.pull_request.number }}",
+    '"ai-review-${{ github.workflow }}-${{ github.event.pull_request.number }}"',
   );
+});
+
+Deno.test("spec secrets reach the review step of both jobs; the command's stay on its own", () => {
+  class B extends Build {
+    key = parameter("Key").secret().env("OPENAI_API_KEY");
+    security = securityReviewer((r) =>
+      r.provider("openai").apiKey(this.key).comment()
+    );
+    review = target().validateBefore(this.security).executes(() => {});
+    wf = aiReviewWorkflow({
+      reviewers: [this.security],
+      secrets: ["APP_ID", "APP_KEY"],
+      command: (c) => c.text("@zuke-build review").secrets("COMMAND_ONLY"),
+    });
+  }
+  const b = new B();
+  discoverParameters(b);
+  const yaml = b.wf.render();
+  const [reviewJob, commandJob] = yaml.split("  commandReview:");
+  for (const job of [reviewJob, commandJob]) {
+    assertStringIncludes(job, 'APP_ID: "${{ secrets.APP_ID }}"');
+    assertStringIncludes(job, 'APP_KEY: "${{ secrets.APP_KEY }}"');
+  }
+  assertStringIncludes(
+    commandJob,
+    'COMMAND_ONLY: "${{ secrets.COMMAND_ONLY }}"',
+  );
+  assertEquals(reviewJob.includes("COMMAND_ONLY"), false);
+  // Step-scoped, like every other secret: on the review step, never the job.
+  const step = reviewJob.slice(reviewJob.indexOf("AI review with Zuke"));
+  assertStringIncludes(step, "APP_KEY");
+  assertEquals(
+    reviewJob.slice(0, reviewJob.indexOf("AI review with Zuke")).includes(
+      "APP_KEY",
+    ),
+    false,
+  );
+});
+
+Deno.test("a spec secret that is not a valid secret name is rejected", () => {
+  class B extends Build {
+    key = parameter("Key").secret().env("OPENAI_API_KEY");
+    security = securityReviewer((r) => r.provider("openai").apiKey(this.key));
+    review = target().validateBefore(this.security).executes(() => {});
+    wf = aiReviewWorkflow({
+      reviewers: [this.security],
+      secrets: ["BAD-NAME"],
+    });
+  }
+  assertThrows(
+    () => {
+      const b = new B();
+      discoverParameters(b);
+      b.wf.render();
+    },
+    Error,
+    "is not a valid secret name",
+  );
+});
+
+/** A build whose workflow blocks egress, with two reviewers on two providers. */
+function blockingBuild(allowedEndpoints?: string[]): string {
+  class B extends Build {
+    key = parameter("Key").secret().env("OPENAI_API_KEY");
+    claudeKey = parameter("Claude").secret().env("ANTHROPIC_API_KEY");
+    security = securityReviewer((r) =>
+      r.provider("openai").apiKey(this.key).comment()
+    );
+    generic = securityReviewer((r) =>
+      r.provider("claude").apiKey(this.claudeKey)
+    );
+    review = target().validateBefore(this.security, this.generic).executes(
+      () => {},
+    );
+    wf = aiReviewWorkflow({
+      reviewers: [this.security, this.generic],
+      egress: "block",
+      allowedEndpoints,
+      command: (c) => c.text("@zuke-build review"),
+    });
+  }
+  const b = new B();
+  discoverParameters(b);
+  return b.wf.render();
+}
+
+Deno.test("a blocking egress policy lists the build's endpoints and every provider host, on both jobs", () => {
+  const yaml = blockingBuild(["dl.deno.land:443", "api.openai.com:443"]);
+  const [reviewJob, commandJob] = yaml.split("  commandReview:");
+  for (const job of [reviewJob, commandJob]) {
+    assertStringIncludes(job, "egress-policy: block");
+    // The build's list first, then each provider's host — the one already
+    // listed is not repeated, so a build may name it for its own reasons.
+    assertStringIncludes(
+      job,
+      'allowed-endpoints: "dl.deno.land:443 api.openai.com:443 api.anthropic.com:443"',
+    );
+  }
+  // No list at all: the providers alone, so a policy that blocks can never
+  // block the review itself.
+  assertStringIncludes(
+    blockingBuild(),
+    'allowed-endpoints: "api.openai.com:443 api.anthropic.com:443"',
+  );
+});
+
+Deno.test("auditing egress renders no allow-list, and is the default", () => {
+  const yaml = commandBuild();
+  assertStringIncludes(yaml, "egress-policy: audit");
+  assertEquals(yaml.includes("allowed-endpoints"), false);
 });
 
 Deno.test("without a command there is no issue_comment trigger and no second job", () => {
@@ -587,7 +700,7 @@ Deno.test("a command that could break out of the expression, or no command text,
   assertThrows(
     () => commandBuild((c) => c),
     Error,
-    "is not a valid comment command",
+    "the command has no text",
   );
   assertThrows(
     () => commandBuild((c) => c.text("/zuke review").secrets("BAD-NAME")),
@@ -618,32 +731,200 @@ Deno.test("the command is GitHub-only: another host renders no comment job", () 
   assertEquals(yaml.includes("commandReview"), false);
 });
 
-Deno.test("the command job checks the commenter's push access before the review", () => {
-  // `author_association` admits read-only members and collaborators, so the
-  // job asks the collaborators API first: admin/write pass, read/none fail.
+Deno.test("the command job decides who asked in a step with no secrets, then reviews", () => {
+  // Who may start a review is decided by the build's own preflight, in a step
+  // that holds the job's token and nothing else; the step with the keys runs
+  // only when it passed. No shell and no `gh` of the job's own.
   const commandJob = commandBuild().split("  commandReview:")[1];
-  const check = commandJob.indexOf("Require push access for the commenter");
+  assertEquals(commandJob.includes("gh api"), false);
+  assertEquals(commandJob.includes("shell: bash"), false);
+  const check = commandJob.indexOf("Check the commenter may start a review");
   const review = commandJob.indexOf("AI review with Zuke");
   assertEquals(check > 0 && check < review, true);
   const step = commandJob.slice(check, review);
-  assertStringIncludes(step, 'GH_TOKEN: "${{ github.token }}"');
+  assertStringIncludes(step, "id: callers");
+  assertStringIncludes(step, "run: ./zuke review --preflight");
+  // A refusal fails this step only, so a stranger's command does not turn the
+  // run red.
+  assertStringIncludes(step, "continue-on-error: true");
+  assertStringIncludes(step, 'GITHUB_TOKEN: "${{ secrets.GITHUB_TOKEN }}"');
   assertStringIncludes(
     step,
     'ZUKE_REVIEW_ACTOR: "${{ github.event.comment.user.login }}"',
   );
-  assertStringIncludes(step, "collaborators/$ZUKE_REVIEW_ACTOR/permission");
-  assertStringIncludes(step, "admin|write)");
-  assertStringIncludes(step, "exit 1");
-  // Fails closed, explicitly: its own shell and flags, and an API call that
-  // cannot be read refuses the run rather than falling through.
-  assertStringIncludes(step, "shell: bash");
-  assertStringIncludes(step, "set -euo pipefail");
-  assertStringIncludes(step, "refusing to run the review");
-  // The login is validated before it is put in a URL, and it reaches the
-  // script only as env — never interpolated into the script text.
-  assertStringIncludes(step, "*[!A-Za-z0-9-]*)");
-  assertEquals(
-    step.split("${{ github.event.comment.user.login }}").length,
-    2,
+  assertStringIncludes(step, "ZUKE_REVIEW_ROLE: write");
+  // The secrets stay out of the deciding step.
+  assertEquals(step.includes("OPENAI_API_KEY"), false);
+  assertEquals(step.includes("APP_KEY"), false);
+  const reviewStep = commandJob.slice(review);
+  assertStringIncludes(
+    reviewStep,
+    "if: \"steps.callers.outcome == 'success'\"",
   );
+  assertStringIncludes(
+    reviewStep,
+    'OPENAI_API_KEY: "${{ secrets.OPENAI_API_KEY }}"',
+  );
+  // The review step keeps the caller too, so the reviewers check again.
+  assertStringIncludes(reviewStep, "ZUKE_REVIEW_ROLE: write");
+  // No allow-list by default.
+  assertEquals(commandJob.includes("ZUKE_REVIEW_USERS"), false);
+});
+
+Deno.test("also adds commands that start the run too, each matched like the first", () => {
+  const yaml = commandBuild((c) =>
+    c.text("@zuke-build review").also("@zuke-build accept")
+  );
+  const gate =
+    yaml.split("\n").find((line) =>
+      line.includes("github.event_name == 'issue_comment'")
+    ) ?? "";
+  assertStringIncludes(
+    gate,
+    "(startsWith(github.event.comment.body, '@zuke-build review') || " +
+      "startsWith(github.event.comment.body, '@zuke-build accept'))",
+  );
+  // The extra command is held to the same alphabet.
+  assertThrows(
+    () => commandBuild((c) => c.text("@zuke-build review").also("x') || ('")),
+    Error,
+    "is not a valid comment command",
+  );
+});
+
+// ─── the derived command, its callers, and parameter secrets ────────────────
+
+/** A build whose reviewer takes commands, and whose workflow declares nothing about them. */
+function mentionBuild(
+  configure?: (c: ReviewCommandSettings) => ReviewCommandSettings,
+  mention = "@acme-bot",
+): string {
+  class B extends Build {
+    key = parameter("Key").secret().env("OPENAI_API_KEY");
+    security = securityReviewer((r) =>
+      r.provider("openai").apiKey(this.key).comment()
+        .discussion((d) => d.commands(mention))
+    );
+    review = target().validateBefore(this.security).executes(() => {});
+    wf = aiReviewWorkflow({
+      reviewers: [this.security],
+      ...(configure !== undefined ? { command: configure } : {}),
+    });
+  }
+  const b = new B();
+  discoverParameters(b);
+  return b.wf.render();
+}
+
+Deno.test("a reviewer that takes commands derives the command job, review and accept alike", () => {
+  const yaml = mentionBuild();
+  assertStringIncludes(yaml, "commandReview:\n    name: AI review on command");
+  const gate =
+    yaml.split("\n").find((line) =>
+      line.includes("github.event_name == 'issue_comment'")
+    ) ?? "";
+  assertStringIncludes(
+    gate,
+    "(startsWith(github.event.comment.body, '@acme-bot review') || " +
+      "startsWith(github.event.comment.body, '@acme-bot accept'))",
+  );
+  // The lambda refines rather than declares: no text needed to keep the job.
+  const refined = mentionBuild((c) => c.role("triage"));
+  assertStringIncludes(refined, "'@acme-bot review'");
+  assertStringIncludes(refined, "ZUKE_REVIEW_ROLE: triage");
+});
+
+Deno.test("a command text of its own replaces the derived ones; also still adds", () => {
+  const yaml = mentionBuild((c) => c.text("/review").also("/accept"));
+  assertEquals(yaml.includes("@acme-bot review"), false);
+  assertStringIncludes(
+    yaml,
+    "(startsWith(github.event.comment.body, '/review') || " +
+      "startsWith(github.event.comment.body, '/accept'))",
+  );
+});
+
+Deno.test("reviewers taking commands under different mentions are refused", () => {
+  class B extends Build {
+    key = parameter("Key").secret().env("OPENAI_API_KEY");
+    security = securityReviewer((r) =>
+      r.provider("openai").apiKey(this.key).comment()
+        .discussion((d) => d.commands("@acme-bot"))
+    );
+    quality = genericReviewer((r) =>
+      r.provider("openai").apiKey(this.key).comment()
+        .discussion((d) => d.commands("@other-bot"))
+    );
+    review = target().validateBefore(this.security, this.quality)
+      .executes(() => {});
+    wf = aiReviewWorkflow({ reviewers: [this.security, this.quality] });
+  }
+  const b = new B();
+  discoverParameters(b);
+  assertThrows(
+    () => b.wf.render(),
+    Error,
+    "different mentions (@acme-bot, @other-bot)",
+  );
+});
+
+Deno.test("role and users reach the build as the command job's env", () => {
+  const yaml = mentionBuild((c) => c.role("read").users("alice", "bob-2"));
+  const job = yaml.split("  commandReview:")[1];
+  assertStringIncludes(job, "ZUKE_REVIEW_ROLE: read");
+  assertStringIncludes(job, 'ZUKE_REVIEW_USERS: "alice,bob-2"');
+  // A login that is not one never reaches the file.
+  assertThrows(
+    () => mentionBuild((c) => c.users("not a login")),
+    Error,
+    "is not a GitHub login",
+  );
+  assertThrows(
+    () => mentionBuild((c) => c.users("x,evil")),
+    Error,
+    "is not a GitHub login",
+  );
+});
+
+Deno.test("secrets take the build's parameters and read the env name off them", () => {
+  class B extends Build {
+    key = parameter("Key").secret().env("OPENAI_API_KEY");
+    appId = parameter("App id").env("REVIEW_APP_ID");
+    appKey = parameter("App key").secret(); // named by discovery: APP_KEY
+    security = securityReviewer((r) =>
+      r.provider("openai").apiKey(this.key).comment()
+        .discussion((d) => d.commands("@acme-bot"))
+    );
+    review = target().validateBefore(this.security).executes(() => {});
+    wf = aiReviewWorkflow({
+      reviewers: [this.security],
+      secrets: [this.appId, this.appKey],
+      command: (c) => c.secrets(this.key, "EXTRA_TOKEN"),
+    });
+  }
+  const b = new B();
+  discoverParameters(b);
+  const yaml = b.wf.render();
+  const [review, command] = yaml.split("  commandReview:");
+  assertStringIncludes(review, 'REVIEW_APP_ID: "${{ secrets.REVIEW_APP_ID }}"');
+  assertStringIncludes(review, 'APP_KEY: "${{ secrets.APP_KEY }}"');
+  assertStringIncludes(
+    command,
+    'REVIEW_APP_ID: "${{ secrets.REVIEW_APP_ID }}"',
+  );
+  assertStringIncludes(command, 'EXTRA_TOKEN: "${{ secrets.EXTRA_TOKEN }}"');
+  assertEquals(review.includes("EXTRA_TOKEN"), false);
+});
+
+Deno.test("a parameter with no env name is refused as a secret, by name", () => {
+  const stray = parameter("Stray").secret(); // never a build field
+  class B extends Build {
+    key = parameter("Key").secret().env("OPENAI_API_KEY");
+    security = securityReviewer((r) => r.provider("openai").apiKey(this.key));
+    review = target().validateBefore(this.security).executes(() => {});
+    wf = aiReviewWorkflow({ reviewers: [this.security], secrets: [stray] });
+  }
+  const b = new B();
+  discoverParameters(b);
+  assertThrows(() => b.wf.render(), Error, "has no env name");
 });

@@ -13,61 +13,55 @@ jobs:
     permissions:
       contents: read
       pull-requests: write
-    if: "${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.fork == false }}"
+    if: "${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository }}"
     timeout-minutes: 15
     concurrency:
-      group: "ai-review-${{ github.workflow }}-review-${{ github.event.pull_request.number }}"
+      group: "ai-review-${{ github.workflow }}-${{ github.event.pull_request.number }}"
       cancel-in-progress: true
     steps:
       - name: Harden and check out with Zuke
-        uses: zuke-build/zuke@2478fa5a69fb4f16540e54959c98cd976ec3f075 # v1.0.5
+        uses: zuke-build/zuke@213d5234c03e1fedc314159a77b2f680c2d6c8f5 # v1.0.7
         with:
-          egress-policy: audit
+          egress-policy: block
           persist-credentials: "false"
+          allowed-endpoints: "deno.land:443 dl.deno.land:443 jsr.io:443 github.com:443 api.github.com:443 codeload.github.com:443 objects.githubusercontent.com:443 release-assets.githubusercontent.com:443 api.openai.com:443"
       - name: AI review with Zuke
         run: ./zuke review
         env:
           OPENAI_API_KEY: "${{ secrets.OPENAI_API_KEY }}"
           GITHUB_TOKEN: "${{ secrets.GITHUB_TOKEN }}"
+          ZUKE_BUILD_APP_ID: "${{ secrets.ZUKE_BUILD_APP_ID }}"
+          ZUKE_BUILD_APP_KEY: "${{ secrets.ZUKE_BUILD_APP_KEY }}"
   commandReview:
     name: AI review on command
     runs-on: ubuntu-latest
     permissions:
       contents: read
       pull-requests: write
-    if: "${{ github.event_name == 'issue_comment' && github.event.issue.pull_request && github.event.comment.user.type != 'Bot' && (github.event.comment.author_association == 'OWNER' || github.event.comment.author_association == 'MEMBER' || github.event.comment.author_association == 'COLLABORATOR') && startsWith(github.event.comment.body, '@zuke-build review') }}"
+    if: "${{ github.event_name == 'issue_comment' && github.event.issue.pull_request && github.event.comment.user.type != 'Bot' && (startsWith(github.event.comment.body, '@zuke-build review') || startsWith(github.event.comment.body, '@zuke-build accept')) }}"
     timeout-minutes: 15
     concurrency:
-      group: "ai-review-${{ github.workflow }}-commandReview-${{ github.event.issue.number }}"
-      cancel-in-progress: true
+      group: "ai-review-${{ github.workflow }}-${{ github.event.issue.number }}"
+      cancel-in-progress: false
     steps:
       - name: Harden and check out with Zuke
-        uses: zuke-build/zuke@2478fa5a69fb4f16540e54959c98cd976ec3f075 # v1.0.5
+        uses: zuke-build/zuke@213d5234c03e1fedc314159a77b2f680c2d6c8f5 # v1.0.7
         with:
-          egress-policy: audit
+          egress-policy: block
           persist-credentials: "false"
-      - name: Require push access for the commenter
-        shell: bash
-        run: |
-          set -euo pipefail
-          case "$ZUKE_REVIEW_ACTOR" in
-            ""|*[!A-Za-z0-9-]*)
-              echo "::error::the commenter's login is not a GitHub login"
-              exit 1 ;;
-          esac
-          permission="$(gh api "repos/$GITHUB_REPOSITORY/collaborators/$ZUKE_REVIEW_ACTOR/permission" --jq .permission)" || {
-            echo "::error::could not read $ZUKE_REVIEW_ACTOR's permission on $GITHUB_REPOSITORY; refusing to run the review"
-            exit 1
-          }
-          case "$permission" in
-            admin|write) echo "$ZUKE_REVIEW_ACTOR has $permission access." ;;
-            *) echo "::error::$ZUKE_REVIEW_ACTOR has $permission access to $GITHUB_REPOSITORY; the review command needs push access."
-               exit 1 ;;
-          esac
+          allowed-endpoints: "deno.land:443 dl.deno.land:443 jsr.io:443 github.com:443 api.github.com:443 codeload.github.com:443 objects.githubusercontent.com:443 release-assets.githubusercontent.com:443 api.openai.com:443"
+      - name: Check the commenter may start a review
+        id: callers
+        run: ./zuke review --preflight
         env:
-          GH_TOKEN: "${{ github.token }}"
+          GITHUB_TOKEN: "${{ secrets.GITHUB_TOKEN }}"
+          ZUKE_REVIEW_PR: "${{ github.event.issue.number }}"
+          ZUKE_REVIEW_COMMENT: "${{ github.event.comment.id }}"
           ZUKE_REVIEW_ACTOR: "${{ github.event.comment.user.login }}"
+          ZUKE_REVIEW_ROLE: write
+        continue-on-error: true
       - name: AI review with Zuke
+        if: "steps.callers.outcome == 'success'"
         run: ./zuke review
         env:
           OPENAI_API_KEY: "${{ secrets.OPENAI_API_KEY }}"
@@ -76,3 +70,5 @@ jobs:
           ZUKE_BUILD_APP_KEY: "${{ secrets.ZUKE_BUILD_APP_KEY }}"
           ZUKE_REVIEW_PR: "${{ github.event.issue.number }}"
           ZUKE_REVIEW_COMMENT: "${{ github.event.comment.id }}"
+          ZUKE_REVIEW_ACTOR: "${{ github.event.comment.user.login }}"
+          ZUKE_REVIEW_ROLE: write

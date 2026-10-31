@@ -9,8 +9,8 @@
  * {@link run}:
  *
  * ```ts
- * import { Build, target, run } from "jsr:@zuke/core";
- * import { $ } from "jsr:@zuke/core/shell";
+ * import { Build, target, run } from "@zuke/core";
+ * import { $ } from "@zuke/core/shell";
  *
  * class MyBuild extends Build {
  *   test = target()
@@ -45,6 +45,14 @@ export {
   operatingSystem,
 } from "./src/host.ts";
 export {
+  NO_BANNER_ENV,
+  type OutputMode,
+  type OutputModeOptions,
+  PLAIN_ENV,
+  resolveOutputMode,
+} from "./src/output_mode.ts";
+export { lockedJsrSpecifiers, type LockedSpecifier } from "./src/outdated.ts";
+export {
   type Condition,
   type ConditionContext,
   type DeclaredEffect,
@@ -59,6 +67,7 @@ export {
   type JsonValue,
   LockSettings,
   type OnCancel,
+  type OnFailure,
   type OnTimeout,
   type Remediation,
   type RemediationContext,
@@ -70,6 +79,7 @@ export {
   type TargetFn,
   type TargetOutcomeView,
   type TargetStateHandle,
+  ValidateDuringSettings,
   type Validation,
   type ValidationContext,
   WaitSettings,
@@ -82,6 +92,7 @@ export {
   type WaitTrigger,
 } from "./src/wait.ts";
 export { run, type RunOptions } from "./src/cli.ts";
+export { resolveDocSpec } from "./src/doc_spec.ts";
 export {
   type CliCommandInfo,
   type CliDescription,
@@ -133,11 +144,29 @@ export {
   type TestCounts,
 } from "./src/summary_note.ts";
 export type { Style } from "./src/render.ts";
+// The wordmark is exported for `@zuke/console`, which re-exports it rather than
+// rendering its own copy. The banner's own line builder is not: the executor is
+// its only caller, and `mod.ts` is semver-protected surface.
+export { logoLines, type LogoOptions, ZUKE_LOGO } from "./src/logo.ts";
+export { VERSION } from "./src/version.ts";
 export type { BuildCache, OpenCacheOptions } from "./src/cache.ts";
+export {
+  GitHubActionsCacheStore,
+  type GitHubActionsCacheStoreOptions,
+} from "./src/github_actions_cache.ts";
+export { S3CacheStore, type S3CacheStoreOptions } from "./src/s3_cache.ts";
+export {
+  type AwsCredentials,
+  type AwsSignableRequest,
+  type AwsSignature,
+  signSigV4,
+} from "./src/aws_sigv4.ts";
+export { uriEncode } from "./src/uri.ts";
 export {
   archiveOutputs,
   envCacheStore,
   FileSystemCacheStore,
+  type FileSystemCacheStoreOptions,
   HttpCacheStore,
   type HttpCacheStoreOptions,
   type OutputHost,
@@ -183,6 +212,7 @@ export {
   type RunEventOutcome,
   type RunGraphNode,
   type RunInitiator,
+  type RunLock,
   type RunQuery,
   type RunRecord,
   type RunStatus,
@@ -313,12 +343,16 @@ export {
   fail,
 } from "./src/assert.ts";
 export {
+  ALLOW_INSECURE_ENV,
+  assertSecureBackendUrl,
   httpDownload,
   HttpError,
   httpJson,
   type HttpOptions,
   httpText,
+  InsecureBackendUrlError,
 } from "./src/http.ts";
+export { redactUrl, redactUrls } from "./src/redact_url.ts";
 export {
   AnnounceError,
   type Announcement,
@@ -339,6 +373,7 @@ export {
   createTarGzip,
   type ExtractOptions,
   extractTarGzip,
+  extractTarXz,
   extractZip,
   gunzip,
   gzip,
@@ -346,6 +381,7 @@ export {
   type TarEntry,
   untar,
   unzip,
+  zip,
 } from "./src/compression.ts";
 export {
   type ArchiveFormat,
@@ -383,12 +419,14 @@ export {
   cicd,
   type CiCheckout,
   type CiConcurrency,
+  type CiEnvironment,
   CiFile,
   type CiFileSpec,
   type CiHardenRunner,
   type CiInvocation,
   type CiInvokes,
   type CiJob,
+  type CiPathFilter,
   type CiPinResolver,
   type CiPipeline,
   type CiProvider,
@@ -406,5 +444,25 @@ export {
   syncCiFiles,
   ZUKE_ACTION,
 } from "./src/ci.ts";
+export { type CiMatrixAxes, type CiMatrixRow } from "./src/ci_matrix.ts";
 export { type ScheduleEntry } from "./src/ci_schedule.ts";
 export { type RunPlan } from "./src/run_plan.ts";
+
+// The SHA-256 digest helper, for a package that needs a collision-resistant
+// fingerprint of untrusted text (the AI reviewer's memory of what a verifier
+// saw) rather than the fast, non-cryptographic hash it keys caches with.
+// A wrapper package may depend only on core, so a helper two of them need is
+// exported here or retyped in each. `defaultReadEnv` was the latter, in
+// `@zuke/otel` and `@zuke/gcloud`, which is how env readers drift apart.
+//
+// `readBytesBounded` is the one capped body reader: an API client in a wrapper
+// package (`@zuke/prometheus`) reads a response through it rather than
+// buffering whatever a server or proxy chooses to send, and it is the same
+// reader the remote cache and the MCP transport already use.
+export { defaultReadEnv, readBytesBounded, sha256Hex } from "./src/internal.ts";
+
+// The JWT signers, RS256 and ES256, for a wrapper package that signs a JWT —
+// a GitHub App JWT, a Google service-account assertion, an App Store Connect
+// token — so the PEM parsing and base64url framing exist once rather than
+// once per wrapper.
+export { signJwtEs256, signJwtRs256 } from "./src/jwt.ts";

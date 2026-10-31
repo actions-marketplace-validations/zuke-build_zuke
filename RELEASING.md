@@ -1,6 +1,6 @@
 # Releasing
 
-Zuke publishes 58 packages to [JSR](https://jsr.io/@zuke) from a single
+Zuke publishes 72 packages to [JSR](https://jsr.io/@zuke) from a single
 workspace — `@zuke/core`, the `@zuke/cli` command, a generic `@zuke/cmd`
 fallback, and 50+ typed tool wrappers and plugins (`@zuke/deno`, `@zuke/npm`,
 `@zuke/ai`, …). Releases are automated end to end; you only ever merge a pull
@@ -10,9 +10,14 @@ request.
 
 1. **Conventional commits drive versions.** Land work on `master` with
    Conventional Commits (`feat:`, `fix:`, `feat!:` / `BREAKING CHANGE:`).
-   Versions are per-package, and every package is `1.x` on full semver: a
-   breaking change bumps the **major** version. `bump-minor-pre-major` is
-   **off**, so a breaking change is never absorbed into a minor bump.
+   Versions are per-package, and every package is at `1.0` or past it on full
+   semver: a breaking change bumps the **major** version. `bump-minor-pre-major`
+   is **off**, so a breaking change is never absorbed into a minor bump.
+
+   A **new package** is registered at `0.0.0` (manifest and `deno.json`), and
+   its first release is `1.0.0`. release-please treats any other manifest
+   version as already released, so a package added at `1.0.0` would be first
+   released as `1.1.0` — which is how `@zuke/az` and `@zuke/aws` started there.
 
 2. **Zuke runs the whole release.** `.github/workflows/release.yml` is itself
    driven by Zuke: on every push to `master` it runs four least-privilege jobs,
@@ -48,18 +53,28 @@ request.
    which left the repository's "Latest release" pointer on a package release and
    stopped the Gemini extension archive refreshing, with every run green.
 
-   The one step that stays manual is ticking **Publish this Action to the GitHub
-   Marketplace**, which GitHub gates behind a 2FA confirmation no token can
-   perform. It affects the Marketplace listing only: `uses: zuke-build/zuke@v1`
-   resolves through the tag and never consults it.
+   Nothing is left to do by hand. The Marketplace listing reads the repository's
+   "Latest release" pointer, which that published release sets, so the new
+   version shows there on its own. Ticking **Publish this Action to the GitHub
+   Marketplace** — the step GitHub gates behind a 2FA confirmation — was needed
+   once to create the listing and is only needed again to re-create one that was
+   taken down. `uses: zuke-build/zuke@v1` never consults the listing either way:
+   it resolves through the tag.
 
 5. **`publishJsr` pushes to JSR.** The `publishJsr` target walks the packages
    **core first** (so the workspace's `jsr:@zuke/core` dependency resolves) and
    publishes each one whose `deno.json` version is **not yet on JSR** — it
    queries each package's JSR `meta.json` first, so it is idempotent and a no-op
-   on pushes that didn't release anything. Authentication is OIDC — the JSR
-   package ↔ repo link means **no tokens or secrets** are required; the workflow
-   just grants `id-token: write`.
+   on pushes that didn't release anything. JSR keeps processing an upload after
+   `deno publish` gives up on it, and its queue has taken the better part of an
+   hour, so each version gets up to three attempts: after one times out, the job
+   checks JSR every 30 seconds for five minutes before trying again (after one
+   fails outright, for a minute). A package that still does not land fails the
+   job, but only after the walk has tried every other package: the ones that do
+   not depend on it still publish, and the job's error names every version that
+   is missing. Re-run the job once the cause is fixed. Authentication is OIDC —
+   the JSR package ↔ repo link means **no tokens or secrets** are required; the
+   workflow just grants `id-token: write`.
 
 So the steady-state flow is: merge conventional commits → merge the release PR →
 the packages publish themselves.
@@ -76,15 +91,96 @@ the packages publish themselves.
 > [!IMPORTANT]
 > **A package that starts using a brand-new `@zuke/core` symbol needs a
 > follow-up floor bump.** The workspace only resolves the local `packages/core`
-> member while its version still satisfies the dependent's `jsr:@zuke/core@^x.y.z`
-> pin, so the PR that introduces the usage **cannot** raise that pin — doing so
-> makes Deno ignore the workspace member and try to download a version that is
-> not published yet, and the whole build fails to resolve. Land the usage against
-> the existing floor, then once the core release publishes, raise the floor in a
-> small follow-up `fix:` PR (see `fix: raise the @zuke/core floor to 1.31.0 in
-> wrappers using SubcommandSettings`). Until that lands, a consumer whose lockfile
-> already resolves the older core can hit a missing-export error, so treat the
-> follow-up as part of the change, not optional cleanup.
+> member while its version still satisfies the dependent's
+> `jsr:@zuke/core@^x.y.z` pin, so the PR that introduces the usage **cannot**
+> raise that pin — doing so makes Deno ignore the workspace member and try to
+> download a version that is not published yet, and the whole build fails to
+> resolve. Land the usage against the existing floor, then once the core release
+> publishes, raise the floor in a small follow-up `fix:` PR (see
+> `fix: raise the @zuke/core floor to 1.31.0 in
+> wrappers using SubcommandSettings`).
+> Until that lands, a consumer whose lockfile already resolves the older core
+> can hit a missing-export error, so treat the follow-up as part of the change,
+> not optional cleanup.
+>
+> The same holds for a **rich feature package**'s workspace sibling (see
+> `PACKAGE_DEPENDENCIES` in `build/packages.ts`): `@zuke/ai` calling a task new
+> in `@zuke/gh` lands against gh's current floor, and the floor is raised in a
+> follow-up once that gh release publishes. `coreFloorCheck` resolves a sibling
+> from the local workspace, so it cannot catch a sibling floor that is too low —
+> the follow-up is the control.
+
+## The CLI's standalone binaries
+
+From `@zuke/cli` 1.14.0, every CLI release also ships `deno compile` binaries
+for macOS and Linux on its `cli-v<version>` GitHub release, and through the
+Homebrew tap
+[`zuke-build/homebrew-tap`](https://github.com/zuke-build/homebrew-tap); from
+1.15.1, a Windows binary too, through Chocolatey.
+
+Releases are **immutable**: once published, nothing can be added to one or
+changed. So release-please cuts the CLI's release as a **draft**
+(`"draft": true` for `packages/cli` in `.release-please-config.json`), the
+pipeline attaches everything to the draft, and publishing it is the last step,
+which locks the release with its binaries already inside. The jobs in
+`release.yml` run after `publishJsr`, each running a `cli*` target in `zuke.ts`
+(the code is in `build/cli_*.ts`):
+
+1. `cliBinaries` decides what the current CLI version owes from what is
+   published — everything while its release is unpublished, only the tap or the
+   Chocolatey package while either lags behind a published release — and, when
+   binaries are owed, compiles them from the published
+   `jsr:@zuke/cli@<version>`.
+2. `cliSign` signs the macOS binaries with the Developer ID under the hardened
+   runtime and notarizes them, on a macOS runner in the `cli-signing`
+   environment. Missing credentials fail it: nothing is published unsigned.
+3. `cliUpload` packs the archives, attests their build provenance, attaches
+   them, the attestation bundle and `SHA256SUMS` to the draft with
+   `gh release upload --clobber`, then publishes it with
+   `gh release edit --draft=false --latest=false` (the "Latest release" pointer
+   stays on the Marketplace action's release).
+4. `cliFormulaVerify` installs the formula built from the published `SHA256SUMS`
+   with the real `brew` on macOS and Linux, runs its test, and checks the macOS
+   signatures.
+5. `cliTap` commits the formula to the tap with the app's token.
+6. `cliChocolateyVerify` installs the Chocolatey package built from the
+   published `SHA256SUMS` with the real `choco` on Windows and runs it.
+7. `cliChocolatey` pushes the package to the community repository with
+   `CHOCOLATEY_API_KEY`, held in the `chocolatey` environment. The Windows
+   executable is not Authenticode-signed yet (#793). The push runs only while
+   the repository variable `CHOCOLATEY_PUSH` is `enabled`. It is paused while
+   the package's first version waits in community moderation, because until that
+   version is approved a new push is refused with a 403 that would fail every
+   release (#855). The package is still built and verified on every release.
+   Once the moderators approve it, set the variable under Settings → Secrets and
+   variables → Actions → Variables, and the next release pushes whatever version
+   is owed.
+
+Every stage is idempotent, so a run that fails part way is finished by the next
+push to master. How users verify a download is in
+[docs/install.md](docs/install.md#verifying-a-download).
+
+**Setup, before the first binary release:**
+
+- A `cli-signing` environment holding `APPLE_CERTIFICATE_P12` (the Developer ID
+  Application certificate and key, a base64 `.p12`),
+  `APPLE_CERTIFICATE_PASSWORD`, `APPLE_NOTARY_KEY` (the App Store Connect API
+  key's `.p8` text), `APPLE_NOTARY_KEY_ID` and `APPLE_NOTARY_ISSUER`. Give it a
+  deployment branch rule allowing **only `master`**: the release workflow can
+  also be dispatched by hand from any branch, and the rule is what keeps the
+  signing secrets away from one. GitHub creates an environment a workflow names
+  with no rules at all, so configure it before the first run.
+- The `ZUKE_BUILD_APP_*` app installed on `zuke-build/homebrew-tap` with
+  contents write access.
+- A `chocolatey` environment holding `CHOCOLATEY_API_KEY`, with the same
+  deployment branch rule.
+
+**Recovering a bad release.** Until the release is published, every push to
+master retries: the draft takes the assets again, replacing what is there. Once
+it is published it cannot change, so a broken binary is fixed by the next CLI
+release, not by editing this one. A release published without its binaries
+(`cli-v1.15.0`, cut before the draft flow) is skipped with a note in the log,
+for the same reason.
 
 ## Manual trigger
 

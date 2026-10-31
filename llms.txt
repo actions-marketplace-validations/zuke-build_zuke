@@ -11,8 +11,8 @@
 ## Example
 
 ```ts
-import { Build, run, target } from "jsr:@zuke/core";
-import { DenoTasks } from "jsr:@zuke/deno";
+import { Build, run, target } from "@zuke/core";
+import { DenoTasks } from "@zuke/deno";
 
 class CI extends Build {
   lint = target().executes(() => DenoTasks.lint());
@@ -25,8 +25,8 @@ await run(CI);
 
 ## CLI
 
-Run a build with the `zuke` command — `deno run -A zuke.ts <target>` (or
-the `./zuke` launcher). The CLI is self-describing:
+Run a build with the `zuke` command (`deno install -A -g -n zuke
+jsr:@zuke/cli`), from anywhere inside the project. It is self-describing:
 
 ```sh
 zuke <target> [--skip <dep>] [--parallel[=N]]    # run a target and its deps
@@ -60,9 +60,12 @@ Option flags:
 - `--skip` — Skip the named dependency
 - `--parallel` — Run independent targets concurrently
 - `--no-cache` — Ignore the incremental cache
+- `--no-banner` — Do not print the opening banner (also ZUKE_NO_BANNER)
+- `--plain` — Plain output: no banner or colour (also ZUKE_PLAIN)
 - `--no-remote-cache` — Use the local cache only; skip the remote cache store
 - `--affected` — Run only targets affected by changes since a git base
 - `--dry-run` — Print the plan without running targets
+- `--preflight` — Run only the validations' preflight checks, then stop
 - `--state` — Persist durable run state to .zuke/runs
 - `--actor` — Attribute the run to <name> in its state record
 - `--actor-kind` — Who asked for the run: human (default) or service
@@ -73,6 +76,9 @@ Option flags:
 - `--data` — With resume --signal, the signal's JSON payload
 - `--force-graph` — With resume, continue even if the build graph changed
 - `--resume-degraded` — With resume, continue even if a state write was dropped
+- `--update` — With outdated, bump the lock's resolved versions
+- `--min-dep-age` — With outdated, the release age to honour (0 ignores it)
+- `--entrypoint` — With outdated --update, another module graph sharing the lock
 - `--exit-code` — With outdated, exit non-zero when a package is behind or unchecked
 - `--status` — With runs list, keep only runs with this status
 - `--target` — With runs list, keep only runs whose graph has this target
@@ -92,12 +98,14 @@ Option flags:
 - `--max-concurrent-runs` — With mcp --registry, cap concurrent run-tool spawns (default 4)
 - `--http` — With mcp, serve over HTTP on <host:port> instead of stdio
 - `--help` — Show usage
+- `--version` — Print the Zuke version this build runs on
 
 Full reference: [docs/cli.md](./docs/cli.md).
 
 ## Packages
 
 - [@zuke/core](https://jsr.io/@zuke/core) — a code-first, strongly-typed build automation system for Deno
+- [@zuke/engine](https://jsr.io/@zuke/engine) — the engine for a build another process hosts. An SDK in
 - [@zuke/deno](https://jsr.io/@zuke/deno) — typed `DenoTasks` wrappers for the `deno` CLI, for use in
 - [@zuke/docs](https://jsr.io/@zuke/docs) — typed tasks that turn already-generated API documentation into
 - [@zuke/npm](https://jsr.io/@zuke/npm) — typed `NpmTasks` wrappers for the `npm` CLI, for use in Zuke
@@ -107,12 +115,12 @@ Full reference: [docs/cli.md](./docs/cli.md).
 - [@zuke/yarn](https://jsr.io/@zuke/yarn) — typed `YarnTasks` wrappers for the `yarn` CLI, for use in Zuke
 - [@zuke/cmd](https://jsr.io/@zuke/cmd) — generic command execution for Zuke builds: the fallback for
 - [@zuke/console](https://jsr.io/@zuke/console) — task-shaped console output for Zuke builds, so a build never
-- [@zuke/cli](https://jsr.io/@zuke/cli) — the `zuke` command. Install it globally with
 - [@zuke/docker](https://jsr.io/@zuke/docker) — typed `DockerTasks` wrappers for the `docker` CLI
 - [@zuke/docker-compose](https://jsr.io/@zuke/docker-compose) — typed Docker Compose task wrappers for Zuke builds
 - [@zuke/kubectl](https://jsr.io/@zuke/kubectl) — typed `kubectl` CLI task wrappers for Zuke builds, for
 - [@zuke/helm](https://jsr.io/@zuke/helm) — typed `HelmTasks` wrappers for the Helm (https://helm.sh) CLI,
 - [@zuke/kustomize](https://jsr.io/@zuke/kustomize) — typed `KustomizeTasks` wrappers for the
+- [@zuke/argo-rollouts](https://jsr.io/@zuke/argo-rollouts) — typed `ArgoRolloutsTasks` wrappers for the
 - [@zuke/oxlint](https://jsr.io/@zuke/oxlint) — typed `oxlint` task wrappers for Zuke builds
 - [@zuke/eslint](https://jsr.io/@zuke/eslint) — typed `eslint` task wrappers for Zuke builds
 - [@zuke/cspell](https://jsr.io/@zuke/cspell) — typed `cspell` task wrappers for Zuke builds
@@ -143,8 +151,13 @@ Full reference: [docs/cli.md](./docs/cli.md).
 - [@zuke/node](https://jsr.io/@zuke/node) — typed Node.js task wrappers for Zuke builds
 - [@zuke/dprint](https://jsr.io/@zuke/dprint) — typed `dprint` task wrappers for Zuke builds
 - [@zuke/gcloud](https://jsr.io/@zuke/gcloud) — typed Google Cloud tooling for Zuke builds: the `gcloud`
+- [@zuke/aws](https://jsr.io/@zuke/aws) — typed AWS CLI tasks, readers, and a canary platform and analysis
+- [@zuke/az](https://jsr.io/@zuke/az) — typed Azure CLI tasks, readers, and a canary platform and analysis
 - [@zuke/git](https://jsr.io/@zuke/git) — typed `git` task wrappers for Zuke builds
 - [@zuke/gh](https://jsr.io/@zuke/gh) — typed GitHub tooling for Zuke builds: the `gh` (GitHub CLI) task
+- [@zuke/chocolatey](https://jsr.io/@zuke/chocolatey) — ship a prebuilt Windows binary through
+- [@zuke/homebrew](https://jsr.io/@zuke/homebrew) — ship a prebuilt binary through a
+- [@zuke/cli](https://jsr.io/@zuke/cli) — the `zuke` command. Install it globally with
 - [@zuke/codecov](https://jsr.io/@zuke/codecov) — a typed Codecov CLI (`codecovcli`) task wrapper for Zuke
 - [@zuke/claude](https://jsr.io/@zuke/claude) — a typed Claude Code (https://docs.claude.com/en/docs/claude-code)
 - [@zuke/codex](https://jsr.io/@zuke/codex) — a typed OpenAI Codex (https://developers.openai.com/codex/cli)
@@ -155,3 +168,11 @@ Full reference: [docs/cli.md](./docs/cli.md).
 - [@zuke/security](https://jsr.io/@zuke/security) — typed task wrappers for free, open-source security scanners
 - [@zuke/ai](https://jsr.io/@zuke/ai) — AI-powered code review for Zuke builds
 - [@zuke/otel](https://jsr.io/@zuke/otel) — an OpenTelemetry (OTLP/HTTP JSON) export plugin for Zuke
+- [@zuke/qr](https://jsr.io/@zuke/qr) — QR codes for any data, from a Zuke build, with no dependency
+- [@zuke/apple](https://jsr.io/@zuke/apple) — typed task wrappers for Apple's code-signing tools in Zuke
+- [@zuke/google](https://jsr.io/@zuke/google) — Google Play publishing for Zuke builds, through the Google
+- [@zuke/signpath](https://jsr.io/@zuke/signpath) — Authenticode signing through
+- [@zuke/flutter](https://jsr.io/@zuke/flutter) — typed `FlutterTasks` wrappers for the
+- [@zuke/dart](https://jsr.io/@zuke/dart) — typed `DartTasks` wrappers for the Dart (https://dart.dev)
+- [@zuke/prometheus](https://jsr.io/@zuke/prometheus) — A typed client for the Prometheus HTTP API, for Zuke builds. `PrometheusTasks`
+- [@zuke/canary](https://jsr.io/@zuke/canary) — Canary releases for Zuke builds. `canary(...)` turns a settings lambda into

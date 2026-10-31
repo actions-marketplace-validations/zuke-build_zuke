@@ -3,8 +3,9 @@
 
 /**
  * Small utilities shared across core modules. This module is **internal**: it is
- * not re-exported from `mod.ts` (or any entrypoint), so nothing here is public
- * API. It exists to consolidate helpers that were previously copy-pasted per
+ * not an entrypoint, and only the few helpers `mod.ts` names one by one
+ * (`defaultReadEnv`, `sha256Hex`, `readBytesBounded`) are public API — each
+ * because a wrapper package needed it and may depend on core alone. It exists to consolidate helpers that were previously copy-pasted per
  * module (env reads, error-message extraction, a delay, a SHA-256 hex digest,
  * the `NotFound → null` filesystem readers, the mkdir-parent writers, and a
  * timeout wrapper) so the copies can't drift out of sync.
@@ -36,6 +37,27 @@ export function isAbsolutePath(slashed: string): boolean {
   return slashed.startsWith("/") || /^[A-Za-z]:/.test(slashed);
 }
 
+/**
+ * Whether an environment variable is set to an "on" value.
+ *
+ * Unset and empty mean off, as do the conventional negatives — case- and
+ * whitespace-insensitively, so `FALSE` cannot mean the opposite of `false`.
+ * Anything else counts as on: an environment flag someone exported as `yes`,
+ * `on` or `please` means they want it, and refusing to guess would be a
+ * silent no.
+ *
+ * Deliberately not `params.ts`'s `parseBoolean`, which throws on a value it
+ * does not recognise. That is right for a typed build parameter, where a typo
+ * should be reported, and wrong for an environment flag, where an unfamiliar
+ * value still says the variable was set on purpose.
+ */
+export function envFlag(value: string | undefined): boolean {
+  if (value === undefined) return false;
+  const normalised = value.trim().toLowerCase();
+  if (normalised === "") return false;
+  return normalised !== "false" && normalised !== "0" && normalised !== "no";
+}
+
 /** The message of an `Error`, or the `String(...)` form of any other value. */
 export function messageOf(value: unknown): string {
   return value instanceof Error ? value.message : String(value);
@@ -44,6 +66,20 @@ export function messageOf(value: unknown): string {
 /** Resolve after `ms` milliseconds (a `setTimeout`-backed sleep). */
 export function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/** The CRC-32 lookup table (reflected polynomial `0xedb88320`). */
+const CRC_TABLE = Uint32Array.from({ length: 256 }, (_, n) => {
+  let c = n;
+  for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1;
+  return c >>> 0;
+});
+
+/** The CRC-32 of `data` — what zip headers and xz block checks carry. */
+export function crc32(data: Uint8Array): number {
+  let c = 0xffffffff;
+  for (const byte of data) c = CRC_TABLE[(c ^ byte) & 0xff] ^ (c >>> 8);
+  return (c ^ 0xffffffff) >>> 0;
 }
 
 /** Shared encoder for {@link sha256Hex} (a `TextEncoder` is stateless and reusable). */
@@ -174,14 +210,18 @@ export async function writeTextEnsuringDir(
   await Deno.writeTextFile(path, content);
 }
 
-/** Write bytes to `path`, creating its parent directory first. */
+/**
+ * Write bytes to `path`, creating its parent directory first. `mode` sets the
+ * file's permission bits where the platform has them (Windows ignores it).
+ */
 export async function writeFileEnsuringDir(
   path: string,
   bytes: Uint8Array,
+  mode?: number,
 ): Promise<void> {
   const parent = parentOf(path);
   if (parent !== null) await Deno.mkdir(parent, { recursive: true });
-  await Deno.writeFile(path, bytes);
+  await Deno.writeFile(path, bytes, { mode });
 }
 
 /**

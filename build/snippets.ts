@@ -103,9 +103,12 @@ export async function collectCheckedSnippets(
   return all;
 }
 
-/** The type-check seam: check the module at `path`, returning ok + any output. */
+/**
+ * The type-check seam: check the modules at `paths` in one run, returning ok +
+ * any output.
+ */
 export type SnippetChecker = (
-  path: string,
+  ...paths: string[]
 ) => Promise<{ ok: boolean; detail: string }>;
 
 /**
@@ -113,13 +116,13 @@ export type SnippetChecker = (
  * the examples gate (`build/examples.ts`), which checks whole build files the
  * same way.
  */
-export const denoCheck: SnippetChecker = async (path) => {
+export const denoCheck: SnippetChecker = async (...paths) => {
   // `--quiet` drops deno's `Check <relative-path>` progress line, which would
   // otherwise leak the random temp-dir name into failure output as a relative
   // path (a form {@link reduceTempPath} can't match); the `file://` error
   // locations deno still prints are reduced there.
   const out = await DenoTasks.check((s) =>
-    s.paths(path).args("--quiet").quiet().noThrow()
+    s.paths(...paths).args("--quiet").quiet().noThrow()
   );
   return { ok: out.code === 0, detail: `${out.stderr}${out.stdout}`.trim() };
 };
@@ -143,9 +146,15 @@ export function reduceTempPath(detail: string, path: string): string {
 /**
  * Type-check every marked snippet in `files`, returning one {@link
  * SnippetFailure} per snippet that fails. Each snippet is written to a temp file
- * *inside the repo* (so `@zuke/…` resolves to the workspace) and checked; the
- * temp directory is removed afterwards, even on error. The `check` seam is
+ * *inside the repo* (so `@zuke/…` resolves to the workspace); the temp
+ * directory is removed afterwards, even on error. The `check` seam is
  * injectable so the orchestration is unit-testable without spawning `deno`.
+ *
+ * Every snippet is checked in **one** `deno check` first: Deno treats each file
+ * as its own module, so checking them together is equivalent to checking them
+ * apart, and it pays for loading the workspace's types once instead of once
+ * per snippet. Only when that run fails is each snippet re-checked alone, so
+ * every failure is still named by its own source location with its own output.
  */
 export async function checkSnippets(
   files: string[],
@@ -156,10 +165,14 @@ export async function checkSnippets(
   const dir = await Deno.makeTempDir({ dir: Deno.cwd(), prefix: ".snippets-" });
   const failures: SnippetFailure[] = [];
   try {
+    const paths = snippets.map((_, i) => `${dir}/snippet_${i}.ts`);
+    for (let i = 0; i < snippets.length; i++) {
+      await FileTasks.writeText(paths[i], `${snippets[i].code}\n`);
+    }
+    if ((await check(...paths)).ok) return [];
     for (let i = 0; i < snippets.length; i++) {
       const snippet = snippets[i];
-      const path = `${dir}/snippet_${i}.ts`;
-      await FileTasks.writeText(path, `${snippet.code}\n`);
+      const path = paths[i];
       const { ok, detail } = await check(path);
       if (!ok) {
         failures.push({
@@ -191,4 +204,73 @@ export function formatSnippetFailures(failures: SnippetFailure[]): string {
     `${blocks.join("\n\n")}\n\n` +
     "Fix the snippet, or remove its `<!-- check -->` marker if it is " +
     "intentionally partial.";
+}
+
+/**
+ * A documented import that inlines a `jsr:@zuke/…` specifier.
+ *
+ * The published docs import `@zuke/*` by bare specifier and declare it in
+ * `deno.json`, because Deno's default lint set rejects an inline `jsr:`
+ * specifier under `no-import-prefix` — so a snippet written the other way
+ * hands a reader a line that fails their own `deno task lint` the moment they
+ * paste it. Anchored on `from "…"` so a command line (`deno doc
+ * jsr:@zuke/deno`, `deno run -A jsr:@zuke/cli`) is untouched: there the `jsr:`
+ * specifier is correct and the only thing that works.
+ */
+const INLINE_ZUKE_IMPORT = /from\s+"jsr:@zuke\/[^"]*"/;
+
+/** A documented import that inlines a specifier, with where it was found. */
+export interface InlineSpecifier {
+  /** The markdown file it appears in (repo-relative). */
+  file: string;
+  /** The 1-based line number. */
+  line: number;
+  /** The offending line, trimmed. */
+  text: string;
+}
+
+/**
+ * Find every inlined `jsr:@zuke/…` import across `files`.
+ *
+ * This is the guard that keeps the sweep from rotting. {@link
+ * extractCheckedSnippets} normalises a snippet's specifiers before checking
+ * it, so `deno check` alone can never notice the inline form coming back — and
+ * inside this repository it resolves to the workspace and type-checks happily
+ * either way. Only a direct scan catches it.
+ */
+export function findInlineSpecifiers(
+  markdown: string,
+  file: string,
+): InlineSpecifier[] {
+  const found: InlineSpecifier[] = [];
+  const lines = markdown.split("\n");
+  for (let i = 0; i < lines.length; i++) {
+    if (INLINE_ZUKE_IMPORT.test(lines[i])) {
+      found.push({ file, line: i + 1, text: lines[i].trim() });
+    }
+  }
+  return found;
+}
+
+/** Scan every file for inlined specifiers, in file then document order. */
+export async function collectInlineSpecifiers(
+  files: string[],
+): Promise<InlineSpecifier[]> {
+  const all: InlineSpecifier[] = [];
+  for (const file of files) {
+    all.push(...findInlineSpecifiers(await FileTasks.readText(file), file));
+  }
+  return all;
+}
+
+/** Render the inlined specifiers as one friendly, actionable error message. */
+export function formatInlineSpecifiers(found: InlineSpecifier[]): string {
+  const lines = found.map((f) => `  ${f.file}:${f.line}  ${f.text}`);
+  return `${found.length} documented import(s) inline a jsr: specifier:\n` +
+    `${lines.join("\n")}\n\n` +
+    'Import `@zuke/*` by bare specifier — `from "@zuke/core"` — and declare ' +
+    'it in `deno.json` ("@zuke/core": "jsr:@zuke/core@^1"), which is what ' +
+    "`deno add` writes. Deno's default lint set rejects an inline specifier " +
+    "under `no-import-prefix`, so a reader who pastes one fails their own " +
+    "`deno task lint`. Command lines keep the `jsr:` specifier.";
 }

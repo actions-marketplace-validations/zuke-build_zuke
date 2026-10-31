@@ -12,6 +12,7 @@
  * @module
  */
 
+import { RunLockHolder } from "../src/run_locks.ts";
 import { assertEquals, messageOf } from "./_assert.ts";
 import { Build, discoverTargets } from "../src/build.ts";
 import { target, type TargetOutcomeView } from "../src/target.ts";
@@ -47,6 +48,8 @@ function contextFor(
     actor: "tester",
     signals: new Map(),
     statuses: new Map(),
+    onTargetFailed: () => {},
+    runLocks: new RunLockHolder(undefined),
     ...(writer === undefined ? {} : { writer }),
   };
   return {

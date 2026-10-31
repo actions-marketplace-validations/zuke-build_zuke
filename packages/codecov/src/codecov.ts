@@ -10,7 +10,7 @@
  * single step. Point it at one or more reports and tag them with flags:
  *
  * ```ts
- * import { CodecovTasks } from "jsr:@zuke/codecov";
+ * import { CodecovTasks } from "@zuke/codecov";
  * await CodecovTasks.upload((s) => s.files("cov.lcov").flags("unit"));
  * ```
  *
@@ -39,6 +39,7 @@ export class CodecovUploadSettings extends ToolSettings {
   #networkRootFolder?: string;
   #reportType?: string;
   #disableSearch = false;
+  #disableTelem = false;
   #handleNoReportsFound = false;
   #failOnError = false;
   #dryRun = false;
@@ -139,6 +140,15 @@ export class CodecovUploadSettings extends ToolSettings {
     return this;
   }
 
+  /**
+   * Keep the CLI from reporting its own errors to Codecov's Sentry
+   * (`--disable-telem`). A global flag, so it is emitted before the subcommand.
+   */
+  disableTelem(): this {
+    this.#disableTelem = true;
+    return this;
+  }
+
   /** Upload only the named files, skipping the auto-search (`--disable-search`). */
   disableSearch(): this {
     this.#disableSearch = true;
@@ -165,7 +175,8 @@ export class CodecovUploadSettings extends ToolSettings {
 
   /** Assemble the `codecovcli upload-process` argv. */
   protected override buildArgs(): string[] {
-    const argv = ["upload-process"];
+    const argv = this.#disableTelem ? ["--disable-telem"] : [];
+    argv.push("upload-process");
     if (this.#slug !== undefined) argv.push("--slug", this.#slug);
     if (this.#sha !== undefined) argv.push("--sha", this.#sha);
     if (this.#branch !== undefined) argv.push("--branch", this.#branch);

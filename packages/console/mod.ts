@@ -8,7 +8,7 @@
  * (`line`, `rule`, `box`, `table`, target `header`/`summary`).
  *
  * ```ts
- * import { ConsoleTasks as Log } from "jsr:@zuke/console";
+ * import { ConsoleTasks as Log } from "@zuke/console";
  *
  * Log.rule("Deploy");
  * Log.info("pushing [bold]core@1.2.0[/]");
@@ -18,8 +18,8 @@
  * A build can also route the executor's own banners through this package:
  *
  * ```ts
- * import { run } from "jsr:@zuke/core";
- * import { consoleRenderer } from "jsr:@zuke/console";
+ * import { run } from "@zuke/core";
+ * import { consoleRenderer } from "@zuke/console";
  *
  * await run(MyBuild, { renderer: consoleRenderer });
  * ```
@@ -36,6 +36,9 @@ export {
   type Sink,
 } from "./src/console.ts";
 export { type LogLevel } from "./src/level.ts";
-export { logoLines, type LogoOptions, ZUKE_LOGO } from "./src/logo.ts";
+// Re-exported from `@zuke/core`, which owns the wordmark: the executor
+// prints it in a run's opening banner and a project depends on core alone.
+// Kept on this entrypoint so `@zuke/console`'s published surface is unchanged.
+export { logoLines, type LogoOptions, ZUKE_LOGO } from "@zuke/core";
 export { defaultTheme, type Theme } from "./src/theme.ts";
 export { consoleRenderer, createConsoleRenderer } from "./src/renderer.ts";

@@ -16,7 +16,7 @@ The lifecycle has two halves: a run **suspends** at a wait, and is later
 past it only once its trigger is satisfied.
 
 ```ts
-import { Build, externalSignal, target } from "jsr:@zuke/core";
+import { Build, externalSignal, target } from "@zuke/core";
 
 class Deploy extends Build {
   deployToSit = target().executes(async (ctx) => {
@@ -54,9 +54,9 @@ class Deploy extends Build {
     each resume, so a cron or webhook drives it.
   - **`githubWorkflow((g) => …)`** — dispatches a GitHub Actions workflow (often
     in another repo) and is satisfied when it finishes; see
-    [below](#waiting-for-an-external-github-workflow). A third-party trigger from
-    [`@zuke/gh`](../packages/gh/README.md), built on the exported `WaitTrigger` /
-    `WaitContext` seam — you can write your own the same way.
+    [below](#waiting-for-an-external-github-workflow). A third-party trigger
+    from [`@zuke/gh`](../packages/gh/README.md), built on the exported
+    `WaitTrigger` / `WaitContext` seam — you can write your own the same way.
 - **`s.timeout("72h")`** — an optional deadline. Its purpose and enforcement
   (running `onTimeout`) arrive with the resume half.
 - **`s.onTimeout(() => this.rollback)`** — what a timed-out wait does: a
@@ -71,12 +71,14 @@ GitHub Actions workflow and suspends until it finishes — replacing hand-rolled
 "dispatch, then poll `gh run list`" glue:
 
 ```ts
-import { Build, run, target } from "jsr:@zuke/core";
-import { githubWorkflow, readWorkflowResult } from "jsr:@zuke/gh";
+import { Build, run, target } from "@zuke/core";
+import { githubWorkflow, readWorkflowResult } from "@zuke/gh";
 
 class Release extends Build {
   e2e = target().waitsFor((s) =>
-    s.on(githubWorkflow((g) => g.repo("acme/app").workflow("e2e.yml").ref("main")))
+    s.on(
+      githubWorkflow((g) => g.repo("acme/app").workflow("e2e.yml").ref("main")),
+    )
       .timeout("2h").onTimeout(() => this.rollback)
   );
   ship = target().dependsOn(this.e2e).executes((ctx) => {
@@ -98,9 +100,9 @@ class Release extends Build {
   instead of immediately.
 - **Correlation.** `workflow_dispatch` returns no run id, so by default the
   trigger passes a marker input (default `zuke_marker`) and matches it against
-  the run's display title — the dispatched workflow must echo it into `run-name`:
-  `run-name: ${{ inputs.zuke_marker }}`. A workflow you can't modify (the long
-  tail of repos you don't own) correlates **best-effort** with
+  the run's display title — the dispatched workflow must echo it into
+  `run-name`: `run-name: ${{ inputs.zuke_marker }}`. A workflow you can't modify
+  (the long tail of repos you don't own) correlates **best-effort** with
   `.correlate("created-window")`: the trigger claims the `workflow_dispatch` run
   on the dispatch ref created just after dispatch, and fails loudly if two
   candidates share the window.
@@ -108,14 +110,14 @@ class Release extends Build {
   **A marker is not proof of identity.** The workflow echoes it into a title
   anyone who can list the runs can read, and anyone who can dispatch that
   workflow can raise a run wearing it. So a marked run is adopted only if it is
-  also a `workflow_dispatch`, on the ref this gate dispatched, created no earlier
-  than the dispatch — the same three facts created-window mode matches on, which
-  is why both modes now share one predicate. Two runs surviving that is a
-  refusal, not a coin toss, and the identity is re-checked on the run the gate
-  finally reads its result from, so a resume in another process cannot inherit a
-  stale id. What that leaves is the holder of `actions: write` on the workflow's
-  repository, who can dispatch it on the same ref and produce a run genuinely
-  indistinguishable from ours. Branch protection does **not** help — a
+  also a `workflow_dispatch`, on the ref this gate dispatched, created no
+  earlier than the dispatch — the same three facts created-window mode matches
+  on, which is why both modes now share one predicate. Two runs surviving that
+  is a refusal, not a coin toss, and the identity is re-checked on the run the
+  gate finally reads its result from, so a resume in another process cannot
+  inherit a stale id. What that leaves is the holder of `actions: write` on the
+  workflow's repository, who can dispatch it on the same ref and produce a run
+  genuinely indistinguishable from ours. Branch protection does **not** help — a
   `workflow_dispatch` is not gated by it — so when a gate authorizes something
   in a different trust domain, narrow who holds that permission, or put the
   workflow behind an environment with required reviewers, or have the workflow
@@ -125,10 +127,11 @@ class Release extends Build {
   instead of eating the whole `.timeout()` — so a workflow that silently never
   echoes the marker surfaces in ~a minute. The deadline is measured from the
   persisted dispatch time, so it holds across a suspend/resume.
-- **Result.** On completion the per-job conclusions (`{ passed, jobs: [{ name,
-  conclusion, url }] }`) are written to the gate target's state; a dependent
-  reads them with `readWorkflowResult(ctx.stateOf("<gate>"))` and branches on a
-  failed suite.
+- **Result.** On completion the per-job conclusions
+  (`{ passed, jobs: [{ name,
+  conclusion, url }] }`) are written to the gate
+  target's state; a dependent reads them with
+  `readWorkflowResult(ctx.stateOf("<gate>"))` and branches on a failed suite.
 - **Auth** uses `GH_TOKEN` / `GITHUB_TOKEN`; the GitHub API is an injectable
   transport, so it is testable without a real GitHub.
 
@@ -143,8 +146,10 @@ until timeout:
 on:
   workflow_dispatch:
     inputs:
-      zuke_marker: { required: false } # rename → .markerInput("name") on the gate
-      # any `required: true` input here must be supplied via .inputs(...) below
+      zuke_marker: {
+        required: false,
+      } # rename → .markerInput("name") on the gate
+# any `required: true` input here must be supplied via .inputs(...) below
 run-name: ${{ inputs.zuke_marker }} # the ENTIRE run-name; equality, not substring
 ```
 
@@ -153,12 +158,12 @@ run-name: ${{ inputs.zuke_marker }} # the ENTIRE run-name; equality, not substri
   workflow does not declare, so a workflow that names its marker input anything
   else rejects the dispatch outright — declare `zuke_marker`, or point the gate
   at your name with `.markerInput("<name>")`.
-- **Required inputs.** Every `required: true` input on the target workflow must be
-  supplied from the gate with `.inputs({ … })` / `.input(name, value)`, or the
-  dispatch `422`s. The settings lambda is evaluated when the build is defined and
-  has **no access to run state** (`ctx.state`) — it can read params but not a
-  value an earlier target recorded in run state, so an input whose value is
-  produced at run time needs a custom `WaitTrigger`.
+- **Required inputs.** Every `required: true` input on the target workflow must
+  be supplied from the gate with `.inputs({ … })` / `.input(name, value)`, or
+  the dispatch `422`s. The settings lambda is evaluated when the build is
+  defined and has **no access to run state** (`ctx.state`) — it can read params
+  but not a value an earlier target recorded in run state, so an input whose
+  value is produced at run time needs a custom `WaitTrigger`.
 - **Strict run-name equality.** Marker correlation matches
   `display_title === marker` — **exact equality, not substring**. A decorated
   run-name like `run-name: E2E [${{ inputs.zuke_marker }}]` dispatches fine and
@@ -179,10 +184,10 @@ When the scheduler reaches a wait whose trigger is **not** satisfied:
 
 However the wait ends — satisfied, timed out, or the run cancelled under it —
 the target settles and its `waitingFor` goes with the `waiting` status. Both
-cancellation paths reach the parked target even though no process was running
-it — the executor's own abort and an out-of-process `zuke cancel` alike —
-recording it `skipped`, so a terminal run never leaves a target claiming to
-wait for something nobody will send.
+cancellation paths reach the parked target even though no process was running it
+— the executor's own abort and an out-of-process `zuke cancel` alike — recording
+it `skipped`, so a terminal run never leaves a target claiming to wait for
+something nobody will send.
 
 A satisfied trigger, by contrast, passes straight through: the gate is
 `succeeded` and its dependents run in the same process.
@@ -258,8 +263,8 @@ suspended ones:
   [lease](./locks.md#the-runs-own-lease) answers it: a live process keeps
   renewing, so a lease that can be acquired means its holder is gone; one that
   cannot means the run is merely slow, and slow is left alone. A live run is
-  never settled or moved, deadline or no deadline, because doing so would run its
-  compensations beside the work they undo.
+  never settled or moved, deadline or no deadline, because doing so would run
+  its compensations beside the work they undo.
 - **Nobody there** → the run goes back to `suspended`, with a `reap` event on
   its audit trail saying why. The same sweep then resumes it, so an abandoned
   run is recovered in one pass rather than waiting another interval for nothing
@@ -273,10 +278,9 @@ suspended ones:
 - **Nobody there, and past its `deadline()`** → the run is settled **`failed`**,
   compensations and all. It did not stop because anyone asked; it ran out of
   time, and anything waiting on it needs an answer rather than silence.
-- **Only this build's runs** — see
-  [Whose run is it?](#whose-run-is-it) below. A state store is commonly shared,
-  and a listing has no build filter, so every recovery path first asks whether
-  the run is this build's at all.
+- **Only this build's runs** — see [Whose run is it?](#whose-run-is-it) below. A
+  state store is commonly shared, and a listing has no build filter, so every
+  recovery path first asks whether the run is this build's at all.
 
 A run left `cancelling` by a settlement whose own process died is finished too,
 in whichever terminal that settlement was heading for — recorded on the run,
@@ -285,27 +289,27 @@ because the process that finishes it is not the one that began it.
 ### Whose run is it?
 
 A shared state store means a sweep sees every build's runs. That matters more
-than it sounds: recovery does not merely *read* a foreign run. A reap hands it
+than it sounds: recovery does not merely _read_ a foreign run. A reap hands it
 back to `suspended`, a resume then runs **this** build's target bodies against
 that record, and a settlement runs this build's compensations.
 
 The dangerous case is not two unrelated builds — it is one `zuke.ts` templated
-across a dozen services. Same class name, same target names, same graph, and only
-the bodies differ. Every shape-based check passes.
+across a dozen services. Same class name, same target names, same graph, and
+only the bodies differ. Every shape-based check passes.
 
 So a run records an **origin**, resolved once when it is created:
 
-| Source              | When                                                     |
-| ------------------- | -------------------------------------------------------- |
-| `ZUKE_BUILD_ID`     | Whenever you set it — the explicit answer.                |
+| Source              | When                                                       |
+| ------------------- | ---------------------------------------------------------- |
+| `ZUKE_BUILD_ID`     | Whenever you set it — the explicit answer.                 |
 | `GITHUB_REPOSITORY` | Otherwise, in GitHub Actions. Free, and distinct per repo. |
-| _(none)_            | Neither set.                                             |
+| _(none)_            | Neither set.                                               |
 
-Every recovery path — `zuke resume`, `zuke resume --check`, `zuke cancel`, and the
-reaping sweep — compares it, and touches a run only when the two origins agree.
-A sweep **skips** a foreign run without counting it a failure, so a cron's exit
-code stays meaningful; `zuke resume <id>` and `zuke cancel <id>` **report** it,
-because you named one run by hand.
+Every recovery path — `zuke resume`, `zuke resume --check`, `zuke cancel`, and
+the reaping sweep — compares it, and touches a run only when the two origins
+agree. A sweep **skips** a foreign run without counting it a failure, so a
+cron's exit code stays meaningful; `zuke resume <id>` and `zuke cancel <id>`
+**report** it, because you named one run by hand.
 
 - **A missing origin never blocks anything.** A record written before the field
   existed has none, and a process outside CI that sets no `ZUKE_BUILD_ID`
@@ -319,7 +323,7 @@ because you named one run by hand.
   across machines.
 - **Two builds in one repository share the repository default**, so it separates
   nothing between them. It does not need to: they are already separated by the
-  build name and root-target checks below, and the origin only ever *narrows*
+  build name and root-target checks below, and the origin only ever _narrows_
   what those permit — it can refuse a run, never claim one. Give each build its
   own `ZUKE_BUILD_ID` anyway if you want them told apart by origin too.
 
@@ -329,10 +333,10 @@ recorded:
 - The record's **build name and root target** must both be this build's, or the
   sweep leaves the run alone. Acting on another build's run would find none of
   its targets and settle it with its compensations silently skipped.
-- Before *settling* a run — irreversible, and it runs compensations — the
-  **graph** has to agree as well. Handing a run back to `suspended` asks only the
-  looser question, since that is reversible and a resume refuses a graph it does
-  not recognise with an error naming the drift.
+- Before _settling_ a run — irreversible, and it runs compensations — the
+  **graph** has to agree as well. Handing a run back to `suspended` asks only
+  the looser question, since that is reversible and a resume refuses a graph it
+  does not recognise with an error naming the drift.
 
 **Or namespace the store, and the question never arises.** Every path the HTTP
 store builds hangs off the URL you give it, so pointing each build at its own
@@ -345,9 +349,9 @@ ZUKE_STATE_URL=https://state.internal/svc-b   # service B's runs
 ```
 
 That is stronger than comparing origins, because there is nothing to compare:
-neither build can see the other's runs to begin with. It is the right answer when
-you control the state service; the origin is what protects a genuinely pooled
-store.
+neither build can see the other's runs to begin with. It is the right answer
+when you control the state service; the origin is what protects a genuinely
+pooled store.
 
 ### `Build.deadline()`
 
@@ -423,9 +427,9 @@ What a cancellation does:
   of the targets that succeeded, so later work is unwound before the work it was
   built on.
 - **…unless the record is [degraded](./state.md#degraded-records).** A record
-  that lost a state write cannot be read as an account of what ran: a target that
-  really did deploy may still be recorded `pending` or `running`. Cancel then
-  compensates every target whose success it cannot rule out (anything not
+  that lost a state write cannot be read as an account of what ran: a target
+  that really did deploy may still be recorded `pending` or `running`. Cancel
+  then compensates every target whose success it cannot rule out (anything not
   recorded `failed` or `skipped`) and names that reason in its output — a
   rollback that runs for work which never happened is a no-op for an idempotent
   compensation, while skipping one for work that did happen leaves the side
@@ -439,9 +443,9 @@ What a cancellation does:
   **`ctx.state` is seeded with the meta of the target the compensation step is
   _for_** — and which target that is depends on how the step was created.
 
-  With `.onCancel(...)`, the step is for the target being undone. So `ctx.target`
-  names the **compensation** (`rollback`) while `ctx.state` holds **`deploy`'s**
-  meta: deliberately two different targets.
+  With `.onCancel(...)`, the step is for the target being undone. So
+  `ctx.target` names the **compensation** (`rollback`) while `ctx.state` holds
+  **`deploy`'s** meta: deliberately two different targets.
 
   With a timed-out wait's `.onTimeout(() => this.cleanup)`, the named target
   compensates **itself** — the step is for `cleanup`, so `ctx.state` is
@@ -451,10 +455,10 @@ What a cancellation does:
 
   One invariant spans both: **`ctx.stateOf(ctx.target)` is the same handle as
   `ctx.state`, and every other name reads empty.** So under `.onCancel`,
-  `ctx.stateOf("deploy")` — asking for the compensated target by name — is
-  empty even though `ctx.state` is holding exactly that target's meta. A
-  compensation runs off the durable graph rather than inside the run: reach for
-  `ctx.state`, not for `stateOf`.
+  `ctx.stateOf("deploy")` — asking for the compensated target by name — is empty
+  even though `ctx.state` is holding exactly that target's meta. A compensation
+  runs off the durable graph rather than inside the run: reach for `ctx.state`,
+  not for `stateOf`.
 
   Writes merge into that seeded meta and stay **in memory** — the run is ending,
   so nothing a compensation records is persisted, on either cancel path. What
@@ -483,36 +487,125 @@ to whoever cancelled it, so `zuke runs show <id>` shows what was unwound.
 Cancellation needs a state store, so a build that uses `.onCancel()` turns on
 the `.zuke/runs` filesystem store by default (like `.lock()` and `.waitsFor()`).
 
-An `.onCancel()` on a [`.forEach()`](#fan-out-over-a-list--foreach) **sub-target**
-runs too. Cancel re-materialises the fan-out, matches each item's sub-targets by
-name against the record, and runs the compensation of every item that had
-**succeeded — or was still in-flight when the cancel landed** (a mid-deploy item
-has partial work to undo). Items unwind before the parent's own compensation, in
-reverse order; a throwing item compensation is recorded and the walk continues,
-exactly as for an ordinary target. Each item's cleanup reads that item's own
-persisted state (`ctx.state`), and lands its own `compensate` entry in the
-[audit trail](./state.md) (naming the runtime sub-target, e.g.
+An `.onCancel()` on a [`.forEach()`](#fan-out-over-a-list--foreach)
+**sub-target** runs too. Cancel re-materialises the fan-out, matches each item's
+sub-targets by name against the record, and runs the compensation of every item
+that had **succeeded — or was still in-flight when the cancel landed** (a
+mid-deploy item has partial work to undo). Items unwind before the parent's own
+compensation, in reverse order; a throwing item compensation is recorded and the
+walk continues, exactly as for an ordinary target. Each item's cleanup reads
+that item's own persisted state (`ctx.state`), and lands its own `compensate`
+entry in the [audit trail](./state.md) (naming the runtime sub-target, e.g.
 `deployBatch[repo-a].deploy`) alongside the summary.
 
 Nested fan-out works too: a `.forEach()` stage that is itself a `.forEach()` has
 its inner items' `.onCancel()` run, matched by the same nested
 `parent[item].stage[inner].stage` names.
 
-> **Caveat:** for per-item compensation to find its items, the `.forEach()`
-> item list must be **deterministic** — cancel re-evaluates it (from the
-> record's parameters) and matches by the same `parent[item].stage` names. A
+> **Caveat:** for per-item compensation to find its items, the `.forEach()` item
+> list must be **deterministic** — cancel re-evaluates it (from the record's
+> parameters) and matches by the same `parent[item].stage` names. A
 > non-deterministic list leaves a recorded item with no re-materialised twin;
 > its compensation is reported as skipped, never a crash.
 
-> **In-flight items and out-of-process cancel.** An out-of-process
-> `zuke cancel` compensates an item that was still **running** from the run
-> record's snapshot. The owning process aborts a live body only when it next
-> writes state (a `ctx.state.set(...)` checkpoint, or a `.lock()` heartbeat), so
-> a body doing one long uninterrupted command may keep running while its
-> compensation begins — the two can briefly overlap. Have item bodies
-> **checkpoint via `ctx.state.set(...)`** (or hold a `.lock()`) so a cancel
-> propagates promptly and closes that window; an in-process cancel (Ctrl-C) has
-> no such window, since bodies are aborted and settled before the walk runs.
+> **In-flight items and out-of-process cancel.** An out-of-process `zuke cancel`
+> compensates an item that was still **running** from the run record's snapshot.
+> The owning process aborts a live body only when it next writes state (a
+> `ctx.state.set(...)` checkpoint, or a `.lock()` heartbeat), so a body doing
+> one long uninterrupted command may keep running while its compensation begins
+> — the two can briefly overlap. Have item bodies **checkpoint via
+> `ctx.state.set(...)`** (or hold a `.lock()`) so a cancel propagates promptly
+> and closes that window; an in-process cancel (Ctrl-C) has no such window,
+> since bodies are aborted and settled before the walk runs.
+
+### A failure that rolls back — `.onFailure()`
+
+By default a failed target fails the run and undoes nothing: the targets that
+succeeded before it stay done. When a failure means "this change is bad, take it
+back" — a health check after a deploy, a canary analysis — declare it with
+`.onFailure(...)` and the failure **cancels** the run instead, through the same
+compensation walk as `zuke cancel`:
+
+```ts
+class CD extends Build {
+  deploy = target()
+    .executes((ctx) => ctx.state.set({ revision: "api-00042" }))
+    .onCancel(() => this.rollback);
+  verify = target()
+    .dependsOn(this.deploy)
+    .executes(() => checkHealth())
+    .onFailure(() => "cancel-run"); // a failed check rolls the deploy back
+  rollback = target().executes((ctx) => undo(ctx.state.get().revision));
+}
+```
+
+The disposition is a thunk, like `onTimeout`'s, returning one of:
+
+- **`"fail"`** (the default) — the run fails; nothing is undone.
+- **`"cancel-run"`** — the run is cancelled: every succeeded target's
+  compensation runs in reverse order, and the record settles `cancelled`.
+- **a sibling target** (`.onFailure(() => this.diagnose)`) — that target runs
+  first as a compensation, then the run is cancelled. Its `ctx.state` holds
+  **the failed target's** meta, as under `.onCancel` — so a diagnose or cleanup
+  step reads what the failing target recorded before it threw.
+
+The named target is an **extra** step before the walk, not a replacement for it:
+every succeeded target's own `.onCancel` still runs afterwards. So do not name a
+predecessor's rollback here — it would run twice, the first time with the failed
+target's state instead of the predecessor's. Use `"cancel-run"` for that; name a
+target only for cleanup **of the failed target itself**, which the walk never
+reaches.
+
+That is the other half of the contract: **the failed target is not
+compensated.** The walk undoes targets that _succeeded_, and a target that
+failed partway through may have left partial work behind. Its own `.onCancel`
+does not run. If its failure can leave something to clean up, put that cleanup
+in the named target and record what it needs in `ctx.state` before the failure.
+The same goes for a fan-out: the parent's `.onFailure` rolls back the items that
+succeeded, not the one that failed, and a named target there reads the parent's
+meta, not the failed item's.
+
+What it guarantees:
+
+- **One rollback path.** An operator's cancel, a timed-out gate and a failed
+  check all end in the same compensations, so there is no second rollback to
+  drift from the first.
+- **The final failure only.** `.retry(...)` and `.recoverWith(...)` run first;
+  the disposition applies once they are exhausted.
+- **The reason is kept.** The run's result carries the target's error alongside
+  `cancelled: true`, and the failed target's row in the record keeps its
+  message, so `zuke runs show <id>` says both that the run was rolled back and
+  why. The process exits non-zero.
+- **In-flight siblings stop**, as on any cancellation, and a target that fails
+  _because_ the run was already being cancelled is a symptom, not a second
+  reason: it neither re-cancels nor becomes the run's error.
+- **It works across a resume.** A check that fails after `zuke resume` rolls
+  back targets an earlier process ran, from the state they recorded.
+- **A dry run never cancels.** It has no record, so there is nothing to undo.
+- **The audit trail names the cause.** The run's `cancel` event reads
+  `…; cancelled because verify failed`, so it is never mistaken for an
+  operator's cancel.
+- **Every failure counts.** A `LockConflictError`, an `onlyWhen` or `cacheKey`
+  that throws, and a failed validation are all the target failing. On a
+  cancelling target, losing a lock race therefore rolls back what ran before it.
+  Declare `.onFailure` on the check itself, not on a target that takes a
+  contended lock.
+- **The named compensation runs in this process only.** If another process owns
+  the rollback (a `zuke cancel` that got there first, a sweep), it walks the
+  succeeded targets but cannot know about the named step. The run says so in its
+  output rather than claiming the step ran.
+
+The disposition is evaluated **once, before anything runs**, and a bad one
+refuses the run with a message naming the target: a thunk that throws, one that
+returns something other than `"fail"`, `"cancel-run"` or a target declared on
+the build, one that names its own target, and a cancelling disposition on a
+target that is also `.proceedAfterFailure()`, which asks for the opposite.
+
+Like `.onCancel()`, it needs a state store and turns the `.zuke/runs` store on
+by default; with state explicitly disabled, a cancelling `.onFailure` is refused
+before anything runs. It cannot be declared on a `.forEach()` **stage**, which
+is not part of the run's plan — put it on the fan-out target, which fails when
+any item does.
 
 ## Fan-out over a list — `.forEach()`
 
@@ -570,7 +663,7 @@ runs.
 
 Because the sub-targets exist only at run time, they can't be referenced by the
 soft-ordering seams: `orderWith`/`extraEdges` (see
-[Authoring → `Build`](./authoring.md#build)) see only
-class-field targets, so **per-item ordering across a fan-out is not
-expressible**. When items must run in a dependency order, split them into ordered
-**waves** — one `.forEach()` per wave — and chain the waves with `.dependsOn`.
+[Authoring → `Build`](./authoring.md#build)) see only class-field targets, so
+**per-item ordering across a fan-out is not expressible**. When items must run
+in a dependency order, split them into ordered **waves** — one `.forEach()` per
+wave — and chain the waves with `.dependsOn`.

@@ -20,6 +20,7 @@
 
 import {
   type AbsolutePath,
+  absolutePath,
   appendJobSummary,
   Build,
   discoverTargets,
@@ -68,18 +69,41 @@ import {
   releaseIsOwed,
   workflowActionInputs,
 } from "./build/action_release.ts";
-import { mintAppToken } from "./build/app_token.ts";
-import { localVersion, PACKAGES } from "./build/packages.ts";
+import { mintAppToken, resolveAppCredentials } from "./build/app_token.ts";
 import {
-  acknowledgeReviewCommand,
-  reviewCommentToken,
-} from "./build/review_app.ts";
+  CLI_TAP,
+  httpCliReleaseProbe,
+  planCliRelease,
+} from "./build/cli_release.ts";
+import { binaryPath, packageCliArchives } from "./build/cli_package.ts";
+import {
+  assertReportsVersion,
+  compileCliBinaries,
+} from "./build/cli_compile.ts";
+import { signingCredentials, signMacBinaries } from "./build/cli_sign.ts";
+import {
+  publishCliChocolatey,
+  verifyCliChocolatey,
+} from "./build/cli_chocolatey.ts";
+import {
+  publishCliFormula,
+  uploadCliRelease,
+  verifyCliFormula,
+} from "./build/cli_publish.ts";
+import { writeStepOutputs } from "./build/step_outputs.ts";
+import { mintReleaseToken } from "./build/release_token.ts";
+import {
+  localVersion,
+  PACKAGE_DEPENDENCIES,
+  PACKAGES,
+} from "./build/packages.ts";
 import {
   CODECOV_CLI_VERSION,
   installCli,
-  publishOne,
+  publishAll,
   publishPackage,
   TOOLS_ROOT,
+  waitFor,
 } from "./build/publish.ts";
 import {
   collectDocLintReports,
@@ -92,7 +116,12 @@ import {
   gitleaksSummary,
   parseGitleaksReport,
 } from "./build/gitleaks_report.ts";
-import { checkSnippets, formatSnippetFailures } from "./build/snippets.ts";
+import {
+  checkSnippets,
+  collectInlineSpecifiers,
+  formatInlineSpecifiers,
+  formatSnippetFailures,
+} from "./build/snippets.ts";
 import {
   checkExamples,
   discoverExamples,
@@ -114,6 +143,14 @@ import {
 import { checkRootLaunchers, syncRootLaunchers } from "./build/launchers.ts";
 import { checkSkillTree } from "./build/skill_check.ts";
 import {
+  discoverTestFiles,
+  HERMETIC_ENV,
+  partitionShards,
+  pruneEmptyProfiles,
+  runShards,
+  shardCount,
+} from "./build/test_shards.ts";
+import {
   buildGeminiArchive,
   GEMINI_ASSET_NAMES,
 } from "./build/gemini_archive.ts";
@@ -125,8 +162,15 @@ import {
 } from "./build/plugin_version_check.ts";
 import { actionPin } from "./build/action_pins.ts";
 import { scannerConfigDenial } from "./build/scanner_policy.ts";
-import { actionlintTool, gitleaksTool, zizmorTool } from "./build/scanners.ts";
-import { githubWorkflows } from "./build/workflows.ts";
+import {
+  ACTIONLINT_VERSION,
+  actionlintTool,
+  GITLEAKS_VERSION,
+  gitleaksTool,
+  ZIZMOR_VERSION,
+  zizmorTool,
+} from "./build/scanners.ts";
+import { BOOTSTRAP_ENDPOINTS, githubWorkflows } from "./build/workflows.ts";
 
 /**
  * Where the `security` target writes gitleaks' findings. The security workflow
@@ -148,28 +192,25 @@ const GITLEAKS_REPORT = "gitleaks-report.json";
  */
 const GITLEAKS_CONFIG = ["[extend]", "useDefault = true", ""].join("\n");
 
-/**
- * The files the `check` target type-checks: the globs of the root `check` task
- * in `deno.json`, which stays the entry point for a plain `deno task check`.
- */
-const CHECK_GLOBS = [
-  "zuke.ts",
-  "build/*.ts",
-  "tests/**/*.ts",
-  "packages/*/mod.ts",
-  "packages/*/src/**/*.ts",
-  "packages/*/tests/**/*.ts",
-];
+/** Where the CLI's compiled binaries are built, one directory per target. */
+const CLI_BIN_DIR = "dist/cli/bin";
+
+/** Where the CLI's release archives and SHA256SUMS are packed. */
+const CLI_RELEASE_DIR = "dist/cli/release";
+
+/** Where the CLI's formula is rendered for verification. */
+const CLI_FORMULA_FILE = "dist/cli/zuke.rb";
 
 /**
- * The token both reviewers post with: the `zuke-build` App's when the review
- * job carries the App's credentials (the comment-started one does), so the
- * assessments come from `zuke-build[bot]`, the account the maintainer
- * addressed; `GITHUB_TOKEN` otherwise. One resolver for both, so the token is
- * minted once per run.
+ * What the `check` target type-checks: the roots of the root `check` task in
+ * `deno.json`, which stays the entry point for a plain `deno task check`.
+ *
+ * Directories rather than expanded globs: every `.ts` file under them is one
+ * the globs matched, and handing `deno check` all thousand-odd paths outgrew
+ * Windows' 32 KB command line, which fails the spawn itself ("The filename or
+ * extension is too long").
  */
-const reviewToken = reviewCommentToken((name) => Deno.env.get(name));
-
+const CHECK_ROOTS = ["zuke.ts", "build", "tests", "packages", "examples"];
 class ZukeBuild extends Build {
   clean = target()
     .description("Remove build artifacts")
@@ -212,6 +253,33 @@ class ZukeBuild extends Build {
   // fixer leaves the underlying lint failure standing. Declared here because a
   // field can only be referenced by fields declared below it.
   aiBudget = budget((b) => b.maxTokens(500_000));
+
+  // The `zuke-build` GitHub App's credentials, present on both review jobs
+  // (the workflow passes them as secrets) and absent locally and on a fork's
+  // run. Ours alone: another project names its own App here, or names none
+  // and posts as `github-actions[bot]` — see docs/ai-review.md, "Who the
+  // reviews post as".
+  zukeBuildAppId = parameter("GitHub App id of the zuke-build App")
+    .env("ZUKE_BUILD_APP_ID");
+  zukeBuildAppKey = parameter("Private key (PEM) of the zuke-build App")
+    .secret()
+    .env("ZUKE_BUILD_APP_KEY");
+
+  // The token both reviewers post with: the App's when its credentials are
+  // set, so the assessments come from `zuke-build[bot]`, the account a
+  // maintainer addresses, and the reviewer can resolve the threads it answers
+  // (GitHub allows that mutation to repository write access, which for an
+  // installation token is `contents: write`; the Actions token is refused);
+  // `GITHUB_TOKEN` otherwise. Minted once per run and shared. Pinned to this
+  // repository, so a run anywhere else gets the fallback rather than a token
+  // minted for whatever the environment names.
+  reviewToken = GhTasks.appTokenSource((s) =>
+    s.app(this.zukeBuildAppId, this.zukeBuildAppKey)
+      .repository("zuke-build/zuke")
+      .permission("pull-requests", "write")
+      .permission("issues", "write")
+      .permission("contents", "write")
+  );
 
   lint = target()
     .description("Lint the workspace (deno lint)")
@@ -266,25 +334,36 @@ class ZukeBuild extends Build {
     .description("Type-check the whole workspace")
     .dependsOn(this.restore)
     .executes(async () => {
-      // The same files the root `check` task names, run through the wrapper
-      // rather than `deno task` so the row can say `// Errors: 0`: the task
-      // runner's shell would expand the globs, so they are expanded here.
-      const files = (await Promise.all(CHECK_GLOBS.map((g) => glob(g)))).flat();
-      await DenoTasks.check((s) => s.frozen().paths(...files));
+      // The same roots the root `check` task names, run through the wrapper
+      // rather than `deno task` so the row can say `// Errors: 0`.
+      await DenoTasks.check((s) => s.frozen().paths(...CHECK_ROOTS));
     });
 
   test = target()
     .description("Run the test suite with coverage")
     .dependsOn(this.check)
     .executes(async () => {
-      // Blank GITHUB_STEP_SUMMARY for the test subprocess: tests that exercise
-      // the job-summary and AI-reviewer/fixer code paths would otherwise append
-      // to the real Actions summary, polluting it. The parent `./zuke ci` run
-      // keeps the env var and still writes the build table and any fixer section.
-      await DenoTasks.test((s) =>
-        s.allowAll().coverage("cov_profile").frozen().env({
-          GITHUB_STEP_SUMMARY: "",
-        })
+      // The test processes get HERMETIC_ENV (see build/test_shards.ts): the
+      // job's step summary and remote cache are blanked for them, so a test
+      // never appends to the real Actions summary or restores outputs from the
+      // job's cache, while the parent `./zuke ci` run keeps both.
+      //
+      // The files are split across one `deno test` process per CPU (see
+      // build/test_shards.ts for why processes rather than `--parallel`), all
+      // writing into the one coverage profile. `--clean` can't empty it here —
+      // concurrent shards would race to wipe each other's profiles — so the
+      // directory is emptied once up front. `noCheck`: the `check` target this
+      // depends on already type-checked every test file, and each shard would
+      // otherwise re-check its own slice of the graph from scratch.
+      await FileTasks.remove("cov_profile", { recursive: true });
+      const files = await discoverTestFiles();
+      await runShards(
+        partitionShards(files, shardCount()),
+        (paths) =>
+          DenoTasks.test((s) =>
+            s.allowAll().coverage("cov_profile").frozen().noCheck()
+              .paths(...paths).env(HERMETIC_ENV).quiet().noThrow()
+          ),
       );
     });
 
@@ -303,15 +382,15 @@ class ZukeBuild extends Build {
       // instead of silently running nowhere until someone remembers to add it
       // here.
       const paths = await glob("tests/e2e/*_e2e.ts");
-      // Blank GITHUB_STEP_SUMMARY for the suite, as the `test` target does.
-      // These fixtures are whole builds run as real subprocesses, so each one
-      // appends its own result table to the Actions summary — including the
+      // HERMETIC_ENV for the suite, as the `test` target does. These fixtures
+      // are whole builds run as real subprocesses, so each one appends its own
+      // result table to the Actions summary — including the
       // ones that are *meant* to fail or suspend (a target reaped by a timeout,
       // a `waitsFor` gate that never opens). The job then displays a red,
       // half-finished build table while passing, which reads as a broken suite
       // and buries the one table that describes the actual run.
       await DenoTasks.test((s) =>
-        s.allowAll().paths(...paths).env({ GITHUB_STEP_SUMMARY: "" })
+        s.allowAll().paths(...paths).env(HERMETIC_ENV)
       );
     });
 
@@ -323,6 +402,12 @@ class ZukeBuild extends Build {
       // package can't hide inside the average. The floor (50%) sits well below
       // the current lowest src file (~82%), so it flags only a genuinely
       // neglected file rather than churning on the existing spread.
+      // A worker cut off mid-dump leaves an empty profile the report would
+      // refuse (see pruneEmptyProfiles); it carries nothing, so it goes.
+      const pruned = await pruneEmptyProfiles("cov_profile");
+      if (pruned > 0) {
+        ConsoleTasks.warn(`${pruned} empty coverage profile(s) dropped.`);
+      }
       await DenoTasks.coverage((s) =>
         s.dir("cov_profile").exclude("tests/").output("cov.lcov")
           .threshold(95).perFileThreshold(50)
@@ -366,6 +451,34 @@ class ZukeBuild extends Build {
       .tool((s) => gitleaksTool(s).destDir(TOOLS_ROOT))
   );
 
+  // The toolchain as a cacheable target, dogfooding the remote cache on the
+  // one thing this build produces that is worth sharing between runs: the
+  // scanner binaries. Keyed by platform and pinned versions, with the binaries
+  // and their checksum markers as outputs, a run on a fresh runner restores
+  // them from the store (the GitHub Actions cache, on CI) and `install()`
+  // reuses them after re-verifying each against its marker. Codecov is not an
+  // output: it is pinned by URL without a checksum, so it is fetched every run.
+  provisionTools = target()
+    .description("Provision the pinned scanner binaries into .zuke/tools")
+    .cacheKey(() =>
+      [
+        Deno.build.os,
+        Deno.build.arch,
+        ZIZMOR_VERSION,
+        ACTIONLINT_VERSION,
+        GITLEAKS_VERSION,
+      ].join(":")
+    )
+    .outputs(
+      ...["zizmor", "actionlint", "gitleaks"].flatMap((name) => {
+        const bin = Deno.build.os === "windows" ? `${name}.exe` : name;
+        return [`.zuke/tools/${bin}`, `.zuke/tools/${bin}.install.json`];
+      }),
+    )
+    .executes(async () => {
+      await this.tools.install();
+    });
+
   // Publish the coverage report to Codecov, dogfooding @zuke/codecov. True to
   // Zuke's model, the build owns its own tooling: it provisions the Codecov CLI
   // from the `tools` toolchain above (no global install, no extra CI step) and
@@ -373,7 +486,7 @@ class ZukeBuild extends Build {
   // `cov.lcov`. Skips with a message when the token is absent (local, fork PRs).
   coverageUpload = target()
     .description("Upload the coverage report to Codecov")
-    .dependsOn(this.coverage)
+    .dependsOn(this.coverage, this.provisionTools)
     .executes(async () => {
       const token = this.codecovToken.value;
       if (token === undefined || token === "") {
@@ -388,10 +501,12 @@ class ZukeBuild extends Build {
         throw new Error("codecov was not provisioned by the toolchain.");
       }
       // The token rides through the masked `.env(...)` chainer, never argv;
-      // fail-on-error makes a failed upload loud.
+      // fail-on-error makes a failed upload loud. Telemetry is off so the CLI
+      // never calls Sentry, which the job's blocked egress would refuse anyway.
       await CodecovTasks.upload((s) =>
         s
           .toolPath(bin)
+          .disableTelem()
           .files("cov.lcov")
           .slug("zuke-build/zuke")
           .failOnError()
@@ -469,7 +584,7 @@ class ZukeBuild extends Build {
     });
 
   snippetsCheck = target()
-    .description("Type-check the marked ts snippets in docs and skills")
+    .description("Type-check marked doc snippets; ban inline jsr: imports")
     .executes(async () => {
       // Opt-in: only `<!-- check -->`-marked ```ts blocks are checked (the rest
       // of the corpus is intentionally-elided prose). Snippets resolve `@zuke/…`
@@ -484,7 +599,28 @@ class ZukeBuild extends Build {
       if (failures.length > 0) {
         throw new Error(formatSnippetFailures(failures));
       }
-      ConsoleTasks.info("Doc snippets type-check clean.");
+
+      // Every reader-facing import must use the bare specifier. Checked by a
+      // direct scan over a wider corpus than the type-check: `checkSnippets`
+      // normalises the specifier before running `deno check`, and inside this
+      // repository the inline form resolves to the workspace and type-checks
+      // happily, so nothing else can notice it coming back. `examples/` is
+      // excluded on purpose — see `examplesCheck`.
+      const documented = [
+        ...files,
+        "README.md",
+        "AGENTS.md",
+        "SECURITY.md",
+        ...await glob("packages/*/README.md"),
+      ];
+      const inlined = await collectInlineSpecifiers(documented);
+      if (inlined.length > 0) {
+        throw new Error(formatInlineSpecifiers(inlined));
+      }
+      ConsoleTasks.info(
+        `Doc snippets type-check clean; ${documented.length} file(s) import ` +
+          "@zuke/* by bare specifier.",
+      );
     });
 
   examplesCheck = target()
@@ -724,6 +860,7 @@ class ZukeBuild extends Build {
   // target fails if any reported issues.
   security = target()
     .description("Run supply-chain security scanners (zuke/security)")
+    .dependsOn(this.provisionTools)
     .executes(async () => {
       const failures: string[] = [];
       const gate = async (name: string, output: Promise<{ code: number }>) => {
@@ -980,7 +1117,7 @@ class ZukeBuild extends Build {
       // place. Posted as the zuke-build App when its credentials are present,
       // as GITHUB_TOKEN otherwise (see `reviewToken`).
       .comment("append")
-      .commentToken(reviewToken)
+      .commentToken(this.reviewToken)
       // The base for a review of the checkout. On a comment-started run
       // `ZUKE_REVIEW_PR` takes over: the reviewer fetches that pull request's
       // merge and diffs it against the base it was merged onto, and nothing
@@ -1009,8 +1146,11 @@ class ZukeBuild extends Build {
       // drive-by comment never reaches the model.
       // Threads: each finding is anchored to its line, and a maintainer
       // contests it by replying there. This repo reviewing its own PRs is the
-      // only real-world exercise this feature gets.
-      .discussion((d) => d.threads())
+      // only real-world exercise this feature gets. Commands: the comment
+      // carries a Commands panel, and `@zuke-build accept <id> reason` records
+      // a finding as accepted for the PR — the honest vehicle for "by design"
+      // that the reworded-finding loop on #634 lacked (#637, #641).
+      .discussion((d) => d.threads().commands("@zuke-build"))
       // Dismissed false positives, kept auditable under "Suppressed": a build's
       // own readiness probe / tcpReachable run build-author code that connects
       // to an address the author typed — no more capability than any other line
@@ -1201,7 +1341,7 @@ class ZukeBuild extends Build {
       // appended per run for the same history-keeping reasons, and posted
       // with the same token.
       .comment("append")
-      .commentToken(reviewToken)
+      .commentToken(this.reviewToken)
       // The built-in rubric already covers clarity, cohesion, tests, and docs;
       // `.criteria(...)` adds just the project-specific conventions on top.
       // These stay inline — read from the head — rather than moving to a
@@ -1237,7 +1377,7 @@ class ZukeBuild extends Build {
       // this reviewer (which lacked it) kept re-asserting a fixed finding and
       // a reworded false positive — so it verifies now as well.
       .conventionsFile("AGENTS.md")
-      .discussion((d) => d.threads())
+      .discussion((d) => d.threads().commands("@zuke-build"))
       .verify()
       // Dismissed false positives from the v2 PR, kept auditable under
       // "Suppressed": `31ce99tz9w4ef` claims the comment upsert trusts any
@@ -1305,22 +1445,9 @@ class ZukeBuild extends Build {
       );
     });
 
-  // On a comment-started run, react 👀 on the `@zuke-build review` comment
-  // before the reviewers start, so the maintainer sees the command was picked
-  // up. A no-op on every other run — there is no comment to acknowledge.
-  reviewAck = target()
-    .description("Acknowledge the comment that asked for the AI review")
-    .executes(async () => {
-      const reacted = await acknowledgeReviewCommand(
-        (name) => Deno.env.get(name),
-        reviewToken,
-      );
-      if (reacted) ConsoleTasks.info("Acknowledged the review command (👀).");
-    });
-
   review = target()
     .description("AI review of the diff (security + code quality)")
-    .dependsOn(this.reviewBase, this.reviewAck)
+    .dependsOn(this.reviewBase)
     .validateBefore(this.securityReview, this.generalReview)
     .executes(() => {});
 
@@ -1335,17 +1462,27 @@ class ZukeBuild extends Build {
     // the base itself — so the same command works locally, where no workflow
     // step exists to do it.
     fetchBase: false,
-    // The second flow: a maintainer comments `@zuke-build review` on any pull
-    // request — a fork's included, which the `pull_request` job must skip —
-    // and the review runs from master's checkout with that pull request
-    // fetched as data. The App's credentials ride only on that job, so the
-    // assessments come from zuke-build[bot], and `reviewToken` narrows what is
-    // minted from them to comments and reactions.
-    command: (c) =>
-      c.text("@zuke-build review").secrets(
-        "ZUKE_BUILD_APP_ID",
-        "ZUKE_BUILD_APP_KEY",
-      ),
+    // The App's credentials ride on both jobs, so every assessment comes from
+    // zuke-build[bot] and `reviewToken` narrows what is minted from them to
+    // comments and reactions. Both jobs need them: GitHub refuses the Actions
+    // token the mutation that resolves a review thread (#631), so a thread the
+    // reviewer answers on a push run stayed open until a run holding the App's
+    // token came by. The pull-request job executes the pull request's own
+    // build, which is acceptable here because only maintainers can push a
+    // branch and the key is already theirs; a fork's run receives no secrets
+    // from GitHub at all, and the job's gate skips it besides.
+    secrets: [this.zukeBuildAppId, this.zukeBuildAppKey],
+    // With a key worth stealing on the job, egress is blocked rather than
+    // audited, as on every other job holding one: the launcher's bootstrap and
+    // GitHub, plus the reviewers' provider host, which the generator adds.
+    egress: "block",
+    allowedEndpoints: BOOTSTRAP_ENDPOINTS,
+    // The second flow needs no declaring: both reviewers take commands under
+    // `@zuke-build`, so the generator adds the job that runs on
+    // `@zuke-build review` and `@zuke-build accept` from any pull request — a
+    // fork's included, which the `pull_request` job must skip — with master's
+    // checkout and that pull request fetched as data. Who may start it is the
+    // default: anyone with push access.
     // The same resolver every other workflow uses, so this file names the same
     // commit they do. Without it the prelude falls back to the reference baked
     // into core, which is a release behind the moment the action is released
@@ -1374,6 +1511,25 @@ class ZukeBuild extends Build {
           "release requires GITHUB_TOKEN and GITHUB_REPOSITORY in the env.",
         );
       }
+      // The releases are cut with the app's token, not GITHUB_TOKEN: a release
+      // creates its tag, and GitHub refuses one whose tree differs from master
+      // in workflow files without `workflows: write`, which GITHUB_TOKEN can
+      // never hold. A workflow change landing between a release PR's merge and
+      // this job is enough to trigger that. The release PRs stay on
+      // GITHUB_TOKEN, so opening one still runs no workflows. Minted first,
+      // then the key leaves the environment: release-please is third-party
+      // code, and Deno hands a child the whole environment. The delete is in
+      // a `finally` so a failed mint does not leave the key behind either.
+      let releaseToken: string;
+      try {
+        releaseToken = await mintReleaseToken({
+          appId: Deno.env.get("ZUKE_BUILD_APP_ID"),
+          privateKey: Deno.env.get("ZUKE_BUILD_APP_KEY"),
+          repo,
+        });
+      } finally {
+        Deno.env.delete("ZUKE_BUILD_APP_KEY");
+      }
       const bin = await installCli(
         "npm:release-please@16.18.0",
         "release-please",
@@ -1397,7 +1553,7 @@ class ZukeBuild extends Build {
       });
       await ReleasePleaseTasks.githubRelease((s) => {
         apply(s);
-        return s;
+        return s.token(releaseToken);
       });
 
       // Keep the repository's "Latest release" pointer on the Marketplace
@@ -1842,19 +1998,141 @@ class ZukeBuild extends Build {
   publishJsr = target()
     .description("Publish new package versions to JSR, core first")
     .executes(async () => {
-      for (const pkg of PACKAGES) {
-        const version = await localVersion(pkg);
-        if (version === "0.0.0") {
-          ConsoleTasks.info(`@zuke/${pkg} has no released version yet.`);
-          continue;
-        }
-        await publishOne(pkg, version, {
-          isPublished,
-          publishPackage,
-          info: ConsoleTasks.info,
-          success: ConsoleTasks.success,
-        });
+      await publishAll(PACKAGES, PACKAGE_DEPENDENCIES, {
+        versionOf: localVersion,
+        isPublished,
+        publishPackage,
+        info: ConsoleTasks.info,
+        success: ConsoleTasks.success,
+        failed: ConsoleTasks.error,
+        wait: waitFor,
+      });
+    });
+
+  // The CLI's standalone binaries (#782). Five stages, one CI job each, in
+  // the order release.yml runs them: compile on Linux, sign and notarize on
+  // macOS, package and upload with an attestation, verify the formula with
+  // the real brew, then update the tap. Beside the last two, the Windows
+  // binary's Chocolatey package is verified and pushed the same way (#818). `cliBinaries` decides whether any of
+  // it is owed for the current version; the rest run only when it says so.
+  cliBinaries = target()
+    .description(
+      "Compile the CLI's standalone binaries when its release lacks them",
+    )
+    .executes(async () => {
+      const version = await localVersion("cli");
+      const plan = await planCliRelease(version, httpCliReleaseProbe(version));
+      ConsoleTasks.info(plan.reason);
+      await writeStepOutputs({
+        version,
+        build: String(plan.build),
+        tap: String(plan.tap),
+        chocolatey: String(plan.chocolatey),
+      });
+      if (plan.build) {
+        await compileCliBinaries(
+          version,
+          absolutePath(Deno.cwd(), CLI_BIN_DIR),
+        );
       }
+    });
+
+  cliSign = target()
+    .description("Sign and notarize the CLI's macOS binaries (macOS only)")
+    .executes(async () => {
+      const version = await localVersion("cli");
+      await signMacBinaries(
+        CLI_BIN_DIR,
+        signingCredentials((name) => Deno.env.get(name)),
+      );
+      // The runner is Apple silicon: run the signed arm64 binary itself.
+      await assertReportsVersion(
+        absolutePath(
+          Deno.cwd(),
+          binaryPath(CLI_BIN_DIR, "aarch64-apple-darwin"),
+        ),
+        version,
+      );
+    });
+
+  cliPackage = target()
+    .description("Pack the CLI's binaries into release archives and SHA256SUMS")
+    .executes(async () => {
+      const version = await localVersion("cli");
+      const sums = await packageCliArchives(
+        version,
+        CLI_BIN_DIR,
+        CLI_RELEASE_DIR,
+      );
+      for (const sum of sums) ConsoleTasks.info(`${sum.sha256}  ${sum.name}`);
+    });
+
+  cliUpload = target()
+    .description(
+      "Attach the CLI's archives, attestation and SHA256SUMS to its draft " +
+        "release, then publish it",
+    )
+    .executes(async () => {
+      const attestation = Deno.env.get("CLI_ATTESTATION_BUNDLE");
+      // gh reads GITHUB_TOKEN itself; checked here to fail with a clear message.
+      if (!Deno.env.get("GITHUB_TOKEN") || !attestation) {
+        throw new Error(
+          "cliUpload needs GITHUB_TOKEN and CLI_ATTESTATION_BUNDLE (the " +
+            "attest-build-provenance step's bundle-path) in the env.",
+        );
+      }
+      await uploadCliRelease({
+        version: await localVersion("cli"),
+        dir: CLI_RELEASE_DIR,
+        attestation,
+      });
+    });
+
+  cliFormulaVerify = target()
+    .description("Install the CLI's formula with the real brew and test it")
+    .executes(async () => {
+      await Deno.mkdir("dist/cli", { recursive: true });
+      await verifyCliFormula(await localVersion("cli"), CLI_FORMULA_FILE);
+    });
+
+  cliTap = target()
+    .description("Publish the CLI's formula to the Homebrew tap")
+    .executes(async () => {
+      const credentials = resolveAppCredentials({
+        appId: Deno.env.get("ZUKE_BUILD_APP_ID"),
+        privateKey: Deno.env.get("ZUKE_BUILD_APP_KEY"),
+      });
+      if (credentials === null) {
+        throw new Error(
+          "cliTap needs ZUKE_BUILD_APP_ID and ZUKE_BUILD_APP_KEY: the tap is " +
+            "written with the app's token, scoped to the tap's contents.",
+        );
+      }
+      const token = await mintAppToken(credentials, CLI_TAP.repo, {
+        contents: "write",
+      });
+      await publishCliFormula(await localVersion("cli"), token);
+    });
+
+  cliChocolateyVerify = target()
+    .description("Install the CLI's Chocolatey package with choco and run it")
+    .executes(async () => {
+      await verifyCliChocolatey(await localVersion("cli"));
+    });
+
+  cliChocolatey = target()
+    .description(
+      "Push the CLI's Chocolatey package to the community repository",
+    )
+    .executes(async () => {
+      const apiKey = Deno.env.get("CHOCOLATEY_API_KEY");
+      if (!apiKey) {
+        throw new Error(
+          "cliChocolatey needs CHOCOLATEY_API_KEY: the community " +
+            "repository's API key for the account that owns the package.",
+        );
+      }
+      await publishCliChocolatey(await localVersion("cli"), apiKey);
     });
 
   // `release` (release-please) needs a GITHUB_TOKEN; `publishJsr` needs JSR

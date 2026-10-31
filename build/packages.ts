@@ -11,6 +11,7 @@ import { FileTasks } from "@zuke/core";
 /** Workspace packages, in dependency order: core must publish before the rest. */
 export const PACKAGES = [
   "core",
+  "engine",
   "deno",
   "docs",
   "npm",
@@ -20,12 +21,12 @@ export const PACKAGES = [
   "yarn",
   "cmd",
   "console",
-  "cli",
   "docker",
   "docker-compose",
   "kubectl",
   "helm",
   "kustomize",
+  "argo-rollouts",
   "oxlint",
   "eslint",
   "cspell",
@@ -56,8 +57,15 @@ export const PACKAGES = [
   "node",
   "dprint",
   "gcloud",
+  "aws",
+  "az",
   "git",
   "gh",
+  "chocolatey",
+  // After gh, which it depends on (PACKAGE_DEPENDENCIES).
+  "homebrew",
+  // After console and gh, which it depends on (PACKAGE_DEPENDENCIES).
+  "cli",
   "codecov",
   "claude",
   "codex",
@@ -68,6 +76,15 @@ export const PACKAGES = [
   "security",
   "ai",
   "otel",
+  "qr",
+  "apple",
+  "google",
+  "signpath",
+  "flutter",
+  "dart",
+  "prometheus",
+  // After prometheus, which it depends on (PACKAGE_DEPENDENCIES).
+  "canary",
 ];
 
 /** A package's export entrypoints (resolved from its `deno.json` `exports`). */
@@ -98,6 +115,32 @@ export function readVersion(value: unknown): string {
   }
   return value.version;
 }
+
+/**
+ * The workspace packages a package may depend on **beyond `@zuke/core`** — the
+ * exemptions to the rule that a package depends on core alone (AGENTS.md,
+ * guideline 12). A plain tool wrapper never appears here: it mirrors one CLI
+ * and needs nothing but core. A "rich feature" package does — one that
+ * orchestrates other tools rather than wrapping one, and would otherwise grow
+ * a second, drifting copy of a wrapper it could call. Each entry is a decision,
+ * so adding a dependency means adding it here, where review sees it; the
+ * `package_dependencies_test` fails on any `@zuke/*` import not listed.
+ */
+export const PACKAGE_DEPENDENCIES: Readonly<
+  Record<string, readonly string[]>
+> = {
+  // The `zuke` command: its console output and its GitHub setup steps.
+  cli: ["console", "gh"],
+  // The AI reviewer: its pull-request comments, reactions and the commenter
+  // check go through GhTasks instead of a REST client of its own.
+  ai: ["gh"],
+  // The Homebrew tap publisher: it writes the formula into the tap through
+  // GhTasks.createOrUpdateFile, so there is one GitHub transport, not two.
+  homebrew: ["gh"],
+  // The canary engine: its `prometheus(...)` analysis queries through
+  // PrometheusTasks, so there is one Prometheus transport, not a second copy.
+  canary: ["prometheus"],
+};
 
 /** The current version declared in `packages/<pkg>/deno.json`. */
 export async function localVersion(pkg: string): Promise<string> {

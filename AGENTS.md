@@ -33,8 +33,8 @@ exact signatures are published — read them:
   `deno doc jsr:@zuke/deno`).
 - **On each package's JSR page / README:** a generated `## API` section.
 - **The CLI surface — commands, flags, and a build's actual targets:** run
-  `./zuke --help` (or `deno run -A zuke.ts --help`). It prints the usage grammar,
-  every reserved command (`graph`, `generate-ci`,
+  `./zuke --help` (or `deno run -A zuke.ts --help`). It prints the usage
+  grammar, every reserved command (`graph`, `generate-ci`,
   `completions <print|install> <shell>`, `mcp`, `resume`, `runs`, `cancel`,
   `register`, `doc`) and flag, **plus the current build's targets — with
   descriptions and dependencies — and its parameters.** So an agent asked to set
@@ -56,13 +56,23 @@ The mental model:
   it** (fields initialise top-to-bottom).
 - Make the file runnable with **`await run(MyBuild)`** at the bottom — no
   `if (import.meta.main)` guard; `run` no-ops when the module is imported.
+- **Import `@zuke/*` by bare specifier, declaring it in `deno.json`** —
+  `import { DenoTasks } from "@zuke/deno";` with
+  `"@zuke/deno": "jsr:@zuke/deno@^1"` in the `imports` block, which is what
+  `deno add jsr:@zuke/deno` writes for you. Never inline the `jsr:` specifier in
+  the import statement: Deno's default lint set (the one that applies when
+  `deno.json` configures no `lint.rules`, which is what `zuke setup` scaffolds)
+  rejects it under `no-import-prefix`, so an inlined one fails the project's own
+  `deno task lint`. The caret major is pinned in the map instead, so a future
+  `@zuke` major cannot land unannounced. A subpath such as `@zuke/core/shell`
+  resolves through the same entry.
 - **Every external tool is a namespaced `*Tasks` object** (`DenoTasks`,
   `NpmTasks`, `DockerTasks`, `GitTasks`, …) configured with a **settings
   lambda** that mirrors the real CLI's flags:
 
   ```ts
-  import { Build, run, target } from "jsr:@zuke/core";
-  import { DenoTasks } from "jsr:@zuke/deno";
+  import { Build, run, target } from "@zuke/core";
+  import { DenoTasks } from "@zuke/deno";
 
   class CI extends Build {
     lint = target().executes(async () => {
@@ -88,7 +98,7 @@ regenerate them in the same PR.
   runner, formatter, linter, type-checker, coverage — is the built-in `deno`
   CLI. No Node, npm, or external build tools.
 - **Language:** TypeScript, strict mode (Deno's default).
-- **Distribution:** [JSR](https://jsr.io/) as a workspace of 58 packages:
+- **Distribution:** [JSR](https://jsr.io/) as a workspace of 72 packages:
   `@zuke/core` (exports `.`, `./shell`, `./tooling`, `./tooling/conformance`,
   `./render`, `./conformance`) plus the `@zuke/cli` command, a generic
   `@zuke/cmd` fallback, and 50+ typed tool wrappers and plugins (`@zuke/deno`,
@@ -272,10 +282,22 @@ can't see Deno's module graph.
 
     Two constraints shape the choice. A wrapper package may depend only on
     `@zuke/core` — never on another wrapper, never on `@std/*` — so "share it
-    between two wrappers" means core or nothing. And `deno doc --lint` reports
-    `private-type-ref` when an **exported** class extends an **unexported** one,
-    so prefer sharing the logic as plain internal functions over introducing a
-    base class an exported settings class would extend.
+    between two wrappers" means core or nothing. The one exception is a **rich
+    feature package**: one that orchestrates other tools rather than wrapping
+    one (`@zuke/cli`, `@zuke/ai`). Such a package should call the wrapper that
+    already exists — `@zuke/ai` posts its reactions through `GhTasks` — rather
+    than grow a second, drifting copy of it. Each exemption is named in
+    `PACKAGE_DEPENDENCIES` (`build/packages.ts`), and
+    `tests/package_dependencies_test.ts` fails on any `@zuke/*` import that is
+    not listed, so adding one is a reviewed decision. Expect the list to grow as
+    more such packages appear; a plain tool wrapper never belongs on it. A
+    dependent must come after its dependencies in `PACKAGES`, the publish order,
+    and the core-floor check resolves a listed sibling from the local workspace
+    (it is released from the same commit) while still pinning core to its
+    published floor. And `deno doc --lint` reports `private-type-ref` when an
+    **exported** class extends an **unexported** one, so prefer sharing the
+    logic as plain internal functions over introducing a base class an exported
+    settings class would extend.
 
     Do not unify what only looks alike. Two wrappers each having a `.cwd()` is
     them mirroring two real CLIs (guideline 7), not duplication. Reject the
@@ -311,6 +333,15 @@ minimum a **unit** test _and_ an **integration** test; a bigger feature (a new
 flow mechanism, or anything with cross-process or cross-OS behaviour) also adds
 an **e2e** test. All three obey guideline 5: hermetic and fast, no network, no
 ambient tools.
+
+The gate's `test` target splits the `*_test.ts` files across one `deno test`
+process per CPU (`build/test_shards.ts`), so **files run concurrently with each
+other** in separate processes, while the tests inside one file still run in
+order. A test may set `Deno.env` or change the working directory, which only
+affect its own process, but it must not write to a fixed path that another file
+could also use: work in a `Deno.makeTempDir()` instead. Name every test module
+`*_test.ts`, because the shards run explicit file lists and a test enforces the
+naming convention.
 
 1. **Unit — `packages/<pkg>/tests/*_test.ts`.** One module in isolation, with
    fakes and the local `packages/core/tests/_assert.ts` helper (never a
@@ -392,22 +423,22 @@ can drift from it. `zuke.ts`'s `ci` target depends on: `format`
 (type-check, then the test suite with the 95% coverage gate), `coverageUpload`
 (skips locally without a `CODECOV_TOKEN`), `apiDocsCheck`, `docLint`,
 `snippetsCheck`, `examplesCheck`, `hclSyncCheck`, `pluginSyncCheck`,
-`launcherSyncCheck`, `skillsCheck`,
-`graphDocCheck`, `pluginVersionCheck`, `prBodyLint`, `actionPinCheck`,
-`security`, and `lockCheck`. Read `zuke.ts`'s `ci` target for the current,
-authoritative list — this is a snapshot, not a second source of truth.
+`launcherSyncCheck`, `skillsCheck`, `graphDocCheck`, `pluginVersionCheck`,
+`prBodyLint`, `actionPinCheck`, `security`, and `lockCheck`. Read `zuke.ts`'s
+`ci` target for the current, authoritative list — this is a snapshot, not a
+second source of truth.
 
 **The lock is part of the gate.** Every entrypoint that loads `zuke.ts` — both
 launchers (once a `deno.lock` exists, which in this repository is always) and
 the root tasks — passes `--frozen`, so a run cannot quietly heal a stale
-`deno.lock` by writing the resolutions it is missing. That mattered: a
-green gate used to be able to mean "the lock resolves _now that we fixed it_"
-while CI, whose checkout has the committed lock, failed with "The lockfile is
-out of date". `deno task` resolves the workspace before running its command, so
-it can still rewrite the lock ahead of a frozen run; `lockCheck` closes that
-from the other side by failing if the run left the lock modified. When you
-deliberately change a dependency, run `deno task lock`, review the diff, and
-commit the lock **in the same change**.
+`deno.lock` by writing the resolutions it is missing. That mattered: a green
+gate used to be able to mean "the lock resolves _now that we fixed it_" while
+CI, whose checkout has the committed lock, failed with "The lockfile is out of
+date". `deno task` resolves the workspace before running its command, so it can
+still rewrite the lock ahead of a frozen run; `lockCheck` closes that from the
+other side by failing if the run left the lock modified. When you deliberately
+change a dependency, run `deno task lock`, review the diff, and commit the lock
+**in the same change**.
 
 ## Repository layout
 
@@ -418,7 +449,7 @@ packages/
   deno/                   # @zuke/deno — DenoTasks
   npm/                    # @zuke/npm  — NpmTasks
   cmd/                    # @zuke/cmd  — CmdTasks (generic fallback)
-  …                       # + the rest: @zuke/cli, @zuke/docs, @zuke/ai, and tool wrappers (58 total)
+  …                       # + the rest: @zuke/cli, @zuke/docs, @zuke/ai, and tool wrappers (72 total)
 tests/
   integration/            # in-process: real builds via the CLI main() + _harness.ts
   e2e/                    # subprocess: *_e2e.ts + fixtures/ (run by the `integration` target)
@@ -455,8 +486,8 @@ gemini-extension.json     # Gemini CLI extension manifest (serves skills/)
   (never a concatenated shell string), so command construction is
   injection-free.
 - **The global `zuke` command forwards to the project's build.** `@zuke/cli`
-  keeps `setup`, `import`, `doc`, `--help` and `--version` for itself and
-  forwards everything else to the nearest `zuke.json` above the working
+  keeps `setup`, `import`, `doc`, `upgrade`, `--help` and `--version` for itself
+  and forwards everything else to the nearest `zuke.json` above the working
   directory, running the `zuke.ts` beside it exactly as `./zuke` would. The
   walk-up discovery is the accepted design (#578) — it is how npm, Deno and git
   find their roots — bounded by a trust gate modelled on git's `safe.directory`
@@ -466,7 +497,8 @@ gemini-extension.json     # Gemini CLI extension manifest (serves skills/)
   settings-lambda style. Settings classes extend `ToolSettings` from
   `@zuke/core/tooling`; `buildArgs()` must stay pure (no I/O) so argv
   construction is unit-testable. Execution reuses `Command` from `shell.ts`. New
-  wrapper packages are workspace siblings that depend only on core.
+  wrapper packages are workspace siblings that depend only on core (the rich
+  feature packages listed in `PACKAGE_DEPENDENCIES` aside — see guideline 12).
 
 ## Good open-source practices to follow
 
@@ -515,10 +547,17 @@ gemini-extension.json     # Gemini CLI extension manifest (serves skills/)
   keeping its own copy, so `build/packages.ts` is the single list the tests
   compare everything else against. `tests/release_config_test.ts` and
   `tests/build_tools_test.ts` enforce that all six agree — run them after adding
-  a package. Omitting `zuke.ts` means the package is released but never
-  published; omitting the `README.md` table means it is invisible to anyone
-  browsing the repo; omitting `build/website_tools.ts` fails the gate, because
-  the website's package grid is generated from it by `syncWebsite`.
+  a package. **Register a new package at version `0.0.0`** — in
+  `.release-please-manifest.json` and its `deno.json` alike. release-please
+  reads the manifest as the last _released_ version, so anything but `0.0.0`
+  makes it bump from there: a package added at `1.0.0` is first released as
+  `1.1.0`, and `1.0.0` never exists. At `0.0.0` the first release is `1.0.0`,
+  and `publishJsr` skips the package until then. `tests/release_config_test.ts`
+  fails on a package with no `CHANGELOG.md` that is not at `0.0.0`. Omitting
+  `zuke.ts` means the package is released but never published; omitting the
+  `README.md` table means it is invisible to anyone browsing the repo; omitting
+  `build/website_tools.ts` fails the gate, because the website's package grid is
+  generated from it by `syncWebsite`.
 - **Update docs with code.** If behaviour changes, update `README.md`, JSDoc,
   and the spec/acceptance criteria in the same PR.
 - **The agent skills are docs too — and they ship to a marketplace.** `skills/`
@@ -556,10 +595,10 @@ gemini-extension.json     # Gemini CLI extension manifest (serves skills/)
   `tests/plugin_manifest_test.ts` fails when the manifests disagree.
   `pluginVersionCheck` is the one part of the gate that needs history — it
   compares against `origin/<PR base>`, or `ZUKE_PLUGIN_BASE_REF` when you set
-  one — and it reports itself _skipped_, never passed, in a local clone that
-  has no base to compare against. **On CI a skip is fatal**, because a gate
-  that cannot run is not a gate: it went unnoticed for months that the job's
-  shallow checkout left it with no base ref at all.
+  one — and it reports itself _skipped_, never passed, in a local clone that has
+  no base to compare against. **On CI a skip is fatal**, because a gate that
+  cannot run is not a gate: it went unnoticed for months that the job's shallow
+  checkout left it with no base ref at all.
 
   Two things it insists on beyond "the version differs". It must go **up**, so
   that resolving a version conflict by keeping the lower number is refused. And

@@ -1551,7 +1551,28 @@
     "members": {
       "packages/ai": {
         "dependencies": [
-          "jsr:@zuke/core@^1.56.0"
+          "jsr:@zuke/core@^1.58.0",
+          "jsr:@zuke/gh@^1.13.0"
+        ]
+      },
+      "packages/apple": {
+        "dependencies": [
+          "jsr:@zuke/core@^1.75.0"
+        ]
+      },
+      "packages/argo-rollouts": {
+        "dependencies": [
+          "jsr:@zuke/core@^1.60.0"
+        ]
+      },
+      "packages/aws": {
+        "dependencies": [
+          "jsr:@zuke/core@^1.74.0"
+        ]
+      },
+      "packages/az": {
+        "dependencies": [
+          "jsr:@zuke/core@^1.74.0"
         ]
       },
       "packages/biome": {
@@ -1564,6 +1585,17 @@
           "jsr:@zuke/core@^1.45.0"
         ]
       },
+      "packages/canary": {
+        "dependencies": [
+          "jsr:@zuke/core@^1.66.0",
+          "jsr:@zuke/prometheus@1"
+        ]
+      },
+      "packages/chocolatey": {
+        "dependencies": [
+          "jsr:@zuke/core@^1.71.0"
+        ]
+      },
       "packages/claude": {
         "dependencies": [
           "jsr:@zuke/core@^1.31.0"
@@ -1572,7 +1604,7 @@
       "packages/cli": {
         "dependencies": [
           "jsr:@zuke/console@^1.1.0",
-          "jsr:@zuke/core@^1.55.1",
+          "jsr:@zuke/core@^1.68.0",
           "jsr:@zuke/gh@^1.6.0"
         ]
       },
@@ -1593,7 +1625,7 @@
       },
       "packages/console": {
         "dependencies": [
-          "jsr:@zuke/core@^1.51.0"
+          "jsr:@zuke/core@^1.67.0"
         ]
       },
       "packages/cspell": {
@@ -1604,6 +1636,11 @@
       "packages/cypress": {
         "dependencies": [
           "jsr:@zuke/core@^1.45.0"
+        ]
+      },
+      "packages/dart": {
+        "dependencies": [
+          "jsr:@zuke/core@^1.71.0"
         ]
       },
       "packages/deno": {
@@ -1618,7 +1655,7 @@
       },
       "packages/docker-compose": {
         "dependencies": [
-          "jsr:@zuke/core@^1.25.0"
+          "jsr:@zuke/core@^1.49.0"
         ]
       },
       "packages/docs": {
@@ -1636,14 +1673,24 @@
           "jsr:@zuke/core@^1.44.0"
         ]
       },
+      "packages/engine": {
+        "dependencies": [
+          "jsr:@zuke/core@^1.77.0"
+        ]
+      },
       "packages/eslint": {
         "dependencies": [
           "jsr:@zuke/core@^1.44.0"
         ]
       },
+      "packages/flutter": {
+        "dependencies": [
+          "jsr:@zuke/core@^1.71.0"
+        ]
+      },
       "packages/gcloud": {
         "dependencies": [
-          "jsr:@zuke/core@^1.32.0"
+          "jsr:@zuke/core@^1.74.0"
         ]
       },
       "packages/gemini": {
@@ -1653,7 +1700,7 @@
       },
       "packages/gh": {
         "dependencies": [
-          "jsr:@zuke/core@^1.31.0"
+          "jsr:@zuke/core@^1.66.0"
         ]
       },
       "packages/git": {
@@ -1661,9 +1708,20 @@
           "jsr:@zuke/core@^1.32.0"
         ]
       },
+      "packages/google": {
+        "dependencies": [
+          "jsr:@zuke/core@^1.75.0"
+        ]
+      },
       "packages/helm": {
         "dependencies": [
-          "jsr:@zuke/core@^1.25.0"
+          "jsr:@zuke/core@^1.49.0"
+        ]
+      },
+      "packages/homebrew": {
+        "dependencies": [
+          "jsr:@zuke/core@^1.74.0",
+          "jsr:@zuke/gh@^1.15.0"
         ]
       },
       "packages/husky": {
@@ -1688,7 +1746,7 @@
       },
       "packages/kubectl": {
         "dependencies": [
-          "jsr:@zuke/core@^1.25.0"
+          "jsr:@zuke/core@^1.49.0"
         ]
       },
       "packages/kustomize": {
@@ -1738,7 +1796,7 @@
       },
       "packages/otel": {
         "dependencies": [
-          "jsr:@zuke/core@^1.25.0"
+          "jsr:@zuke/core@^1.58.0"
         ]
       },
       "packages/oxlint": {
@@ -1754,6 +1812,16 @@
       "packages/pnpm": {
         "dependencies": [
           "jsr:@zuke/core@^1.44.0"
+        ]
+      },
+      "packages/prometheus": {
+        "dependencies": [
+          "jsr:@zuke/core@^1.76.0"
+        ]
+      },
+      "packages/qr": {
+        "dependencies": [
+          "jsr:@zuke/core@^1.60.0"
         ]
       },
       "packages/redocly": {
@@ -1774,6 +1842,11 @@
       "packages/shellcheck": {
         "dependencies": [
           "jsr:@zuke/core@^1.44.0"
+        ]
+      },
+      "packages/signpath": {
+        "dependencies": [
+          "jsr:@zuke/core@^1.72.0"
         ]
       },
       "packages/storybook": {

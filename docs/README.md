@@ -35,8 +35,8 @@
   [replace your shell scripts](./recipes/replace-shell-scripts.md) with the `$`
   shell, [generate your CI](./recipes/generate-ci.md) and stop editing YAML,
   [know when your dependencies fall behind](./recipes/keep-dependencies-current.md),
-  and [release a small library](./recipes/release-a-library.md) as one chain
-  of targets.
+  and [release a small library](./recipes/release-a-library.md) as one chain of
+  targets.
 - [Examples](../examples/README.md) — five cloneable mini projects: a Deno
   library gate, generated CI, a Node app, a library release, and shell scripts
   to targets.
@@ -45,6 +45,9 @@
   CLIs from a build with `installRelease()` and `toolchain()`.
 - [Extending Zuke](./extending.md) — the plugin contract: lifecycle plugins,
   tool wrappers, and reusable target bundles.
+- [Canary releases](./canary.md) — `@zuke/canary` stages a candidate, steps its
+  exposure up under analysis, and promotes it, with one rollback on every
+  failure path.
 - [Observability (OpenTelemetry)](./observability.md) — `@zuke/otel` exports run
   and target spans plus counters as OTLP/HTTP JSON, with trace continuity across
   suspend/resume.
@@ -54,6 +57,9 @@
   `zuke-write-build` into Claude Code, OpenAI Codex, or Gemini CLI.
 - [AI review](./ai-review.md) — model-assessed review gates as build
   validations.
+- [Running the AI review as your own GitHub App](./ai-review-github-app.md) —
+  create the App, grant it exactly what the review needs, and wire the build so
+  reviews post as `<your-app>[bot]` and close the threads they settle.
 - [Self-healing builds](./self-healing.md) — hand a failure to an AI fixer that
   re-runs the command to verify.
 - [Using Zuke in a Node/npm project](./node-projects.md) — drive a Node build

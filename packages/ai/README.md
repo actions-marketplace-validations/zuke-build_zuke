@@ -19,8 +19,8 @@ untrusted comments never reach the model. See
 [the AI review guide](https://github.com/zuke-build/zuke/blob/master/docs/ai-review.md).
 
 ```ts
-import { Build, parameter, run, target } from "jsr:@zuke/core";
-import { securityReviewer } from "jsr:@zuke/ai";
+import { Build, parameter, run, target } from "@zuke/core";
+import { securityReviewer } from "@zuke/ai";
 
 class Pipeline extends Build {
   key = parameter("Anthropic API key").secret().required();
@@ -68,10 +68,16 @@ change under review can't rewrite the rules), `.criteriaFile("NOTES.md")` (the
 base-anchored half of `.criteria(...)`, read the same way — `.criteria` is build
 code and so travels with the change), `.fileContext()` (send the changed files
 whole, not bare hunks), `.verify()` (adversarially re-check every candidate
-finding; refuted ones are reported but never gate), and `.discussion()` (engage
-with maintainer rebuttals on the PR — an accepted refutation stays dismissed
-instead of resurfacing; only comments whose author the host platform attributes
-as a maintainer ever reach the model).
+finding; refuted ones are reported but never gate, and with `.discussion()` a
+refutation is remembered — applied in code while everything the verifier saw is
+unchanged and nobody objects, re-checked with the earlier evidence once the code
+moves or a maintainer replies), and `.discussion()` (engage with maintainer
+rebuttals on the PR — an accepted refutation stays dismissed instead of
+resurfacing, and is adjudicated even when the next round's model no longer
+reports the finding; only comments whose author the host platform attributes as
+a maintainer ever reach the model). A rebuttal left in a thread gets its answer
+without a push when a maintainer comments the workflow's command, which re-runs
+the review and answers in the thread.
 
 `.skipIfKeyMissing()` skips the review instead of failing when the API key is
 absent — handy when the key is a CI-only secret — and announces the skip on the
@@ -109,7 +115,12 @@ GitHub Actions, grant `pull-requests: write` in the workflow (or use
 `aiReviewWorkflow` also lets a maintainer start the review by commenting on any
 pull request, a fork's included — the pull request is then fetched as data
 (`ZUKE_REVIEW_PR`) and reviewed from the default branch's checkout, so its code
-never runs with the secrets present.
+never runs with the secrets present. A build whose review resolves the threads
+it answers names the App's credentials in the spec's `secrets`, since GitHub
+allows that mutation only to a token with repository write access, which the
+Actions token is not; such a job should also set `egress` to block, with
+`allowedEndpoints` for the launcher, and the generator adds each reviewer's
+provider host itself.
 
 ## Token usage
 
@@ -159,8 +170,8 @@ Define a reviewer fluently and plug it into a target as a {@link
 Only the provider and API key are required; everything else is defaulted.
 
 ```ts
-import { Build, parameter, target } from "jsr:@zuke/core";
-import { securityReviewer } from "jsr:@zuke/ai";
+import { Build, parameter, target } from "@zuke/core";
+import { securityReviewer } from "@zuke/ai";
 
 class Pipeline extends Build {
   key = parameter("Anthropic API key").secret().required();
@@ -571,8 +582,34 @@ class DiscussionSettings
     reviewer replies into the thread with the outcome and resolves it once the
     finding is fixed or dismissed. GitHub only; on other hosts the reviewer
     notes that and posts the summary alone.
+  commands(mention: string): this
+    Take commands from maintainers, addressed to `mention` — e.g.
+    `"@zuke-build"`, the account the workflow's comment command is addressed
+    to, so one handle serves both.
+
+    With it set, every review comment carries a collapsed Commands panel
+    listing what a maintainer can say, and a trusted comment starting with
+    `<mention> accept <id> <reason>` accepts the finding: it is recorded as
+    accepted for this pull request without adjudication, answered in its
+    thread and the thread resolved, and never re-raised on the pull request
+    by any reviewer, however it is reworded, moved or escalated. In a
+    finding's own thread the id may be left out. The trust gate is the one
+    rebuttals pass — {@link trustAssociations} and {@link trustAuthors},
+    decided in code from the host's author metadata — so a stranger's
+    `accept` is dropped before anything reads it. Unlike a rebuttal, an
+    acceptance is one key: no adjudicator weighs it. On a host where the
+    default associations admit accounts that should not decide for the
+    project (GitHub's `MEMBER` and `COLLABORATOR` include read-only ones),
+    narrow the gate with {@link trustAssociations} or {@link trustAuthors}
+    before turning commands on.
+
+    The panel also lists `<mention> review`, the workflow's comment command
+    that runs the review on demand; pair this with `aiReviewWorkflow`'s
+    `command` so that both are true.
   maxTokens_(): number
     INTERNAL: the total comment-token cap.
+  mention_(): string | undefined
+    INTERNAL: the mention commands are addressed to, when set.
   threads_(): boolean
     INTERNAL: whether findings are also anchored to review threads.
 
@@ -588,18 +625,32 @@ class GateSettings
 
 class ReviewCommandSettings
   The comment command that runs the review on demand, configured through
-  {@link AiReviewWorkflowSpec.command}.
+  {@link AiReviewWorkflowSpec.command} — and derived from the reviewers
+  without it: a reviewer that takes commands (`.discussion((d) => d.commands("@acme-bot"))`) names the mention, and the job it needs is
+  generated with `<mention> review` and `<mention> accept`, so the Commands
+  panel the reviewer posts is true by construction. The lambda refines the
+  job: who may start a run, which secrets it holds, or a command text of its
+  own.
 
   The job it adds runs on `issue_comment`, which GitHub delivers for comments on
   pull requests too, always from the default branch and always with the
-  repository's secrets — so its `if:` is the whole access control. It fires only
-  when the comment is on a pull request, starts with {@link text}, was written
-  by a human (not a bot account), and its author's `author_association` is
-  `OWNER`, `MEMBER` or `COLLABORATOR`. The comment body is matched in the
-  expression and never interpolated into a `run:` line. Then, before the
-  review runs, the job asks the collaborators API whether the commenter has
-  push access, and stops if not — an association alone admits read-only
-  members and collaborators.
+  repository's secrets. Its `if:` fires only when the comment is on a pull
+  request, starts with one of the commands, and was written by a human (not a
+  bot account); the comment body is matched in the expression and never
+  interpolated into a `run:` line. The access control runs inside the build,
+  not the workflow file: the job passes the commenter's login, {@link role}
+  and {@link users} as env, and each reviewer asks the collaborators API —
+  through `GhTasks` — what role the commenter holds, starting only when it is
+  at or above {@link role} or the login is among {@link users} (see
+  `callers.ts`). A refused commenter's run ends having spent nothing, with a
+  😕 on their comment. The event's `author_association` is
+  deliberately not consulted — it reports a private organisation member as
+  `CONTRIBUTOR`, and `MEMBER` and `COLLABORATOR` admit read-only accounts, so
+  it can neither admit nor refuse anyone correctly.
+
+  The command is also how a maintainer who contested a finding in its review
+  thread, and pushed nothing, gets an answer: the run it starts reads every
+  thread, adjudicates the rebuttals, and replies in the threads.
 
   What runs is the default branch's build, never the pull request's: the job
   passes `ZUKE_REVIEW_PR`, and the reviewers fetch that pull request's merge
@@ -610,19 +661,43 @@ class ReviewCommandSettings
   is for Dependabot's `@dependabot` commands.
 
   text_?: string
-    The command a comment must start with. Set by {@link text}.
-  secrets_: string[]
+    A command text of its own, replacing the derived ones. Set by {@link text}.
+  also_: string[]
+    Other commands that also start a run. Set by {@link also}.
+  secrets_: ReviewSecret[]
     Secrets the command job's review step receives beyond the reviewers' own
     keys and the host token. Set by {@link secrets}.
+  role_: CommandRole
+    The least role that may start a run. Set by {@link role}.
+  users_: string[]
+    Logins admitted whatever their role. Set by {@link users}.
   text(command: string): this
-    The command, e.g. `"@zuke-build review"`. Matched case-insensitively at
-    the start of the comment, so a reply that quotes it (`> @zuke-build review`) does not start a run. Letters, digits, `@/_.:-` and single spaces
-    only.
-  secrets(...names: string[]): this
+    A command text of its own, e.g. `"/review"`, replacing the ones derived
+    from the reviewers' mention. Matched case-insensitively at the start of
+    the comment, so a reply that quotes it (`> /review`) does not start a run.
+    Letters, digits, `@/_.:-` and single spaces only. A reviewer that takes
+    commands still parses `accept` under its own mention, so name that too
+    with {@link also} when overriding.
+  also(...commands: string[]): this
+    Other comment commands that also start a run, matched like {@link text}.
+    Same alphabet.
+  secrets(...secrets: ReviewSecret[]): this
     Pass these repository secrets to the command job's review step as env vars
-    of the same name — e.g. the GitHub App credentials the build mints its
-    `commentToken` from, so the review posts as the app. Only the command job
-    receives them; the `pull_request` job is unchanged.
+    — the build's parameters, whose env names the workflow reads off them, or
+    plain names. Only the command job receives them; the `pull_request` job is
+    unchanged. Secrets both jobs should hold go on
+    {@link AiReviewWorkflowSpec.secrets} instead.
+  role(role: CommandRole): this
+    The least repository role a commenter needs to start a run — `"read"`,
+    `"triage"`, `"write"` (the default: push access), `"maintain"` or
+    `"admin"`, as GitHub's collaborators API reports them. Every role above
+    it is admitted too. `"read"` admits anyone the repository admits, which
+    on a public repository is everyone: the run spends the reviewers' keys,
+    so choose that knowingly.
+  users(...logins: string[]): this
+    Logins admitted to start a run whatever their role — an outside
+    contributor the project trusts, say. Checked before the collaborators API
+    is asked.
 
 class Reviewer implements Validation
   A fluent AI reviewer. Construct one via {@link securityReviewer} (and the
@@ -642,6 +717,9 @@ class Reviewer implements Validation
     Whether `.comment()` is set — i.e. this reviewer posts to the PR.
   get commentToken_(): CommentTokenSource | undefined
     The configured comment-posting token, if `.commentToken(...)` was called.
+  get mention_(): string | undefined
+    The mention this reviewer takes commands under, when it takes any — what
+    the workflow generator derives the command job from.
   provider(provider: Provider): this
     Set the model provider (required).
   apiKey(apiKey: AnyParameter | string): this
@@ -700,6 +778,19 @@ class Reviewer implements Validation
     every run, so earlier assessments — and their finding ids — stay on the
     thread as history. The discussion feature works with both: its state block
     rides on every comment, and the newest one is read back.
+
+    Reviewers attached side by side to one target —
+    `.validateBefore(security, quality)` — post one comment between them
+    rather than one each: a table of every reviewer's verdict, the findings of
+    all of them in one table with a column naming the reviewer (and its
+    {@link badge}) that raised each, and each reviewer's full report folded
+    underneath. Every one of them runs even when an earlier one fails its
+    gate; the target then fails with all of their reasons. The comment is
+    posted by the last of them, with its token, and appended when any of
+    them appends. Each reviewer's discussion state rides in it under the
+    reviewer's name, and a reviewer that used to post alone still reads its
+    old comment. Another validation between two reviewers splits them, and a
+    reviewer alone posts its own comment as before.
   commentToken(token: CommentTokenSource): this
     The token used to post the PR/MR comment. Defaults to the active host's
     conventional env var: `GITHUB_TOKEN` (GitHub), `GITLAB_TOKEN` (GitLab),
@@ -714,6 +805,26 @@ class Reviewer implements Validation
     default token alongside, for the function to fall back to.
   githubToken(token: CommentTokenSource): this
     Backwards-compatible alias for {@link commentToken}.
+  reactions(enabled: boolean): this
+    Whether the reviewer reacts on the pull request to show its progress (on
+    by default, whenever `.comment()` is set). On the description: 👀 while
+    it runs, then 👍 when it passes clean, 🎉 when it passes clean where the
+    previous run failed, 🤏 when it has findings under the failing threshold
+    (😕 on GitHub, whose reaction set has no 🤏), 👎 when it fails. On the
+    comment that started a comment-started run: 👍 as it starts, 😕 when the
+    run could not review. On a trusted maintainer's reply: 👀 once read, ❤️
+    when it decided a finding. The reviewers on one pull request share the
+    reactions, so the verdict shown is the worst of a run's. GitHub and
+    GitLab have the reactions; on Azure DevOps and Bitbucket this is a no-op.
+    `false` turns all of it off, as does `.quiet()`, under which the reviewer
+    does not speak on the pull request.
+  badge(emoji: string): this
+    The emoji that marks this reviewer's findings — in the combined comment
+    the reviewers of one target share (see {@link comment}), and on the review
+    threads it opens. Defaults by kind: 🛡️ security, 🧹 code quality
+    (`genericReviewer`), 🔑 secrets, 🐛 correctness, ⚖️ license. Set one when
+    two reviewers of a kind review side by side — and give one of them a
+    {@link name} of its own, which is what the comment tells them apart by.
   quiet(): this
     Suppress the findings printout and the job-summary section.
   fetch(impl: typeof fetch): this
@@ -809,6 +920,10 @@ class Reviewer implements Validation
     Untrusted comments are dropped in code before any prompt is built — the
     model never sees them, so a drive-by "the maintainer approved this"
     comment cannot influence the review.
+  async preflight(context: ValidationContext): Promise<void>
+    The run's preflight: on a comment-started run, refuse a commenter who may
+    not start a review before any target — a dependency included — has
+    started (see {@link Validation.preflight}). A no-op on any other run.
   async validate(context: ValidationContext): Promise<void>
     Run the review and gate the build. Throws an {@link AiReviewError} when the
     gate trips (or on a configuration/API error with `onError: "fail"`).
@@ -896,18 +1011,50 @@ interface AiReviewWorkflowSpec
     Workflow name shown in the host's UI. Defaults to `"AI Review"`.
   timeoutMinutes?: number
     Per-job timeout in minutes. Defaults to 15.
+  secrets?: readonly ReviewSecret[]
+    Repository secrets every review step receives as env vars of the same
+    name, beyond the reviewers' own keys and the host token — on the
+    pull-request job and, with a {@link command}, the command job alike. The
+    case for it is a GitHub App the build mints its `.commentToken(...)`
+    from: the Actions token may post a review and reply in its threads, but
+    GitHub refuses it the mutation that resolves a thread, so a review
+    that closes the threads it answers needs the App's token on the job that
+    answers most of them, the pull-request job. Name secrets here only for a
+    repository whose pull-request job you would hand them to: it executes the
+    pull request's own build, so everyone who can push a branch can read what
+    it holds. Secrets for the command job alone go on
+    {@link ReviewCommandSettings.secrets}.
+
+    Each is the build's parameter — its env name is read off it, so a rename
+    follows — or, for a secret the build never reads itself, its plain name.
+  egress?: "audit" | "block"
+    The harden-runner egress policy of the GitHub jobs. `"audit"` (the
+    default) records outbound connections; `"block"` drops everything outside
+    {@link allowedEndpoints}, which is what a job holding a credential worth
+    stealing should do — the App key {@link secrets} names, say. Each
+    reviewer's provider host is added to the allow-list automatically, so a
+    build lists only what its own launcher and module resolution reach.
+  allowedEndpoints?: readonly string[]
+    The `host:port` endpoints a `"block"` {@link egress} permits, on top of
+    every reviewer's provider host. For a Zuke launcher that is the Deno
+    download, JSR, and GitHub (`github.com`, `api.github.com`, and the
+    release-asset hosts the bootstrap fetches from). Ignored when auditing.
   command?: Configure<ReviewCommandSettings>
-    Run the review on demand when a maintainer comments a command on a pull
-    request — any pull request, a fork's included. GitHub only; see
+    Refine the job that runs the review on demand when a maintainer comments
+    a command on a pull request — any pull request, a fork's included. The
+    job is generated whenever a reviewer takes commands, with that reviewer's
+    mention, so this is only needed to change who may start a run, the
+    secrets the job holds, or the command text. GitHub only; see
     {@link ReviewCommandSettings} for the job it adds and the gate it runs
     behind.
 
     ```ts
     aiReviewWorkflow({
       reviewers: [this.security],
-      command: (c) =>
-        c.text("@zuke-build review")
-          .secrets("ZUKE_BUILD_APP_ID", "ZUKE_BUILD_APP_KEY"),
+      secrets: ["ZUKE_BUILD_APP_ID", "ZUKE_BUILD_APP_KEY"],
+      egress: "block",
+      allowedEndpoints: ["dl.deno.land:443", "jsr.io:443", "api.github.com:443"],
+      command: (c) => c.text("@zuke-build review"),
     });
     ```
 
@@ -1084,6 +1231,10 @@ type AgentRunner = (context: AgentContext) => Promise<AgentResult> | AgentResult
 type AssessmentType = "generic" | "security" | "secrets" | "correctness" | "license"
   The kind of review an assessment performs.
 
+type CommandRole = "read" | "triage" | "write" | "maintain" | "admin"
+  A repository role a commenter may hold, as GitHub's collaborators API
+  reports it (`role_name`) — see `ReviewCommandSettings.role`.
+
 type CommentTokenSource = AnyParameter | string | (() => Promise<string>)
   Where a reviewer's comment-posting token comes from: a secret parameter (for
   its env var), a literal, or a function that produces the token when a post
@@ -1104,6 +1255,9 @@ type GateRule = { kind: "score"; value: number; } | { kind: "severity"; value: S
 
 type Provider = "claude" | "openai" | "gemini"
   A supported model provider.
+
+type ReviewSecret = AnyParameter | string
+  A repository secret named to a workflow: the build's parameter, or its name.
 
 type RunScope = "local" | "ci" | "both"
   Where a fixer may run, set with `.runOnly(...)`.

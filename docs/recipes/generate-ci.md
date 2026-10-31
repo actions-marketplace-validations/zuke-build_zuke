@@ -2,17 +2,17 @@
 
 For a small project the CI YAML hurts more than the build: it is the one file
 nobody can run locally, it drifts from the scripts it calls, and every provider
-spells it differently. This recipe declares the pipeline _in_ the build, so
-Zuke writes the workflow file, keeps it in sync on every run, and fails CI the
-moment the committed copy drifts.
+spells it differently. This recipe declares the pipeline _in_ the build, so Zuke
+writes the workflow file, keeps it in sync on every run, and fails CI the moment
+the committed copy drifts.
 
 ## One line in the build
 
 <!-- check -->
 
 ```ts
-import { Build, cicd, run, target } from "jsr:@zuke/core";
-import { DenoTasks } from "jsr:@zuke/deno";
+import { Build, cicd, run, target } from "@zuke/core";
+import { DenoTasks } from "@zuke/deno";
 
 class MyBuild extends Build {
   // one line → .github/workflows/ci.yml, one job per target
@@ -29,9 +29,9 @@ await run(MyBuild);
 ```
 
 ```sh
-./zuke generate-ci           # write every declared pipeline file
-./zuke generate-ci --check   # the CI gate: fail if a committed file drifted
-./zuke test                  # the same targets, locally, before you push
+zuke generate-ci           # write every declared pipeline file
+zuke generate-ci --check   # the CI gate: fail if a committed file drifted
+zuke test                  # the same targets, locally, before you push
 ```
 
 The provider is the only required field. The default is a workflow named `CI`,
@@ -83,20 +83,20 @@ Three things to notice:
 Running any target regenerates the declared files, so you cannot forget to. On
 CI — Zuke detects `GITHUB_ACTIONS`, `GITLAB_CI`, `TF_BUILD` and Bitbucket's
 variables — a run _verifies_ the committed files instead and fails when they
-have drifted. `./zuke generate-ci --check` is the same verification as a
-dedicated gate, and `--dry-run` skips regeneration altogether.
+have drifted. `zuke generate-ci --check` is the same verification as a dedicated
+gate, and `--dry-run` skips regeneration altogether.
 
 ## One declaration, four providers
 
-The same `cicd()` emits GitHub Actions, GitLab CI, Azure Pipelines, or
-Bitbucket Pipelines. Declare one field per provider and every file follows the
-same two targets; the default path follows the provider:
+The same `cicd()` emits GitHub Actions, GitLab CI, Azure Pipelines, or Bitbucket
+Pipelines. Declare one field per provider and every file follows the same two
+targets; the default path follows the provider:
 
 <!-- check -->
 
 ```ts
-import { Build, cicd, run, target } from "jsr:@zuke/core";
-import { DenoTasks } from "jsr:@zuke/deno";
+import { Build, cicd, run, target } from "@zuke/core";
+import { DenoTasks } from "@zuke/deno";
 
 class Pipeline extends Build {
   ci = cicd({ provider: "github", fanOut: true }); // .github/workflows/ci.yml
@@ -113,7 +113,6 @@ await run(Pipeline);
 Triggers, a matrix, extra steps, permissions, a timezone-aware schedule — the
 `pipeline` field takes all of it, once, for every provider. The
 [authoring guide](../authoring.md#ci-config-generation--cicd-and-generate-ci)
-has the full shape and
-[scheduled runs](../schedules.md) covers `{ cron, tz }`. A complete project
-whose _only_ job is its pipeline, generated files included, is
-[`examples/ci-only`](../../examples/ci-only).
+has the full shape and [scheduled runs](../schedules.md) covers `{ cron, tz }`.
+A complete project whose _only_ job is its pipeline, generated files included,
+is [`examples/ci-only`](../../examples/ci-only).

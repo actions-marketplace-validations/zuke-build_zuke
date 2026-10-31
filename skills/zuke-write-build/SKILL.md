@@ -12,8 +12,8 @@ bottom of `zuke.ts` (no `import.meta.main` guard — `run` no-ops on import).
 <!-- check -->
 
 ```ts
-import { Build, run, target } from "jsr:@zuke/core";
-import { DenoTasks } from "jsr:@zuke/deno";
+import { Build, run, target } from "@zuke/core";
+import { DenoTasks } from "@zuke/deno";
 
 class CI extends Build {
   lint = target()
@@ -38,14 +38,24 @@ await run(CI);
 
 ## Non-negotiable rules
 
-1. **Dependencies are `this.<field>` references, never strings.**
+1. **Import `@zuke/*` by bare specifier, and declare it in `deno.json`.** Write
+   `import { DenoTasks } from "@zuke/deno";` and add
+   `"@zuke/deno": "jsr:@zuke/deno@^1"` to the `imports` block of the project's
+   `deno.json` — never an inline `jsr:@zuke/deno@^1` in the import statement.
+   Deno's default lint set (the one that applies when `deno.json` configures no
+   `lint.rules`, which is what `zuke setup` scaffolds) rejects an inline `jsr:`
+   specifier under `no-import-prefix`, so an inlined one fails the project's own
+   `deno task lint`. Pin the caret major in the import map instead, so a future
+   `@zuke` major cannot land unannounced. `zuke setup` already declares
+   `@zuke/core` there; adding a wrapper means adding its entry too.
+2. **Dependencies are `this.<field>` references, never strings.**
    `.dependsOn(this.lint)`, not `.dependsOn("lint")` — so renames and typos are
    compile-time errors.
-2. **A target may only depend on siblings declared _above_ it.** Class fields
+3. **A target may only depend on siblings declared _above_ it.** Class fields
    initialise top-to-bottom; a forward reference is `undefined` and is reported
    as an error (TypeScript also flags it, `TS2729`). Order fields so
    dependencies come first.
-3. **Check the package catalogue before writing any command.** `llms.txt`'s
+4. **Check the package catalogue before writing any command.** `llms.txt`'s
    `## Packages` catalogue (raw:
    <https://raw.githubusercontent.com/zuke-build/zuke/master/llms.txt>) and the
    package table in [`references/cheatsheet.md`](references/cheatsheet.md) are
@@ -62,7 +72,7 @@ await run(CI);
    discards typed flags, argv purity, and tool resolution. (If a build delegates
    its side effects to your own tested modules behind injected clients, the
    wrapper rule still governs whatever those modules run in the target body.)
-4. **A body is required**, unless the target is one of the four forms that
+5. **A body is required**, unless the target is one of the four forms that
    replace it: a `service()`, a `.forEach()` fan-out, a `.waitsFor()` gate, or a
    target declaring only `.effect(...)`. Otherwise set `.executes(...)`; it may
    be sync or async, and its return value is ignored —
@@ -99,8 +109,10 @@ it cannot answer "does one exist for this tool?"; only the catalogue
    methods (cheatsheet → `deno doc` / `llms-full.txt`).
 3. Add or edit the target field. Place it **below** every target it depends on.
    Wire dependencies with `this.<field>`.
-4. Validate: `./zuke --list` shows it; `./zuke <target> --dry-run` previews the
-   plan; `./zuke <target>` runs it.
+4. Validate with the `zuke` command (it works from any directory inside the
+   project; install it with `deno install -A -g -n zuke jsr:@zuke/cli` if it is
+   missing): `zuke --list` shows it; `zuke <target> --dry-run` previews the
+   plan; `zuke <target>` runs it.
 
 ## Common building blocks (see the cheatsheet for details)
 
@@ -118,20 +130,19 @@ it cannot answer "does one exist for this tool?"; only the catalogue
   `override mcpAuthorize(identity, call)` decides the rest. See the cheatsheet.
 - **Target context & cancellation:** a body may take a context —
   `.executes((ctx) => …)` — with `ctx.runId`, `ctx.initiator` (who asked for the
-  run, unchanged by a resume), `ctx.target`, `ctx.signal` (an
-  `AbortSignal` fired when the run is cancelled; a plain `` $`…` `` in the body
-  is `SIGTERM`'d automatically), `ctx.state`, `ctx.dryRun`, `ctx.plan()` (the
-  run's planned shape — `targets`, `includes(name)`, `dependenciesOf(name)` — so
-  a body can ask whether `deploy` was part of what was asked for; it reports the
-  plan, never what will actually execute, which is `ctx.outcomeOf(name)`), and
-  `ctx.reportSummary({ … })` (`key: value` notes on the target's own row of
-  the Build Summary; every test-runner wrapper — `DenoTasks.test`,
+  run, unchanged by a resume), `ctx.target`, `ctx.signal` (an `AbortSignal`
+  fired when the run is cancelled; a plain `` $`…` `` in the body is `SIGTERM`'d
+  automatically), `ctx.state`, `ctx.dryRun`, `ctx.plan()` (the run's planned
+  shape — `targets`, `includes(name)`, `dependenciesOf(name)` — so a body can
+  ask whether `deploy` was part of what was asked for; it reports the plan,
+  never what will actually execute, which is `ctx.outcomeOf(name)`), and
+  `ctx.reportSummary({ … })` (`key: value` notes on the target's own row of the
+  Build Summary; every test-runner wrapper — `DenoTasks.test`,
   `VitestTasks.run`, `JestTasks.run`, `BunTasks.test`, `NodeTasks.test`,
-  `PlaywrightTasks.test`, `CypressTasks.run` — reports its test counts there
-  by itself, and the ambient `reportSummary` does the same from code with no
-  `ctx`).
-  Zero-argument bodies keep working unchanged. Cancel a run programmatically by
-  passing `{ signal }` to `execute`. See the cheatsheet.
+  `PlaywrightTasks.test`, `CypressTasks.run` — reports its test counts there by
+  itself, and the ambient `reportSummary` does the same from code with no
+  `ctx`). Zero-argument bodies keep working unchanged. Cancel a run
+  programmatically by passing `{ signal }` to `execute`. See the cheatsheet.
 - **Caching:** `.inputs(...)` / `.outputs(...)` make a target incremental. Add a
   **remote store** to share results across machines (fresh CI, teammates);
   `--affected` runs only targets changed since a git base; `--no-cache` /
@@ -145,26 +156,25 @@ it cannot answer "does one exist for this tool?"; only the catalogue
   `ZUKE_*_URL` backend must be `https:` (loopback exempt;
   `ZUKE_ALLOW_INSECURE_URL=1` opts out). In a body, `ctx.state.set({ … })` /
   `ctx.state.get()` records per-target metadata (JSON, **never secrets** —
-  secret parameters and redacted values are excluded). `set` awaits the
-  write; `ctx.state.trySet({ … })` is the same write reporting `true` when it
-  reached the store and `false` when it was dropped — use it before an
-  irreversible step that depends on the value. A store-less build and a
-  compensation body always see `true` (nothing durable behind them). Inspect persisted runs
-  afterwards with `zuke runs list` (filter by
-  `--status`/`--target`/`--since`/`--limit`) and `zuke runs show <id>` (`--json`
-  on both). Prune old ones with `zuke runs prune --keep <age> --keep-last <n>`
-  (only terminal runs; never suspended/running). A run whose process is killed
-  is picked up by `zuke resume --check`, which reaps it — its lease tells a dead
-  holder from a slow one — and resumes it in the same sweep. A process that
-  merely _looked_ dead and then finds its lease taken over **stops**, running no
-  compensations and settling nothing: the run is the new holder's now.
-  `override deadline()` gives a run a wall-clock budget (`"45m"`, or
-  milliseconds) that survives suspension; an abandoned run found past it is
-  settled `failed` with its compensations instead of resumed. On a **shared**
-  store, set `ZUKE_BUILD_ID` (or rely on `GITHUB_REPOSITORY`) so each build only
-  recovers its own runs — a resume runs _this_ build's bodies against whatever
-  record it is given, and a templated `zuke.ts` looks identical to the shape
-  checks. See the cheatsheet.
+  secret parameters and redacted values are excluded). `set` awaits the write;
+  `ctx.state.trySet({ … })` is the same write reporting `true` when it reached
+  the store and `false` when it was dropped — use it before an irreversible step
+  that depends on the value. A store-less build and a compensation body always
+  see `true` (nothing durable behind them). Inspect persisted runs afterwards
+  with `zuke runs list` (filter by `--status`/`--target`/`--since`/`--limit`)
+  and `zuke runs show <id>` (`--json` on both). Prune old ones with
+  `zuke runs prune --keep <age> --keep-last <n>` (only terminal runs; never
+  suspended/running). A run whose process is killed is picked up by
+  `zuke resume --check`, which reaps it — its lease tells a dead holder from a
+  slow one — and resumes it in the same sweep. A process that merely _looked_
+  dead and then finds its lease taken over **stops**, running no compensations
+  and settling nothing: the run is the new holder's now. `override deadline()`
+  gives a run a wall-clock budget (`"45m"`, or milliseconds) that survives
+  suspension; an abandoned run found past it is settled `failed` with its
+  compensations instead of resumed. On a **shared** store, set `ZUKE_BUILD_ID`
+  (or rely on `GITHUB_REPOSITORY`) so each build only recovers its own runs — a
+  resume runs _this_ build's bodies against whatever record it is given, and a
+  templated `zuke.ts` looks identical to the shape checks. See the cheatsheet.
 - **Cross-run locks:** `.lock((s) => s.lockKey(...).withTtl("4h"))` — a settings
   lambda — gives a target an exclusive claim across runs/machines; a second run
   wanting the same key fails with a `LockConflictError` naming the holder, or
@@ -172,7 +182,21 @@ it cannot answer "does one exist for this tool?"; only the catalogue
   lambda runs after params resolve, so the key can read `this.<param>.value`.
   The lock releases when the target settles and expires after the TTL if the
   holder is killed. Needs a state store (a build with `.lock()` enables the
-  filesystem store by default). See the cheatsheet.
+  filesystem store by default). Add `s.holdForRun()` to hold the lock until the
+  **run** settles instead — across a suspend at a gate and the resume — e.g. one
+  rollout per service from deploy to promotion. See the cheatsheet.
+- **Checks while the body runs:**
+  `.validateDuring((s) => s.every("30s").check(errorRate))` runs `Validation`s
+  on an interval while the body runs (rounds never overlap); the first throw
+  aborts the body's `ctx.signal` (killing its `$` children) and fails the target
+  — so `.onFailure(() => "cancel-run")` can roll back. Each check gets a
+  `signal` (pass it to `fetch`); a red verdict as the body finishes still
+  counts. Not retried by `.retry`; not run under `--dry-run`.
+- A `Validation` may carry an optional `preflight(ctx)` — called for every
+  validation in the plan before any target, dependencies included, starts; a
+  throw refuses the whole run. `zuke <target> --preflight` runs only that phase
+  (no target executes, missing parameters tolerated), which is how the AI-review
+  command job checks who may start a review before any secret is in reach.
 - **External-event waits:**
   `.waitsFor((s) => s.on(externalSignal("approved")).timeout("72h"))` makes a
   target a **gate** with no body: the run proceeds past it only when the trigger
@@ -188,8 +212,11 @@ it cannot answer "does one exist for this tool?"; only the catalogue
   `ctx.state` exposes the original target's persisted metadata (so a rollback
   reads what the deploy recorded). Cancel with `zuke cancel <id>` (or Ctrl-C, or
   the MCP `cancel_run` tool). Idempotent; a timed-out wait can route its
-  `onTimeout` here (`"cancel-run"` or a named target). Needs a state store. See
-  `docs/orchestration.md`.
+  `onTimeout` here (`"cancel-run"` or a named target), and so can a failed
+  check: `.onFailure(() => "cancel-run")` turns that target's final failure into
+  a cancellation, so a bad health check unwinds through the same rollback (a
+  named target runs first, with the failed target's state). Needs a state store.
+  See `docs/orchestration.md`.
 - **Durable side effects:** `.effect(name, fn)` records the intent to run `fn`
   before it runs, so a resume re-drives an effect a dead process left owed.
   Effects run after the body, in declaration order; a target may declare effects
@@ -213,10 +240,10 @@ it cannot answer "does one exist for this tool?"; only the catalogue
   `number[]`, and a required list is `.required().array()` (required before
   array — `.array().required()` does not typecheck). A parameter may not be
   named so that it renders as a built-in CLI flag (`actor`, `actorKind`,
-  `limit`, `target`, `output`, …) or as an MCP control key (`dryRun`,
-  `confirm`, `operatorToken`) — the build refuses to load, naming the field.
-  The flag is one dash per lower-to-upper transition, and a **digit ends a run
-  of capitals**, so `skipE2E` gives `--skip-e2-e`; name it `skipE2e` or declare
+  `limit`, `target`, `output`, …) or as an MCP control key (`dryRun`, `confirm`,
+  `operatorToken`) — the build refuses to load, naming the field. The flag is
+  one dash per lower-to-upper transition, and a **digit ends a run of
+  capitals**, so `skipE2E` gives `--skip-e2-e`; name it `skipE2e` or declare
   `.flag("--skip-e2e")`, which replaces the derived spelling everywhere.
 - **Secrets from a manager:** `parameter(...).secret().from(source)` sources a
   value at run time (e.g. `execSecret(...)` shelling out to a secret CLI) and
@@ -232,7 +259,10 @@ it cannot answer "does one exist for this tool?"; only the catalogue
   forces PATH and an explicit `.toolPath(...)` always wins. See the cheatsheet /
   `docs/tools.md`.
 - **Code-first CI:** `cicd({ provider: "github" })` generates and verifies the
-  workflow YAML from the build.
+  workflow YAML from the build — deploy jobs included: `environment`, `outputs`,
+  sparse `matrixInclude`/`matrixExclude` and per-event
+  `pushPaths`/`pullRequestPaths` are typed fields, so no hand-kept YAML is
+  needed (a field a provider cannot express is an error, not dropped).
 - **Operate the build from an agent:** `zuke mcp` serves the build over MCP so
   an AI client can list, inspect, and (with `--allow-run`) run targets — on
   stdio, or over HTTP with `--http <host:port>` (loopback by default; a
@@ -275,18 +305,33 @@ it cannot answer "does one exist for this tool?"; only the catalogue
   review of the diff (`securityReviewer(...)` etc. via `.validateBefore`), or
   attach `aiFixer(...)` with `.recoverWith(...)` so a failing target is
   diagnosed and (opt-in) auto-fixed, with a committable PR suggestion. Override
-  `recoverWith()` on the build to apply one fixer to every target. A reviewer
-  can go deeper and hold a discussion: `.conventionsFile("AGENTS.md")` (judged
-  against the project's rules, read from the diff base), `.criteriaFile(...)`
-  (project-specific notes read from that base too — `.criteria(text)` is build
-  code and travels with the change), `.fileContext()` (whole
-  changed files, not bare hunks), `.verify()` (adversarial re-check of every
-  finding), and `.discussion()` (maintainers refute a finding by replying with
-  its id — or, with `.discussion((d) => d.threads())`, by replying in the
-  finding's own line-anchored review thread; accepted dismissals persist instead
-  of resurfacing, including when the model rewords the finding — only
-  platform-verified maintainer comments ever reach the model, on GitHub, GitLab,
-  Azure DevOps and Bitbucket alike). See the cheatsheet's AI section.
+  `recoverWith()` on the build to apply one fixer to every target. Reviewers
+  attached side by side to one target post one combined PR comment (verdict
+  table, merged findings with a reviewer badge, folded reports), and all of them
+  run even after one fails. A reviewer can go deeper and hold a discussion:
+  `.conventionsFile("AGENTS.md")` (judged against the project's rules, read from
+  the diff base), `.criteriaFile(...)` (project-specific notes read from that
+  base too — `.criteria(text)` is build code and travels with the change),
+  `.fileContext()` (whole changed files, not bare hunks), `.verify()`
+  (adversarial re-check of every finding), and `.discussion()` (maintainers
+  refute a finding by replying with its id — or, with
+  `.discussion((d) => d.threads())`, by replying in the finding's own
+  line-anchored review thread; accepted dismissals persist instead of
+  resurfacing, including when the model rewords the finding, refutations from
+  `.verify()` are remembered too, and a rebuttal is adjudicated even when the
+  next round's model drops the finding — only platform-verified maintainer
+  comments ever reach the model, on GitHub, GitLab, Azure DevOps and Bitbucket
+  alike). A maintainer's decision is inherited by a restatement on any file of
+  the diff and at any severity, and shared with every reviewer on the pull
+  request. A rebuttal needs no push: commenting the workflow's `command` (e.g.
+  `@zuke-build review`) starts a run that adjudicates it and answers in the
+  thread. With `.discussion((d) => d.commands("@zuke-build"))` the comment
+  carries a collapsed Commands panel, and `@zuke-build accept <id> <reason>`
+  records a finding as accepted for the pull request without adjudication; the
+  workflow generator derives the on-demand job from that mention, and
+  `command: (c) => c.role(...).users(...)` chooses who may start it. Reviews
+  post as `github-actions[bot]` by default, or as your own GitHub App via
+  `GhTasks.appTokenSource`. See the cheatsheet's AI section.
 - **Wait on an external GitHub workflow (`@zuke/gh`):** in a `.waitsFor(...)`
   gate, `s.on(githubWorkflow((g) => g.repo("o/r").workflow("e2e.yml")))`
   dispatches a workflow in another repo and suspends until it finishes; read the
@@ -299,9 +344,177 @@ it cannot answer "does one exist for this tool?"; only the catalogue
   `required: true` inputs via `.inputs(...)` — see the cheatsheet's
   receiving-workflow contract. Triggers are extensible — write your own against
   the exported `WaitTrigger`/`WaitContext`.
+- **Canary releases (`@zuke/canary`):**
+  `rollout = canary((c) =>
+  c.platform(p).steps(10, 50).bake("10m").analysis(...).lock(...))`
+  stamps out `rollout.stage`, `rollout.stepN.expose` / `.bake` / `.analyze`, an
+  optional `rollout.approve`, `rollout.promote` and `rollout.abort`; every
+  failure path — a failed analysis or step, an approval timeout, `zuke cancel` —
+  runs the one `abort`. Needs a state store. `p` is a `CanaryPlatform` (`stage`,
+  `expose`, `promote`, `abort`); a hand-written object is fine, and Cloud Run
+  has one ready: `cloudRunCanary((r) => r.service("api").region(…).image(…))`
+  from `@zuke/gcloud` — judged on the candidate's own errors by
+  `cloudMonitoring((m) => m.metricType(…).cloudRunCandidate("api", …).max(5))`,
+  from the same package — and Kubernetes too:
+  `kubectlCanary((k) => k.stable(…)
+  .canary(…).container(…).image(…).replicas(…))`
+  from `@zuke/kubectl`, and Helm:
+  `helmCanary((h) => h.chart(…).version(…).stableRelease(…).image(…)
+  .replicas(…))`
+  from `@zuke/helm`, and Docker Compose:
+  `dockerComposeCanary((d) => d.service(…).canaryService(…).replicas(…)
+  .image(…))`
+  from `@zuke/docker-compose`, and AWS Lambda:
+  `lambdaCanary((l) => l.functionName(…).alias("live")
+  .zipFile(…).aws((a) => a.region(…)))`
+  from `@zuke/aws`, and Azure Container Apps:
+  `containerAppCanary((a) => a.name(…).resourceGroup(…)
+  .image(…).az((z) => z.subscription(…)))`
+  from `@zuke/az`. See the cheatsheet.
+- **Prometheus (`@zuke/prometheus`):** read a metric instead of hand-rolling the
+  HTTP call —
+  `PrometheusTasks.value(await PrometheusTasks.query((s) =>
+  s.url(u).bearerToken(this.token.value).query(q)))`
+  returns the one number (a scalar or a one-sample vector; empty or several
+  fails). One task per endpoint (`queryRange`, `series`, `labels`,
+  `labelValues`, `metadata`, `targets`, `rules`, `alerts`, `buildInfo`,
+  `healthy`, `ready`); refusals are `PrometheusApiError` (status, `errorType`).
+  A credentialed URL must be `https:` unless loopback (an unauthenticated
+  in-cluster `http://` one is fine); custom auth via `.credentials(fn)`, and the
+  managed services built in with no cloud CLI: `.google()`, `.azure()`,
+  `.sigv4((a) => a.region(…))`. Canary's `prometheus(...)` analysis runs on it.
+- **Homebrew (`@zuke/homebrew`):** ship a prebuilt binary through a tap —
+  `HomebrewTasks.formula((s) => s.name(…).description(…).homepage(…)
+  .binary((b) => b.os("macos").arch("arm").url(…).sha256(…))
+  .install(…).test((t) => t.command("--version").expectVersion()))`
+  renders the Ruby (every value escaped),
+  `HomebrewTasks.publish((s) => s.tap("acme/tap")
+  .formula(name, ruby).token(…))`
+  writes `Formula/<name>.rb` (`unchanged`, no commit, when identical),
+  `HomebrewTasks.verify` installs/tests/uninstalls it through a throwaway local
+  tap, and `HomebrewTasks.verifyJob` is its macOS + Linux CI job. Set
+  `.version(…)` only when the URLs do not carry it — `brew audit` rejects a
+  version it can already scan from the URL. `BrewTasks` types the `brew` CLI
+  itself.
+- **Chocolatey (`@zuke/chocolatey`):** ship a prebuilt Windows binary —
+  `ChocolateyTasks.package((s) => s.id(…).version(…).authors(…)
+  .projectUrl(…).description(…).url64bit(zipUrl).checksum64(sha))`
+  renders the nuspec and `tools/chocolateyinstall.ps1` (XML- and
+  PowerShell-escaped; no uninstall script — choco removes the unpacked zip and
+  its shims),
+  `ChocolateyTasks.verify((s) => s.package(pkg).binary("app")
+  .command("--version").expectVersion())`
+  packs/installs/runs/uninstalls it from a temp source,
+  `ChocolateyTasks.publish((s) => s.package(pkg)
+  .apiKey(…))` pushes to
+  `https://push.chocolatey.org/` with the key masked, and
+  `ChocolateyTasks.verifyJob` is its Windows CI job. `ChocoTasks` types the
+  `choco` CLI itself.
+- **AWS (`@zuke/aws`):** `AwsTasks` types the deploy path with the CLI's own
+  names — `s3Sync`, `ecrLoginPassword`, `ecsUpdateService` +
+  `ecsWaitServicesStable`, `lambdaUpdateFunctionCode`, `cloudformationDeploy`,
+  `eksUpdateKubeconfig`, … — and readers hand back values: `accountId`,
+  `secretString`, `parameterValue`, `stackOutput(stack, key)`,
+  `lambdaPublishedVersion`, `metricValue` (CloudWatch, `.missingDataAs(0)` for
+  no data), `alarmState`, `logsInsightsQuery` (polls to `Complete`). Credential
+  commands run quietly and register what they return as secrets; every settings
+  class takes `.runner(fn)` so tests never spawn `aws`. For canaries,
+  `cloudwatch((m) => m.namespace(…).metricName(…).stat("Sum").max(5))` is an
+  analysis. See the cheatsheet.
+- **Azure (`@zuke/az`):** `AzTasks` types the deploy path with the CLI's own
+  names — `login` (federated token, certificate or managed identity),
+  `acrBuild`, `containerappUpdate` + `containerappIngressTrafficSet`,
+  `webappDeploy`, `deploymentGroupCreate`, `aksGetCredentials`, … — and readers
+  hand back values: `subscriptionId`, `accessToken`, `secretValue`, `acrToken`,
+  `containerappFqdn`, `webappHostName`, `deploymentOutput(group, name, key)`,
+  `metricValue` (Azure Monitor, `.missingDataAs(0)` for no data),
+  `logAnalyticsQuery`. Secrets reach the CLI on stdin, credential commands run
+  quietly and register what they return, a typed value the CLI would read as an
+  `@file` is refused, and every settings class takes `.runner(fn)`. For
+  canaries,
+  `azureMonitor((m) => m.resource(id).metric(…).aggregation("Count")
+  .max(5))`
+  is an analysis. See the cheatsheet.
+- **iOS app builds (`@zuke/apple`):**
+  `XcodebuildTasks.archive((s) =>
+  s.workspace(w).scheme(scheme).configuration("Release")
+  .destination("generic/platform=iOS").archivePath(a))`,
+  then
+  `writeExportOptions(plist, (o) => o.method("app-store-connect").teamId(t))`
+  and
+  `exportArchive((s) => s.archivePath(a).exportPath(dir)
+  .exportOptionsPlist(plist))`;
+  `.destination("upload")` in the export options uploads to App Store Connect.
+  Also `build`, `test`, `clean`, `resolvePackageDependencies`,
+  `showBuildSettings`. Wrap the signing steps in
+  `ProvisioningProfileTasks.temporary((s) => s.base64(profile),
+  async ({ profile }) => …)`
+  to install the profile and always remove it (`profile.uuid`/`bundleId` feed
+  the export options), then
+  `TestFlightTasks.distribute((s) => s.issuerId(i).keyId(k).privateKey(p8)
+  .bundleId(b).buildNumber(n).usesNonExemptEncryption(false).group("QA"))`
+  waits for App Store Connect to process the build and distributes it.
+  `AltoolTasks.uploadApp` wraps the deprecated `altool`. See the cheatsheet.
+- **Google Play (`@zuke/google`):**
+  `GooglePlayTasks.upload((s) => s.serviceAccount(keyJson)
+  .packageName(p).bundle(aab).track("internal").status("completed")
+  .releaseNotes(t, "en-US"))`
+  signs in as the service account, uploads the bundle in one edit, releases its
+  `versionCode` on the track and commits (the edit is deleted on failure).
+  `.status("draft")` for an app that has never had a release,
+  `.changesNotSentForReview()` where Google requires it. See the cheatsheet.
+- **Apple signing (`@zuke/apple`):** `CodesignTasks.sign`/`verify`/`display`,
+  `DittoTasks.archive` (the zip notarization wants —
+  `ditto -c -k
+  --keepParent`), `NotarytoolTasks.submit`/`info`/`log`/`history`
+  (always `--output-format json`, parsed; with `.wait()` anything but `Accepted`
+  throws a `NotarizationError` listing the log's issues) and `SecurityTasks`
+  named after the `security` subcommands. For CI, wrap signing in
+  `SecurityTasks.temporaryKeychain((s) => s.certificate(p12Base64)
+  .certificatePassword(pw), async ({ keychain, identity }) => …)`:
+  it creates, unlocks and imports into a throwaway keychain and always deletes
+  it and restores the search list, even when the callback throws. Passwords are
+  masked in every rendering and error. See the cheatsheet.
+- **Deno Deploy (`@zuke/deno`):**
+  `DenoDeployTasks.deploy((s) =>
+  s.token(t).org(o).app(a).prod().json().nonInteractive())`;
+  `create`, the `env*` tasks (`envAdd((s) => s.variable("K").secretValue(v))`),
+  `logs` (`.once()`), `deploymentsList`, `appsGet`, `whoami`. The token goes in
+  `DENO_DEPLOY_TOKEN`, never the argv. See the cheatsheet.
+- **Flutter apps (`@zuke/flutter`):** `FlutterTasks.pubGet()`, `.analyze()`,
+  `.test((s) => s.coverage())`, and one task per artifact —
+  `buildAppBundle((s) => s.release().flavor("prod").buildNumber(n))`,
+  `buildIpa`, `buildWeb`, `buildApk`, the desktop builds — plus the `pub*`,
+  `drive`, `install`, `doctor` and `config` commands. See the cheatsheet.
+- **Dart packages and CLIs (`@zuke/dart`):** `DartTasks.pubGet()`,
+  `.analyze((s) => s.fatalInfos())`,
+  `.format((s) => s.setExitIfChanged().output("none"))`, `.fix()`,
+  `.test((s) => s.coverage("coverage").reporter("github"))`, `.run()`, and one
+  task per compile target —
+  `compileExe((s) => s.entry("bin/main.dart")
+  .output("build/app"))`,
+  `compileJs`, `compileWasm`, `compileAotSnapshot`, `compileJitSnapshot`,
+  `compileKernel` — plus `doc`, `create`, the `pub*` commands, `info` and
+  `version`. See the cheatsheet.
+- **Windows signing (`@zuke/signpath`):**
+  `SignPathTasks.submit((s) =>
+  s.organizationId(org).apiToken(token).projectSlug(p).signingPolicySlug(q)
+  .gitHubOrigin((g) => g.artifactId(id)).output(path))`
+  submits to SignPath (GitHub-origin verified, or `.artifact(path)` to upload),
+  waits (`.timeout()`, `.pollInterval()`), throws `SignPathSigningError` /
+  `SignPathTimeoutError` naming the request and its web URL, and downloads the
+  signed file; `status`/`download` take an existing id. `SigntoolTasks.verify`
+  wraps `signtool verify /pa /v`. Tokens are scrubbed from every error. See the
+  cheatsheet.
 - **OpenTelemetry export (`@zuke/otel`):** register `otel((s) => s.endpoint(…))`
   as a plugin (`run(MyBuild, { plugins: [otel(…)] })`) to ship run/target spans
   and `zuke.run.started` / `zuke.run.suspended` / `zuke.runs` counters as
   OTLP/HTTP JSON. Needs a state store; the trace id is derived from the run id,
   so a suspend/resume across processes is one trace. Config falls back to the
   standard `OTEL_*` env vars, and it is inert with no endpoint. Dependency-free.
+- **QR codes (`@zuke/qr`):**
+  `QrTasks.print(text, (s) => s.errorCorrection("Q"))` renders any data as a
+  scannable code in the terminal — a URL, a Wi-Fi or login string, a token, JSON
+  — with no `qrencode` or npm package. `QrTasks.render` returns the lines for a
+  log or a file, `QrTasks.encode` the raw module matrix for an SVG, PNG or
+  slide. Dependency-free.

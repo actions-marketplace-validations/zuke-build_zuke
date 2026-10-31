@@ -10,7 +10,7 @@ and pass anything else with `.flag(...)`. Arguments stay a discrete argv array,
 so command construction is injection-free.
 
 ```ts
-import { GhTasks } from "jsr:@zuke/gh";
+import { GhTasks } from "@zuke/gh";
 
 await GhTasks.releaseCreate((s) =>
   s.repo("acme/app").tag("v1.2.3").title("v1.2.3").generateNotes().latest()
@@ -33,7 +33,7 @@ inherits.
 | `release` | `releaseCreate`, `releaseList`, `releaseListEntries`, `releaseView`, `releaseUpload`, `releaseDownload`, `releaseEdit`, `releaseDelete` |
 
 ```ts
-import { GhTasks } from "jsr:@zuke/gh";
+import { GhTasks } from "@zuke/gh";
 
 await GhTasks.prMerge((s) => s.selector(123).squash().deleteBranch().auto());
 await GhTasks.issueClose((s) => s.selector(42).reason("completed"));
@@ -74,7 +74,7 @@ what conclusion.
 | `cache`    | `cacheList`, `cacheListEntries`, `cacheDelete`                                                            |
 
 ```ts
-import { GhTasks } from "jsr:@zuke/gh";
+import { GhTasks } from "@zuke/gh";
 
 const failed = await GhTasks.runListEntries((s) =>
   s.status("failure").branch("master").limit(20)
@@ -141,8 +141,8 @@ run until it finishes**, and resurfaces its per-job conclusions — replacing
 hand-rolled "dispatch, then poll `gh run list`" glue.
 
 ```ts
-import { Build, run, target } from "jsr:@zuke/core";
-import { githubWorkflow, readWorkflowResult } from "jsr:@zuke/gh";
+import { Build, run, target } from "@zuke/core";
+import { githubWorkflow, readWorkflowResult } from "@zuke/gh";
 
 class Release extends Build {
   e2e = target().waitsFor((s) =>
@@ -190,7 +190,7 @@ and the newest silently wins. That matters when the name is a **required status
 context**.
 
 ```ts
-import { GhTasks } from "jsr:@zuke/gh";
+import { GhTasks } from "@zuke/gh";
 
 // A token scoped to this one job: `checks: write` and nothing else.
 const { token } = await GhTasks.appToken((s) =>
@@ -244,7 +244,7 @@ wrapper plus {@link githubWorkflow}, a wait trigger that dispatches and awaits
 an external GitHub Actions workflow.
 
 ```ts
-import { GhTasks, githubWorkflow } from "jsr:@zuke/gh";
+import { GhTasks, githubWorkflow } from "@zuke/gh";
 
 await GhTasks.run((s) => s.command("pr", "list").flag("state", "open"));
 
@@ -254,6 +254,12 @@ e2e = target().waitsFor((s) =>
 );
 ```
 @module
+
+function appTokenSource(configure?: Configure<GhAppTokenSourceSettings>): GhAppTokenSource
+  Build a {@link GhAppTokenSource} from the settings a lambda configures. The
+  first call mints (or falls back); every later call returns the same
+  promise. Nothing runs until the first call, so the source can be a build
+  field that names parameters declared above it.
 
 function assertRefName(name: string, what: string): void
   Reject a branch or tag name that git itself would.
@@ -318,6 +324,11 @@ async function uploadSarifReport(configure?: Configure<GhSarifSettings>): Promis
 const CACHE_LIST_FIELDS: readonly string[]
   The `--json` fields {@link readCaches} asks for; gh requires the list by
   name, so the reader pins the set {@link GhCacheEntry} describes.
+
+const GITHUB_LOGIN: RegExp
+  The characters a GitHub login can contain — letters, digits and hyphens.
+  The guard a login passes before it is put in a request path, shared so a
+  caller deciding trust on a login checks it the same way.
 
 const GhTasks: GhTasksApi
   Typed task functions for GitHub: the `gh` CLI and the REST-only operations.
@@ -452,6 +463,64 @@ class GhAppTokenSettings
   tokenRequest_(): Record<string, unknown>
     The `access_tokens` request body — only the fields that were narrowed.
 
+class GhAppTokenSourceSettings
+  Settings for {@link GhAppTokenApi.appTokenSource}.
+
+  appId_?: GhCredential
+    The App's id. Set by {@link app}.
+  privateKey_?: GhCredential
+    The App's PEM private key. Set by {@link app}.
+  repository_?: string
+    The `owner/name` to mint for. Set by {@link repository}.
+  permissions_: Record<string, GhPermissionLevel>
+    Permissions to narrow the token to. Set by {@link permission}.
+  fallback_?: GhCredential
+    The token yielded without an App. Set by {@link fallback}.
+  env_: GhEnvReader
+    The env reader for the defaults. Set by {@link env}.
+  fetch_?: typeof fetch
+    The `fetch` implementation the mint uses. Set by {@link fetch}.
+  baseUrl_?: string
+    REST base URL for the mint. Set by {@link baseUrl}.
+  mint_: GhAppTokenMint
+    The mint itself. Set by {@link mint}.
+  app(appId: GhCredential, privateKey: GhCredential): this
+    The App's credentials — its numeric id and the PEM contents of its
+    private key, as the build's parameters (`.secret()` for the key). Either
+    one unset at call time means "no App": the source yields the
+    {@link fallback}. Both are read when the token is first needed, never at
+    construction, so parameters declared on the build resolve first.
+  repository(slug: string): this
+    The repository to mint for, as `owner/name`. Defaults to the repository
+    the run is on, `GITHUB_REPOSITORY`. Name it to refuse minting anywhere
+    else: a run whose `GITHUB_REPOSITORY` is another repository then gets the
+    fallback, with a warning, rather than a token for this one minted into a
+    build running elsewhere.
+  permission(name: string, level: GhPermissionLevel): this
+    Narrow the token to one permission, e.g. `.permission("contents", "write")`.
+    Repeatable. Without any, the token holds the installation's whole grant,
+    which is the App's configured permissions — the sane default for an App
+    set up for one job. A hyphenated name is accepted as the mint accepts it.
+  fallback(token: GhCredential): this
+    The token yielded when no App is configured or the mint fails. Defaults
+    to `GITHUB_TOKEN` from the environment — the workflow's own token, so a
+    build that names an App still posts, as `github-actions[bot]`, wherever
+    the App is absent.
+  env(reader: GhEnvReader): this
+    Override the environment reader (a test seam).
+  fetch(fn: typeof fetch): this
+    Override the `fetch` the mint uses (a test seam).
+  baseUrl(url: string): this
+    Use a different REST base for the mint (GitHub Enterprise Server).
+  mint(fn: GhAppTokenMint): this
+    Override the mint itself (a test seam).
+  fallbackValue_(): string
+    The fallback token: the configured one, else `GITHUB_TOKEN`, else empty.
+  async resolve_(): Promise<string>
+    Mint the token these settings describe, or return the fallback: without
+    both credentials silently, and with a warning when the repository is not
+    an `owner/name` or the mint fails.
+
 abstract class GhBodySettings extends GhCommandSettings
   Base for the commands that take message text: `pr create`, `pr comment`,
   `pr edit`, `issue create`, `issue comment`.
@@ -567,6 +636,30 @@ class GhCheckRunSettings
   authToken_(): string
     The effective token, from the setting or the environment.
 
+class GhCollaboratorSettings
+  Settings for {@link GhCollaboratorApi.collaboratorPermission}.
+
+  login_?: string
+    The account to look up. Set by {@link login}.
+  repo_?: string
+    `owner/repo`. Set by {@link repo}.
+  token_?: string
+    The token. Set by {@link token}.
+  baseUrl_: string
+    The API root. Set by {@link baseUrl}.
+  fetch_: typeof fetch
+    The `fetch` implementation. Set by {@link fetch}.
+  login(value: string): this
+    The account to look up.
+  repo(slug: string): this
+    `owner/repo`. Defaults to `GITHUB_REPOSITORY`.
+  token(value: string): this
+    The token to authenticate with. Defaults to `GITHUB_TOKEN`.
+  baseUrl(url: string): this
+    The API root, for GitHub Enterprise.
+  fetch(fn: typeof fetch): this
+    Override the `fetch` implementation (a test seam).
+
 abstract class GhCommandSettings extends GhSettings
   Base for a typed `gh` subcommand: it contributes the command path (the
   group, the verb, and any operand) and its own flags, and inherits
@@ -632,6 +725,51 @@ class GhCommitSettings
     `owner/repo`. Defaults to `GITHUB_REPOSITORY`.
   token(value: string): this
     The token to authenticate with. Defaults to `GITHUB_TOKEN`.
+  baseUrl(url: string): this
+    The API root, for GitHub Enterprise.
+  fetch(fn: typeof fetch): this
+    Override the `fetch` implementation (a test seam).
+  repoSlug_(): string
+    The effective `owner/repo`, from the setting or the environment.
+  authToken_(): string
+    The effective token, from the setting or the environment.
+
+class GhContentsSettings
+  Settings for creating or updating one file.
+
+  `owner/repo` and the token fall back to the Actions environment, so a job
+  that already has them names only the file.
+
+  path_?: string
+    The repository-relative file path. Set by {@link path}.
+  content_?: string
+    The new file content. Set by {@link content}.
+  message_?: string
+    The commit message. Set by {@link message}.
+  branch_?: string
+    The branch to write on. Set by {@link branch}.
+  repo_?: string
+    `owner/repo`. Set by {@link repo}.
+  token_?: string
+    The token. Set by {@link token}.
+  baseUrl_: string
+    The API root. Set by {@link baseUrl}.
+  fetch_: typeof fetch
+    The `fetch` implementation. Set by {@link fetch}.
+  path(value: string): this
+    The file's path inside the repository, e.g. `Formula/app.rb` (required).
+    Relative, `/`-separated, with no `.` or `..` segment.
+  content(text: string): this
+    The file's new content, as text (required). Written as UTF-8.
+  message(text: string): this
+    The commit message (required).
+  branch(name: string): this
+    The branch to write on. Defaults to the repository's default branch.
+  repo(slug: string): this
+    `owner/repo`. Defaults to `GITHUB_REPOSITORY`.
+  token(value: string): this
+    The token to authenticate with — needs `contents: write` on the
+    repository. Defaults to `GITHUB_TOKEN`.
   baseUrl(url: string): this
     The API root, for GitHub Enterprise.
   fetch(fn: typeof fetch): this
@@ -1061,6 +1199,44 @@ class GhPullRequestSettings
     The effective `owner/repo`, from the setting or the environment.
   authToken_(): string
     The effective token, from the setting or the environment.
+
+class GhReactionSettings
+  Settings for the reaction tasks: the subject, the content, and — for a
+  deletion — the reaction's id. `owner/repo` and the token fall back to the
+  Actions environment.
+
+  subject_?: GhReactionSubject
+    What the reaction is on. Set by {@link issue}, {@link issueComment} or {@link reviewComment}.
+  content_?: GhReactionContent
+    The reaction's content. Set by {@link content}.
+  id_?: number
+    The reaction to delete. Set by {@link id}.
+  repo_?: string
+    `owner/repo`. Set by {@link repo}.
+  token_?: string
+    The token. Set by {@link token}.
+  baseUrl_: string
+    The API root. Set by {@link baseUrl}.
+  fetch_: typeof fetch
+    The `fetch` implementation. Set by {@link fetch}.
+  issue(number: number): this
+    An issue — or a pull request, whose description is its issue body.
+  issueComment(id: number): this
+    A conversation comment on an issue or pull request.
+  reviewComment(id: number): this
+    A comment in a pull request's review thread.
+  content(value: GhReactionContent): this
+    The reaction to give, or — when listing — the only one to list.
+  id(value: number): this
+    The id of the reaction to delete.
+  repo(slug: string): this
+    `owner/repo`. Defaults to `GITHUB_REPOSITORY`.
+  token(value: string): this
+    The token to authenticate with. Defaults to `GITHUB_TOKEN`.
+  baseUrl(url: string): this
+    The API root, for GitHub Enterprise.
+  fetch(fn: typeof fetch): this
+    Override the `fetch` implementation (a test seam).
 
 abstract class GhReadSettings extends GhCommandSettings
   Base for the commands that can print JSON: `pr list`, `pr view`,
@@ -2144,12 +2320,25 @@ class WorkflowCorrelationError extends Error
     The error name, `"WorkflowCorrelationError"`.
 
 interface GhAppTokenApi
-  The shape of the app-token task, mixed into `GhTasks`.
+  The shape of the app-token tasks, mixed into `GhTasks`.
 
   appToken(configure?: Configure<GhAppTokenSettings>): Promise<GhAppTokenResult>
     Mint a GitHub App installation token, scoped to the repositories and
     permissions the settings request. The returned token is registered with the
     Actions log masker, so it is safe to pass onward through `env`.
+  appTokenSource(configure?: Configure<GhAppTokenSourceSettings>): GhAppTokenSource
+    A token source for the App: a function that mints the installation
+    token the first time it is called and returns the same token after, or
+    yields `GITHUB_TOKEN` when the App is not configured — the credential a
+    build hands to an AI reviewer's `.commentToken(...)` so its reviews post
+    as the App where it is installed and as `github-actions[bot]` everywhere
+    else. Nothing runs until the first call.
+
+    ```ts
+    appId = parameter("GitHub App id").env("REVIEW_APP_ID");
+    appKey = parameter("GitHub App key").secret().env("REVIEW_APP_KEY");
+    botToken = GhTasks.appTokenSource((s) => s.app(this.appId, this.appKey));
+    ```
 
 interface GhAppTokenResult
   A minted installation token and when it stops working.
@@ -2215,6 +2404,24 @@ interface GhCheckRunResult
     updated instead has learned that something else posted first, which is the
     difference between a first attempt and a re-drive.
 
+interface GhCollaboratorApi
+  The collaborator operation {@link GhTasks} exposes.
+
+  collaboratorPermission(configure?: (settings: GhCollaboratorSettings) => GhCollaboratorSettings): Promise<GhCollaboratorPermission>
+    The standing of `.login(...)` on the repository. Throws when GitHub
+    refuses or the account is unknown, so a caller deciding trust on it fails
+    closed.
+
+interface GhCollaboratorPermission
+  A collaborator's standing, as `GET /collaborators/<login>/permission` reports it.
+
+  permission: string
+    The base permission level: `admin`, `write`, `read` or `none`. A custom
+    role reports the level it is built on here.
+  roleName: string
+    The role's name: `admin`, `maintain`, `write`, `triage`, `read` — or a
+    custom role's own name.
+
 interface GhCommitApi
   The commit and tag operations {@link GhTasks} exposes.
 
@@ -2236,6 +2443,32 @@ interface GhCommitResult
     The new commit's SHA.
   branch: string
     The branch it landed on.
+
+interface GhContentsApi
+  The create-or-update-file operation {@link GhTasks} exposes.
+
+  createOrUpdateFile(configure?: Configure<GhContentsSettings>): Promise<GhContentsResult>
+    Write one file through the contents API, creating it or replacing its
+    content — or, when it already holds exactly this content, writing nothing
+    and reporting `unchanged`.
+
+    A write that loses a race (the file changed between the read and the
+    write) is read once more: if the file now holds this content the result is
+    `unchanged`, otherwise the conflict is raised rather than overwritten.
+
+interface GhContentsResult
+  What became of a {@link GhContentsApi.createOrUpdateFile} call.
+
+  state: "created" | "updated" | "unchanged"
+    `created` when the file did not exist, `updated` when it held other
+    content, `unchanged` when it already held exactly this content and nothing
+    was written.
+  path: string
+    The repository-relative path that was written (or left alone).
+  commitSha?: string
+    The commit that wrote the file; absent when the state is `unchanged`.
+  blobSha: string
+    The file's git blob SHA after the call.
 
 interface GhIssueApi
   The `gh issue` members of {@link "./gh.ts".GhTasks}.
@@ -2376,6 +2609,29 @@ interface GhPullRequestResult
     Worth reporting rather than hiding: "proposed" and "already proposed" are
     different things to a human reading a build log, even though neither is a
     failure.
+
+interface GhReaction
+  One reaction on a subject.
+
+  id: number
+    Its id — what {@link GhReactionApi.deleteReaction} takes.
+  content: string
+    What it is.
+  login?: string
+    The login of the account that gave it, when GitHub said.
+
+interface GhReactionApi
+  The reaction operations {@link GhTasks} exposes.
+
+  react(configure?: (settings: GhReactionSettings) => GhReactionSettings): Promise<GhReaction>
+    React with `.content(...)` on the subject. GitHub keeps one reaction of
+    each content per account, so reacting twice answers the reaction already
+    there rather than adding another.
+  listReactions(configure?: (settings: GhReactionSettings) => GhReactionSettings): Promise<GhReaction[]>
+    The subject's reactions — only `.content(...)`'s when it is set.
+  deleteReaction(configure?: (settings: GhReactionSettings) => GhReactionSettings): Promise<void>
+    Delete reaction `.id(...)` from the subject. GitHub lets an account
+    delete only its own.
 
 interface GhReleaseApi
   The `gh release` members of {@link "./gh.ts".GhTasks}.
@@ -2633,7 +2889,7 @@ interface GhSecretEntry
   visibility?: string
     The visibility of an organization secret.
 
-interface GhTasksApi extends GhAppTokenApi, GhSarifApi, GhReleaseAssetApi, GhReleaseLatestApi, GhReleaseEnsureApi, GhCommitApi, GhPullRequestApi, GhCheckRunApi, GhPrApi, GhIssueApi, GhReleaseApi, GhRunApi, GhWorkflowApi, GhSecretApi, GhVariableApi, GhCacheApi, GhRepoApi, GhLabelApi
+interface GhTasksApi extends GhAppTokenApi, GhSarifApi, GhReleaseAssetApi, GhReleaseLatestApi, GhReleaseEnsureApi, GhCommitApi, GhContentsApi, GhPullRequestApi, GhCheckRunApi, GhReactionApi, GhCollaboratorApi, GhPrApi, GhIssueApi, GhReleaseApi, GhRunApi, GhWorkflowApi, GhSecretApi, GhVariableApi, GhCacheApi, GhRepoApi, GhLabelApi
   The shape of {@link GhTasks}: the `gh` CLI plus the GitHub operations that
   have no CLI subcommand (see {@link GhAppTokenApi}, {@link GhSarifApi}) and
   would otherwise force a build back to a marketplace action.
@@ -2739,6 +2995,15 @@ type CorrelateMode = "marker" | "created-window"
     created just after dispatch; best-effort, for workflows that can't echo
     the marker (fails loudly if two candidates are in the window).
 
+type GhAppTokenMint = (configure: Configure<GhAppTokenSettings>) => Promise<GhAppTokenResult>
+  The shape of the mint, replaceable by a test.
+
+type GhAppTokenSource = () => Promise<string>
+  A token provider: resolves to the App's installation token, or to the
+  fallback when the App is not configured or cannot be minted from. The same
+  promise is returned on every call, so the token is minted at most once per
+  run.
+
 type GhCacheSort = "created_at" | "last_accessed_at" | "size_in_bytes"
   What `gh cache list --sort` orders the caches by.
 
@@ -2751,6 +3016,12 @@ type GhCheckConclusion = "success" | "failure" | "neutral" | "cancelled" | "skip
 type GhCloseReason = "completed" | "not planned" | "duplicate"
   Why an issue is being closed (`--reason`).
 
+type GhCredential = AnyParameter | string
+  A credential a build passes: a parameter, or a literal for tests.
+
+type GhEnvReader = (name: string) => string | undefined
+  Read an environment variable, tolerating an absent `--allow-env`.
+
 type GhLabelSort = "created" | "name"
   What `gh label list --sort` orders the labels by.
 
@@ -2759,6 +3030,13 @@ type GhMergeMethod = "merge" | "squash" | "rebase"
 
 type GhPermissionLevel = "read" | "write" | "admin"
   A permission level an installation token can be narrowed to.
+
+type GhReactionContent = "+1" | "-1" | "laugh" | "confused" | "heart" | "hooray" | "rocket" | "eyes"
+  A reaction, as GitHub spells its content: 👍 👎 😄 😕 ❤️ 🎉 🚀 👀.
+
+type GhReactionSubject = { kind: "issue"; id: number; } | { kind: "issueComment"; id: number; } | { kind: "reviewComment"; id: number; }
+  What a reaction is on, as the REST paths address it: an issue (or a pull
+  request's description), a conversation comment, or a review comment.
 
 type GhRepoVisibility = "public" | "private" | "internal"
   How visible a repository is (`--visibility`).

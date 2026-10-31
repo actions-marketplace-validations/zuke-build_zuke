@@ -29,6 +29,11 @@ import {
 } from "./run_support.ts";
 import { withAmbientEcho } from "./ambient_echo.ts";
 import {
+  type DuringChecks,
+  resolveDuringChecks,
+  runWhileValidating,
+} from "./validate_during.ts";
+import {
   type SummaryEntry,
   TargetSummary,
   withAmbientSummary,
@@ -262,6 +267,7 @@ function targetContextFor(
   env: RunEnv,
   dryRun: boolean,
   summary: TargetSummary,
+  signal: AbortSignal,
 ): TargetContext {
   // One own-state handle, reused for `stateOf(this target)`. The name check
   // below is what holds the documented `stateOf(self) === state` invariant:
@@ -273,7 +279,7 @@ function targetContextFor(
     ...(env.initiator === undefined ? {} : { initiator: env.initiator }),
     target: name,
     plan: () => env.plan,
-    signal: env.signal,
+    signal,
     state: ownState,
     stateOf: (t) => t === name ? ownState : stateHandleFor(env, t),
     outcomeOf: (t) => outcomeOf(env, t),
@@ -582,7 +588,7 @@ async function runTarget(
             driveEffects(
               t,
               name,
-              targetContextFor(name, env, dryRun, summary),
+              targetContextFor(name, env, dryRun, summary, env.signal),
               env,
               reporter,
               style,
@@ -616,10 +622,27 @@ async function runTarget(
     return { status: "failed", ms: 0, error };
   }
 
+  // In-flight checks (`.validateDuring`) are resolved now, so a malformed one
+  // fails the target before anything runs. A dry run never gets here, so no
+  // check runs there.
+  let during: DuringChecks | undefined;
+  try {
+    during = resolveDuringChecks(t, name);
+  } catch (error) {
+    failTarget(reporter, renderer, style, name, 0, error);
+    return { status: "failed", ms: 0, error };
+  }
+  // A target with in-flight checks gets its own stop signal on top of the
+  // run's, so a failing check can end the body without cancelling the run.
+  const stop = new AbortController();
+  const bodySignal = during === undefined
+    ? env.signal
+    : AbortSignal.any([env.signal, stop.signal]);
+
   // The collector behind `ctx.reportSummary` and the ambient `reportSummary`
   // a tool wrapper calls; installed for the body's whole async subtree below.
   const summary = new TargetSummary();
-  const targetCtx = targetContextFor(name, env, dryRun, summary);
+  const targetCtx = targetContextFor(name, env, dryRun, summary, bodySignal);
 
   // Acquire the target's cross-run lock (if any) before the body. A conflict —
   // or a lock declared with no store — fails the target with the guidance.
@@ -646,12 +669,34 @@ async function runTarget(
       // become less able to publish for running after the body rather than
       // before it.
       for (const v of t.validateBefore_) {
-        await v.validate({ target: name, redact: redactLine });
+        await v.validate({
+          target: name,
+          redact: redactLine,
+          runId: env.runId,
+          peers: t.validateBefore_,
+        });
       }
-      await runBodyWithRecovery(t, name, globalRecovery, targetCtx);
+      const body = () =>
+        runBodyWithRecovery(t, name, globalRecovery, targetCtx);
+      if (during === undefined) await body();
+      else {
+        await runWhileValidating(
+          body,
+          during,
+          name,
+          env.runId,
+          stop,
+          bodySignal,
+        );
+      }
       await driveEffects(t, name, targetCtx, env, reporter, style);
       for (const v of t.validateAfter_) {
-        await v.validate({ target: name, redact: redactLine });
+        await v.validate({
+          target: name,
+          redact: redactLine,
+          runId: env.runId,
+          peers: t.validateAfter_,
+        });
       }
     });
     const ms = performance.now() - start;
@@ -808,15 +853,17 @@ function settleTarget(
   env: RunEnv,
   name: string,
   status: TargetStatus,
-  error?: string,
+  error?: unknown,
   summary?: SummaryEntry[],
 ): void {
+  const message = errorMessage(error);
   env.statuses.set(name, {
     status: recordStatusOf(status),
-    error,
+    error: message,
     ...(summary === undefined ? {} : { summary }),
   });
-  void env.writer?.markTargetSettled(name, status, error, summary);
+  void env.writer?.markTargetSettled(name, status, message, summary);
+  if (status === "failed") env.onTargetFailed(name, error);
 }
 
 /** Sequentially run the plan, aborting (and skipping the rest) on first failure. */
@@ -862,7 +909,7 @@ export async function runSequential(
       env,
       name,
       outcome.status,
-      errorMessage(outcome.error),
+      outcome.error,
       outcome.summary,
     );
     if (outcome.status === "passed" || outcome.status === "failed") opened++;
@@ -1021,7 +1068,7 @@ export async function runScheduled(
                   env,
                   t.name_ ?? "<unnamed>",
                   outcome.status,
-                  errorMessage(outcome.error),
+                  outcome.error,
                   outcome.summary,
                 );
               }
@@ -1074,7 +1121,7 @@ export async function runScheduled(
             failure ??= error;
             if (!t.proceedAfterFailure_) halted = true;
             failTarget(reporter, renderer, style, targetName, 0, error);
-            settleTarget(env, targetName, "failed", errorMessage(error));
+            settleTarget(env, targetName, "failed", error);
             pump();
           });
       }

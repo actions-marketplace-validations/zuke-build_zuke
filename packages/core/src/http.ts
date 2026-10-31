@@ -7,7 +7,7 @@
  * seam so they can be unit-tested without network access.
  *
  * ```ts
- * import { httpDownload, httpJson } from "jsr:@zuke/core";
+ * import { httpDownload, httpJson } from "@zuke/core";
  *
  * await httpDownload("https://example.com/tool.tar.gz", ".zuke/tool.tar.gz");
  * const release = await httpJson<{ tag_name: string }>(
@@ -21,50 +21,7 @@
  */
 
 import type { PathLike } from "./path.ts";
-
-/**
- * Substrings that mark a query-param name as credential-bearing. Matched as
- * substrings (not exact names) so variants — `client_secret`, `refresh_token`,
- * `x-api-key` — are covered without maintaining an exhaustive list. Over-masking
- * an innocent param (e.g. `monkey`) is harmless; under-masking a secret is not.
- */
-const CREDENTIAL_MARKERS = [
-  "secret",
-  "token",
-  "key",
-  "password",
-  "pwd",
-  "auth",
-  "sig",
-  "credential",
-  "session",
-];
-
-/** Whether a query-param `name` looks credential-bearing (see {@link CREDENTIAL_MARKERS}). */
-function isCredentialParam(name: string): boolean {
-  const lower = name.toLowerCase();
-  return CREDENTIAL_MARKERS.some((marker) => lower.includes(marker));
-}
-
-/**
- * Strip userinfo (`user:pass@`) and mask any credential-bearing query param so a
- * URL is safe to put in an error message or log. A string that is not a URL is
- * returned unchanged. Non-goal: a secret embedded in the URL *path* (rare and
- * non-standard) is not redacted — only userinfo and query params are.
- */
-export function redactUrl(raw: string): string {
-  try {
-    const url = new URL(raw);
-    url.username = "";
-    url.password = "";
-    for (const key of [...url.searchParams.keys()]) {
-      if (isCredentialParam(key)) url.searchParams.set(key, "REDACTED");
-    }
-    return url.href;
-  } catch {
-    return raw;
-  }
-}
+import { redactUrl } from "./redact_url.ts";
 
 /**
  * The environment variable that opts a deployment out of {@link
@@ -124,6 +81,10 @@ export class InsecureBackendUrlError extends Error {
  * left alone: that URL is first-party source in the build file, so writing it is
  * itself the trust decision, and a build author who means to talk plaintext to a
  * service on their own network should not have to also set an env var.
+ *
+ * Exported so a package that sends a credential to a service it reads answers
+ * from applies this same rule rather than a second loopback check of its own:
+ * `@zuke/prometheus` runs every URL that will carry a credential through it.
  *
  * @throws {InsecureBackendUrlError} naming the variable that relaxes it, when
  *   `raw` is neither `https:` nor loopback and the opt-out is unset.

@@ -4,7 +4,7 @@
 /** Test doubles for the CLI's injectable seams. */
 
 import type { SetupHost } from "../src/setup.ts";
-import type { Prompter } from "../mod.ts";
+import type { BuildProbe, Prompter } from "../mod.ts";
 
 /** An in-memory {@link SetupHost} that records writes, chmods, and logs. */
 export class FakeHost implements SetupHost {
@@ -18,8 +18,13 @@ export class FakeHost implements SetupHost {
   readonly logs: string[] = [];
   /** `[path, mode]` pairs passed to {@link chmod}. */
   readonly chmods: Array<[string, number]> = [];
+  /** Paths passed to {@link readText}, so a test can assert what was *not*
+   * read — setup refusing to open a file outside its directory. */
+  readonly reads: string[] = [];
   /** When true, {@link chmod} rejects (simulating an unsupported platform). */
   chmodFails = false;
+  /** What {@link isTerminal} answers: off by default, as under `deno test`. */
+  terminal = false;
 
   constructor(initial?: Record<string, string>) {
     if (initial) {
@@ -45,6 +50,7 @@ export class FakeHost implements SetupHost {
   }
 
   readText(path: string): Promise<string> {
+    this.reads.push(path);
     const value = this.files.get(path);
     return value === undefined
       ? Promise.reject(new Error(`missing: ${path}`))
@@ -64,6 +70,10 @@ export class FakeHost implements SetupHost {
 
   log(message: string): void {
     this.logs.push(message);
+  }
+
+  isTerminal(): boolean {
+    return this.terminal;
   }
 }
 
@@ -139,3 +149,24 @@ export class FakeStarActions {
     return Promise.resolve(this.browserOk);
   }
 }
+
+/**
+ * A {@link BuildProbe} that finds no project, whatever the directory.
+ *
+ * `zuke --help` now shows the build's half too, which means a help test given
+ * the real probe locates the repository's own `zuke.json` and spawns its build
+ * — a real subprocess, in a test that only wanted to read text. That makes the
+ * test no longer hermetic, and it was caught by the coverage gate rather than by a failing
+ * assertion: the spawned build's module body landed in the profile and dragged
+ * `zuke.ts` under the per-file floor.
+ *
+ * A help test that is not about forwarding should use this.
+ */
+export const noProjectProbe: BuildProbe = {
+  exists: () => Promise.resolve(false),
+  ownership: () => Promise.resolve(null),
+  realPath: (path) => Promise.resolve(path),
+  readLink: () => Promise.resolve(null),
+  uid: () => null,
+  readText: () => Promise.resolve("{}"),
+};

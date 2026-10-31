@@ -44,8 +44,8 @@ Both return the installed binary's [`AbsolutePath`](./paths.md); hand it to a
 <!-- check -->
 
 ```ts
-import { ToolTasks } from "jsr:@zuke/core";
-import { CmdTasks } from "jsr:@zuke/cmd";
+import { ToolTasks } from "@zuke/core";
+import { CmdTasks } from "@zuke/cmd";
 
 const bin = await ToolTasks.install((s) =>
   s
@@ -59,29 +59,31 @@ await CmdTasks.exec(String(bin), (s) => s.args("--version"));
 
 ### Settings
 
-| Method                        | Purpose                                                                                                            |
-| ----------------------------- | ------------------------------------------------------------------------------------------------------------------ |
-| `.name(name)`                 | The tool name, and the installed filename (`.exe` is appended on Windows). **Required.**                           |
-| `.url((platform) => string)`  | Resolve the download URL for the target platform (see [platforms](#cross-platform-url-resolution)). **Required.**  |
-| `.destDir(dir)`               | Directory to install into (created if missing). Defaults to `.zuke/tools`.                                         |
-| `.archive("tar.gz" \| "zip")` | Unpack a gzipped tarball or a zip; the default `"raw"` treats the download as the binary.                          |
-| `.binaryPath(path)`           | For an archive, the binary's path _inside_ it. Defaults to the name.                                               |
-| `.checksum(sha256)`           | Expected SHA-256, or a `(platform) => string` resolver — [verifies and caches](#pinning-verification-and-caching). |
-| `.platform({ os, arch })`     | Resolve for a specific platform instead of the host.                                                               |
-| `.download(fn)`               | Override the downloader (defaults to an HTTPS download); mainly a test seam.                                       |
+| Method                       | Purpose                                                                                                            |
+| ---------------------------- | ------------------------------------------------------------------------------------------------------------------ |
+| `.name(name)`                | The tool name, and the installed filename (`.exe` is appended on Windows). **Required.**                           |
+| `.url((platform) => string)` | Resolve the download URL for the target platform (see [platforms](#cross-platform-url-resolution)). **Required.**  |
+| `.destDir(dir)`              | Directory to install into (created if missing). Defaults to `.zuke/tools`.                                         |
+| `.archive(format)`           | Unpack a `"tar.gz"`, `"tar.xz"` or `"zip"`; the default `"raw"` treats the download as the binary.                 |
+| `.binaryPath(path)`          | For an archive, the binary's path _inside_ it. Defaults to the name.                                               |
+| `.checksum(sha256)`          | Expected SHA-256, or a `(platform) => string` resolver — [verifies and caches](#pinning-verification-and-caching). |
+| `.platform({ os, arch })`    | Resolve for a specific platform instead of the host.                                                               |
+| `.download(fn)`              | Override the downloader (defaults to an HTTPS download); mainly a test seam.                                       |
 
 ### Raw binaries vs. archives
 
 - **`"raw"`** (default) — the URL points straight at the executable; it's saved
   as `<destDir>/<name>` and `chmod +x`'d.
-- **`.archive("tar.gz")` / `.archive("zip")`** — the URL points at a gzipped
-  tarball or a zip; Zuke unpacks it to a scratch directory, copies
-  `.binaryPath(...)` (default the name) out to `<destDir>/<name>`, then discards
-  the scratch. Set `.binaryPath(...)` when the binary lives in a subdirectory of
-  the archive (e.g. Helm ships it under `linux-amd64/helm`). Zip reading covers
-  the `stored` and `deflate` methods release assets use (dprint et al. ship
-  zip-only); encrypted or zip64 archives are rejected with a clear error, and no
-  archive entry may escape the destination directory (a "zip slip").
+- **`.archive("tar.gz")` / `.archive("tar.xz")` / `.archive("zip")`** — the URL
+  points at a tarball (gzipped or xz-compressed; a system `xz` decompresses when
+  one is on `PATH`, else the built-in decoder) or a zip; Zuke unpacks it to a
+  scratch directory, copies `.binaryPath(...)` (default the name) out to
+  `<destDir>/<name>`, then discards the scratch. Set `.binaryPath(...)` when the
+  binary lives in a subdirectory of the archive (e.g. Helm ships it under
+  `linux-amd64/helm`). Zip reading covers the `stored` and `deflate` methods
+  release assets use (dprint et al. ship zip-only); encrypted or zip64 archives
+  are rejected with a clear error, and no archive entry may escape the
+  destination directory (a "zip slip").
 
 On Windows the installed filename gains an `.exe` suffix and the executable bit
 is skipped.
@@ -111,10 +113,9 @@ publish — and it does three jobs at once:
    re-downloaded and re-verified, never silently reused. Bumping the checksum
    for a new version is a natural miss that re-fetches.
 
-What the checksum covers depends on the format: for `"tar.gz"` and `"zip"` it's
-the SHA-256 of the **archive** (what projects list in their
-`checksums.txt`/`sha256sum` files); for `"raw"` it's the SHA-256 of the
-**binary** itself.
+What the checksum covers depends on the format: for an archive it's the SHA-256
+of the **archive** (what projects list in their `checksums.txt`/`sha256sum`
+files); for `"raw"` it's the SHA-256 of the **binary** itself.
 
 Without a checksum, the tool is downloaded every run and left unverified — fine
 for a quick spike, but pin one for anything real.
@@ -153,8 +154,8 @@ the **entire directory** (symlinks included), and resolves to the extracted
 tree's **root** rather than to a single copied-out binary.
 
 ```ts
-import { ToolTasks } from "jsr:@zuke/core";
-import { CmdTasks } from "jsr:@zuke/cmd";
+import { ToolTasks } from "@zuke/core";
+import { CmdTasks } from "@zuke/cmd";
 
 const node = await ToolTasks.installTree((s) =>
   s
@@ -176,22 +177,24 @@ accessor: `root("bin", "node")` is a binary and `root("bin")` a directory to add
 to `PATH`. It takes the same settings-lambda as `install()`, plus two that only
 apply to a tree:
 
-| Method            | Purpose                                                                                                                                                                                                         |
-| ----------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `.strip(n)`       | Drop `n` leading path components while unpacking (tar's `--strip-components`) — `1` unwraps a release tarball's `tool-v1.2.3/` directory. Defaults to `0`.                                                      |
-| `.bins(...paths)` | Paths (relative to the stripped root) to mark executable on POSIX — the tar reader doesn't preserve mode bits, so a runtime's `bin/node`, `bin/npm`, … need it. Following a symlink chmods its real target too. |
+| Method            | Purpose                                                                                                                                                                                                                                                                                |
+| ----------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `.strip(n)`       | Drop `n` leading path components while unpacking (tar's `--strip-components`) — `1` unwraps a release tarball's `tool-v1.2.3/` directory. Defaults to `0`.                                                                                                                             |
+| `.bins(...paths)` | Paths (relative to the stripped root) to mark executable on POSIX. Extraction keeps the archive's mode bits (tar entries, and zips made on Unix), so this is a fallback for an archive that ships a binary without the executable bit. Following a symlink chmods its real target too. |
 
 A tree always ships packed, so `.archive(...)` defaults to `"tar.gz"` and
 `"raw"` is rejected
-(`a tree install needs an archive ("tar.gz" or "zip"), not
-"raw"`). Everything
-else — `.name(...)`, `.url(...)`, `.destDir(...)`, `.checksum(...)`,
-`.platform(...)`, `.download(...)` — behaves as for [`install()`](#settings);
-the tree lands at `<destDir>/<name>`. Pinning, verification, and caching work
-the same, except the checksum is always the SHA-256 of the **archive** and a
-cache hit additionally requires the declared `.bins(...)` to still be present.
-For a one-off outside a toolchain use `ToolTasks.installTree`; group several
-with [`Toolchain.tree`](#toolchain--many-tools), or drop to the
+(`a tree install needs an archive ("tar.gz", "tar.xz" or "zip"), not "raw"`).
+`"tar.xz"` covers the runtimes that ship only that — the Flutter SDK on Linux,
+Zig — with the same checksum-before-unpack, `.strip(...)`, `.bins(...)`, symlink
+and path-traversal guarantees as `"tar.gz"`. Everything else — `.name(...)`,
+`.url(...)`, `.destDir(...)`, `.checksum(...)`, `.platform(...)`,
+`.download(...)` — behaves as for [`install()`](#settings); the tree lands at
+`<destDir>/<name>`. Pinning, verification, and caching work the same, except the
+checksum is always the SHA-256 of the **archive** and a cache hit additionally
+requires the declared `.bins(...)` to still be present. For a one-off outside a
+toolchain use `ToolTasks.installTree`; group several with
+[`Toolchain.tree`](#toolchain--many-tools), or drop to the
 [`installTree`](#the-installrelease-primitive) primitive directly.
 
 ## `toolchain()` — many tools
@@ -206,9 +209,9 @@ and returns a `Map<name, AbsolutePath>` (a tree's entry is its extracted root
 directory).
 
 ```ts
-import { Build, target, toolchain } from "jsr:@zuke/core";
-import { HelmTasks } from "jsr:@zuke/helm";
-import { KubectlTasks } from "jsr:@zuke/kubectl";
+import { Build, target, toolchain } from "@zuke/core";
+import { HelmTasks } from "@zuke/helm";
+import { KubectlTasks } from "@zuke/kubectl";
 
 const arches = { x86_64: "amd64", aarch64: "arm64" } as const;
 
@@ -273,8 +276,8 @@ Not every tool ships a release binary — many (`vitest`, `dprint`, `@nestjs/cli
 a version-pinned, cached tool without an ambient `npm ci`:
 
 ```ts
-import { Build, target, toolchain } from "jsr:@zuke/core";
-import { VitestTasks } from "jsr:@zuke/vitest";
+import { Build, target, toolchain } from "@zuke/core";
+import { VitestTasks } from "@zuke/vitest";
 
 class Test extends Build {
   tools = toolchain((t) => t.npm({ name: "vitest", version: "4.1.9" }));
@@ -311,9 +314,9 @@ Both `ToolTasks.install` and `toolchain().install()` hand you an `AbsolutePath`.
 Point a tool at it three ways:
 
 ```ts
-import { HelmTasks } from "jsr:@zuke/helm";
-import { CmdTasks } from "jsr:@zuke/cmd";
-import { defineTool } from "jsr:@zuke/core/tooling";
+import { HelmTasks } from "@zuke/helm";
+import { CmdTasks } from "@zuke/cmd";
+import { defineTool } from "@zuke/core/tooling";
 
 const bin = await ToolTasks.install((s) => s.name("helm").url(helmUrl));
 
@@ -376,7 +379,7 @@ counterparts of `isCI()` for "what am I running on":
 <!-- check -->
 
 ```ts
-import { hostPlatform, operatingSystem } from "jsr:@zuke/core";
+import { hostPlatform, operatingSystem } from "@zuke/core";
 
 if (operatingSystem() === "macos") { /* … */ }
 const cpu = hostPlatform().archLabel({ x86_64: "amd64", aarch64: "arm64" });
@@ -392,13 +395,14 @@ needs no "set up tool X" step:
   the pinned Deno release (`DEFAULT_DENO_VERSION`/`$DefaultDenoVersion`) as a
   zip and verify it against a hardcoded per-platform SHA-256 before unpacking it
   — the same pin-and-verify model as `installRelease` below, applied to Deno
-  itself. The pin lives in one place, `@zuke/cli`'s `deno_pin.ts`: the
-  launchers `zuke setup` scaffolds and this repository's own are rendered from
-  the same template (`./zuke launcherSync` regenerates them), so bumping Deno
-  is a change to that file, not to two shell scripts. `DENO_VERSION` can still request a different release — an exact
-  release tag (`v2.9.0`), never `latest`, which has no fixed hash to pin — but
-  the launcher then requires `DENO_SHA256` (the expected hash for the current
-  platform) too; it never installs an unverified binary.
+  itself. The pin lives in one place, `@zuke/cli`'s `deno_pin.ts`: the launchers
+  `zuke setup` scaffolds and this repository's own are rendered from the same
+  template (`./zuke launcherSync` regenerates them), so bumping Deno is a change
+  to that file, not to two shell scripts. `DENO_VERSION` can still request a
+  different release — an exact release tag (`v2.9.0`), never `latest`, which has
+  no fixed hash to pin — but the launcher then requires `DENO_SHA256` (the
+  expected hash for the current platform) too; it never installs an unverified
+  binary.
 
 ```yaml
 steps:

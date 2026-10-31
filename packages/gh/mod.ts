@@ -7,7 +7,7 @@
  * an external GitHub Actions workflow.
  *
  * ```ts
- * import { GhTasks, githubWorkflow } from "jsr:@zuke/gh";
+ * import { GhTasks, githubWorkflow } from "@zuke/gh";
  *
  * await GhTasks.run((s) => s.command("pr", "list").flag("state", "open"));
  *
@@ -159,6 +159,24 @@ export {
   tagCommit,
 } from "./src/commit.ts";
 export {
+  type GhContentsApi,
+  type GhContentsResult,
+  GhContentsSettings,
+} from "./src/contents.ts";
+export {
+  type GhReaction,
+  type GhReactionApi,
+  type GhReactionContent,
+  GhReactionSettings,
+  type GhReactionSubject,
+} from "./src/reaction.ts";
+export {
+  type GhCollaboratorApi,
+  type GhCollaboratorPermission,
+  GhCollaboratorSettings,
+  GITHUB_LOGIN,
+} from "./src/collaborator.ts";
+export {
   type GhCheckConclusion,
   type GhCheckRunApi,
   type GhCheckRunResult,
@@ -172,6 +190,14 @@ export {
   type GhPermissionLevel,
   mintAppToken,
 } from "./src/app_token.ts";
+export {
+  appTokenSource,
+  type GhAppTokenMint,
+  type GhAppTokenSource,
+  GhAppTokenSourceSettings,
+  type GhCredential,
+  type GhEnvReader,
+} from "./src/app_token_source.ts";
 export {
   type GhSarifApi,
   GhSarifSettings,

@@ -27,6 +27,7 @@
  * @module
  */
 
+import { defaultReadEnv } from "@zuke/core";
 import type { Configure } from "@zuke/core/tooling";
 import type { Plugin, RunRecord } from "@zuke/core";
 import { spanIdFor, traceIdFor } from "./ids.ts";
@@ -191,15 +192,6 @@ export interface OtelDeps {
   fetch?: typeof fetch;
 }
 
-/** Read an environment variable, treating missing env access as unset. */
-function defaultReadEnv(name: string): string | undefined {
-  try {
-    return Deno.env.get(name);
-  } catch {
-    return undefined;
-  }
-}
-
 /**
  * {@link otel} with injectable dependencies — the entry point that both the
  * public factory and the tests call. When no endpoint resolves (neither a
@@ -228,8 +220,8 @@ export function otelWith(
  * run/target transition is exported as OTLP/HTTP JSON:
  *
  * ```ts
- * import { run } from "jsr:@zuke/core";
- * import { otel } from "jsr:@zuke/otel";
+ * import { run } from "@zuke/core";
+ * import { otel } from "@zuke/otel";
  *
  * await run(MyBuild, {
  *   plugins: [otel((s) => s.endpoint("http://localhost:4318").serviceName("ci"))],

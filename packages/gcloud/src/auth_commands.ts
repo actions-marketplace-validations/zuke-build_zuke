@@ -6,7 +6,7 @@
  * passes through.
  *
  * ```ts
- * import { GcloudTasks } from "jsr:@zuke/gcloud";
+ * import { GcloudTasks } from "@zuke/gcloud";
  * await GcloudTasks.authActivateServiceAccount((s) => s.keyFile(keyPath));
  * await GcloudTasks.authConfigureDocker((s) =>
  *   s.registries("us-central1-docker.pkg.dev")
@@ -115,7 +115,11 @@ export class GcloudAuthPrintIdentityTokenSettings extends GcloudSettings {
     if (this.#audiences.length > 0) {
       argv.push(
         "--audiences",
-        commaJoined(this.#audiences, "identityToken", "--audiences"),
+        commaJoined(
+          this.#audiences,
+          "GcloudTasks.identityToken",
+          "--audiences",
+        ),
       );
     }
     if (this.#includeEmail) argv.push("--include-email");
@@ -143,7 +147,7 @@ export class GcloudAuthConfigureDockerSettings extends GcloudSettings {
       argv.push(
         commaJoined(
           this.#registries,
-          "authConfigureDocker",
+          "GcloudTasks.authConfigureDocker",
           "the registry list",
         ),
       );

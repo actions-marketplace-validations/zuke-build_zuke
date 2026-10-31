@@ -18,9 +18,9 @@ an object with a `remediate(ctx)` method that runs **only after the target body
 fails**. It receives the failure and returns whether the body should be re-run.
 
 ```ts
-import { Build, run, target } from "jsr:@zuke/core";
-import { DenoTasks } from "jsr:@zuke/deno";
-import { aiFixer } from "jsr:@zuke/ai";
+import { Build, run, target } from "@zuke/core";
+import { DenoTasks } from "@zuke/deno";
+import { aiFixer } from "@zuke/ai";
 
 class CI extends Build {
   key = parameter("OpenAI API key").secret().required();
@@ -85,8 +85,8 @@ failed command, its output, the diff, and your project conventions (`CLAUDE.md`
 / `AGENTS.md`) to the model, parses a **structured fix**, and reports — without
 touching any files. The output, the diff and the conventions all travel
 [fenced as untrusted data](#untrusted-input), because all three come from the
-branch under repair. The diagnosis lands in the GitHub Actions job summary and on
-the pull request.
+branch under repair. The diagnosis lands in the GitHub Actions job summary and
+on the pull request.
 
 ```ts
 test = target()
@@ -178,8 +178,8 @@ There's one generic fixer, not one per agent: you pick the agent at the call
 site.
 
 ```ts
-import { agentFixer } from "jsr:@zuke/ai";
-import { ClaudeTasks } from "jsr:@zuke/claude";
+import { agentFixer } from "@zuke/ai";
+import { ClaudeTasks } from "@zuke/claude";
 
 test = target()
   .executes(() => DenoTasks.test((s) => s.allowAll()))
@@ -230,7 +230,7 @@ reached, the next AI step is **skipped (not failed)** with a note, rather than
 running up the bill.
 
 ```ts
-import { budget } from "jsr:@zuke/ai";
+import { budget } from "@zuke/ai";
 
 class CI extends Build {
   key = parameter("OpenAI API key").secret();
@@ -273,7 +273,7 @@ same failure recurs across CI re-runs. A cache hit costs nothing and does not
 draw down the budget.
 
 ```ts
-import { aiCache } from "jsr:@zuke/ai";
+import { aiCache } from "@zuke/ai";
 
 const cache = aiCache((c) => c.dir(".zuke/ai-cache").ttl(86_400)); // 1-day TTL
 aiFixer((f) => f.provider("openai").apiKey(this.key).cache(cache));
@@ -291,7 +291,7 @@ PR comment, so silencing a recurring false positive is a copy-paste of that ID
 into the suppress list (`.zuke/ai-suppress.json`, a JSON array of IDs):
 
 ```ts
-import { suppressions } from "jsr:@zuke/ai";
+import { suppressions } from "@zuke/ai";
 
 securityReviewer((r) =>
   r.provider("openai").apiKey(this.key)
@@ -313,8 +313,8 @@ being hidden behind the suppress list).
 
 ## Untrusted input
 
-Everything a fixer sends the model comes from the branch being repaired, and on a
-pull request that branch belongs to the contributor:
+Everything a fixer sends the model comes from the branch being repaired, and on
+a pull request that branch belongs to the contributor:
 
 - the **error output** — a failing test prints whatever its author wrote;
 - the **diff** — the change itself;
@@ -322,19 +322,20 @@ pull request that branch belongs to the contributor:
 
 All three are wrapped in fence markers and the system prompt names them as data,
 never instructions. That matters most for the conventions, because the same
-prompt separately tells the model to *respect the project's conventions* — so
+prompt separately tells the model to _respect the project's conventions_ — so
 without the fence, the one input a contributor can edit would arrive as
 direction.
 
 A fence is defence-in-depth, not a guarantee: it removes the deterministic
-breakout (forging the closing marker, which is neutralised) but a model can still
-be coaxed by persuasive text. So where a fixer is authorized to **write** —
-`.autoApply()`, `.commitFixes()`, or any `agentFixer`, which runs an agent with
-no path allow-list — pin the conventions instead of reading them from the branch:
+breakout (forging the closing marker, which is neutralised) but a model can
+still be coaxed by persuasive text. So where a fixer is authorized to **write**
+— `.autoApply()`, `.commitFixes()`, or any `agentFixer`, which runs an agent
+with no path allow-list — pin the conventions instead of reading them from the
+branch:
 
 ```ts
 aiFixer((f) => f.provider("openai").apiKey(this.key).autoApply())
-  .conventions(await FileTasks.readText("AGENTS.md")) // from your default branch
+  .conventions(await FileTasks.readText("AGENTS.md")); // from your default branch
 ```
 
 Passing `""` sends none at all. The reviewer already does the stronger thing

@@ -5,6 +5,7 @@ import { assertEquals, assertRejects } from "./_assert.ts";
 import {
   defaultReadEnv,
   delay,
+  envFlag,
   messageOf,
   readFileOrNull,
   readTextOrNull,
@@ -34,13 +35,22 @@ Deno.test("sha256Hex returns the known lowercase-hex digest", async () => {
     await sha256Hex(""),
     "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
   );
+  // …and of "abc", the other vector everyone's test suite carries. A known
+  // answer is what separates "this hashes something" from "this hashes what
+  // SHA-256 says it should".
+  assertEquals(
+    await sha256Hex("abc"),
+    "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+  );
   // Distinct inputs differ; the same input is stable.
   assertEquals(await sha256Hex("a") === await sha256Hex("b"), false);
   assertEquals(await sha256Hex("x"), await sha256Hex("x"));
 });
 
 Deno.test("sha256Hex digests bytes the same as the text they encode", async () => {
-  const text = "zuke";
+  // Multi-byte on purpose: an ASCII string would pass even if the encoding
+  // step were wrong, since one character would be one byte either way.
+  const text = "zuke café";
   assertEquals(
     await sha256Hex(new TextEncoder().encode(text)),
     await sha256Hex(text),
@@ -166,4 +176,26 @@ Deno.test("runWithTimeout propagates a rejection from fn", async () => {
     Error,
     "inner",
   );
+});
+
+Deno.test("envFlag: unset and empty are off", () => {
+  assertEquals(envFlag(undefined), false);
+  assertEquals(envFlag(""), false);
+  assertEquals(envFlag("   "), false);
+});
+
+Deno.test("envFlag: the conventional negatives are off, whatever their case", () => {
+  // FALSE must not mean the opposite of false. That is the defect this
+  // replaced: a hand-rolled comparison against the lowercase spellings.
+  for (const value of ["false", "FALSE", "False", "0", "no", "NO", " false "]) {
+    assertEquals(envFlag(value), false, value);
+  }
+});
+
+Deno.test("envFlag: anything else is on", () => {
+  // An unfamiliar value still means the variable was set on purpose; refusing
+  // to guess would be a silent no.
+  for (const value of ["1", "true", "TRUE", "yes", "on", "please"]) {
+    assertEquals(envFlag(value), true, value);
+  }
 });

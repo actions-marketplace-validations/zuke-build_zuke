@@ -49,22 +49,33 @@ import {
   consoleLines,
   type DismissedFinding,
   type RefutedFinding,
+  reportBody,
   type ReportExtras,
   retryLine,
   reviewStartLine,
+  skipBody,
   skipConsoleLine,
   skipMarkdown,
   toMarkdown,
   writeStepSummary,
 } from "./report.ts";
 import { detectReviewHost, type EnvReader, readEnv } from "./hosts.ts";
-import { commentMarker, type HostComment } from "./hosts/types.ts";
+import {
+  type CommandSignal,
+  commentMarker,
+  type HostComment,
+  parseCommentMarker,
+  type ReplySignal,
+} from "./hosts/types.ts";
 import type { RetryInfo, RetryOptions } from "./retry.ts";
 import type { Budget } from "./budget.ts";
 import type { AiCache } from "./cache.ts";
 import { findingFingerprint, type Suppressions } from "./suppress.ts";
+import { sha256Hex } from "@zuke/core";
 import { rank, severityScore } from "./severity.ts";
 import {
+  type Acceptance,
+  acceptances,
   budgetComments,
   DiscussionSettings,
   rebuttalsFor,
@@ -78,7 +89,9 @@ import {
   fixedOf,
   mergeAliases,
   openOf,
+  refutedOf,
   type ReviewState,
+  stateNames,
   type StoredFinding,
 } from "./state.ts";
 import {
@@ -99,6 +112,7 @@ import { allReplies, withThreadRebuttals } from "./threads.ts";
 import {
   postThreads,
   prepareThreads,
+  type ThreadContext,
   type ThreadPhaseSettings,
 } from "./threads_phase.ts";
 import { buildFileContext } from "./file_context.ts";
@@ -106,6 +120,32 @@ import { readTextOrUndefined } from "./context.ts";
 import type { PromptExtras, RebuttalNote } from "./prompts/templates.ts";
 import { rebuttalComment } from "./prompts/templates.ts";
 import type { Redact } from "./comment.ts";
+import { type ReviewOutcome, ReviewProgress } from "./progress.ts";
+import type { CallerVerdict } from "./callers.ts";
+import { REVIEW_COMMENT_ENV } from "./hosts/github.ts";
+import {
+  BADGES,
+  closePanel,
+  panelHas,
+  type PanelSeat,
+  type PanelSection,
+  renderPanel,
+  seatOf,
+} from "./panel.ts";
+
+/**
+ * The progress reactions of every reviewer in this process, shared so the
+ * reviewers on one pull request agree on one verdict — see
+ * {@link ReviewProgress}.
+ */
+const PROGRESS = new ReviewProgress();
+
+/**
+ * Who may start this run, looked up once per run and command and shared by
+ * every reviewer in the process — keyed by the run's id and the command
+ * comment's.
+ */
+const CALLER_VERDICTS = new Map<string, Promise<CallerVerdict>>();
 
 /**
  * Where a reviewer's comment-posting token comes from: a secret parameter (for
@@ -145,6 +185,8 @@ export class Reviewer implements Validation {
   #commentToken?: CommentTokenSource;
   #retry?: RetryOptions;
   #quiet = false;
+  #reactions = true;
+  #badge?: string;
   #fetch?: typeof fetch;
   #exec?: (argv: string[]) => Promise<string>;
   #env: EnvReader = readEnv;
@@ -184,6 +226,14 @@ export class Reviewer implements Validation {
   /** The configured comment-posting token, if `.commentToken(...)` was called. */
   get commentToken_(): CommentTokenSource | undefined {
     return this.#commentToken;
+  }
+
+  /**
+   * The mention this reviewer takes commands under, when it takes any — what
+   * the workflow generator derives the command job from.
+   */
+  get mention_(): string | undefined {
+    return this.#discussion?.mention_();
   }
 
   /** Set the model provider (required). */
@@ -307,6 +357,19 @@ export class Reviewer implements Validation {
    * every run, so earlier assessments — and their finding ids — stay on the
    * thread as history. The discussion feature works with both: its state block
    * rides on every comment, and the newest one is read back.
+   *
+   * Reviewers attached side by side to one target —
+   * `.validateBefore(security, quality)` — post **one** comment between them
+   * rather than one each: a table of every reviewer's verdict, the findings of
+   * all of them in one table with a column naming the reviewer (and its
+   * {@link badge}) that raised each, and each reviewer's full report folded
+   * underneath. Every one of them runs even when an earlier one fails its
+   * gate; the target then fails with all of their reasons. The comment is
+   * posted by the last of them, with its token, and appended when any of
+   * them appends. Each reviewer's discussion state rides in it under the
+   * reviewer's name, and a reviewer that used to post alone still reads its
+   * old comment. Another validation between two reviewers splits them, and a
+   * reviewer alone posts its own comment as before.
    */
   comment(mode: "update" | "append" = "update"): this {
     this.#comment = true;
@@ -335,6 +398,43 @@ export class Reviewer implements Validation {
   /** Backwards-compatible alias for {@link commentToken}. */
   githubToken(token: CommentTokenSource): this {
     return this.commentToken(token);
+  }
+
+  /**
+   * Whether the reviewer reacts on the pull request to show its progress (on
+   * by default, whenever `.comment()` is set). On the description: 👀 while
+   * it runs, then 👍 when it passes clean, 🎉 when it passes clean where the
+   * previous run failed, 🤏 when it has findings under the failing threshold
+   * (😕 on GitHub, whose reaction set has no 🤏), 👎 when it fails. On the
+   * comment that started a comment-started run: 👍 as it starts, 😕 when the
+   * run could not review. On a trusted maintainer's reply: 👀 once read, ❤️
+   * when it decided a finding. The reviewers on one pull request share the
+   * reactions, so the verdict shown is the worst of a run's. GitHub and
+   * GitLab have the reactions; on Azure DevOps and Bitbucket this is a no-op.
+   * `false` turns all of it off, as does `.quiet()`, under which the reviewer
+   * does not speak on the pull request.
+   */
+  reactions(enabled: boolean): this {
+    this.#reactions = enabled;
+    return this;
+  }
+
+  /**
+   * The emoji that marks this reviewer's findings — in the combined comment
+   * the reviewers of one target share (see {@link comment}), and on the review
+   * threads it opens. Defaults by kind: 🛡️ security, 🧹 code quality
+   * (`genericReviewer`), 🔑 secrets, 🐛 correctness, ⚖️ license. Set one when
+   * two reviewers of a kind review side by side — and give one of them a
+   * {@link name} of its own, which is what the comment tells them apart by.
+   */
+  badge(emoji: string): this {
+    this.#badge = emoji;
+    return this;
+  }
+
+  /** This reviewer's badge: the one set, or its kind's. */
+  get #shownBadge(): string {
+    return this.#badge ?? BADGES[this.#assessment];
   }
 
   /** Suppress the findings printout and the job-summary section. */
@@ -608,18 +708,52 @@ export class Reviewer implements Validation {
     assessment: Assessment,
     target: string,
     redact: Redact,
+    seat: PanelSeat | undefined,
     usage?: Usage,
     extras: ReportExtras = {},
     commentExtra?: string,
+    tripped = false,
   ): Promise<void> {
     if (this.#quiet) return;
     const lines = consoleLines(this.name, assessment, usage, extras);
     for (const line of lines) console.log(line);
-    await this.#publish(
-      toMarkdown(this.name, target, assessment, usage, extras),
-      redact,
-      commentExtra,
-    );
+    const markdown = toMarkdown(this.name, target, assessment, usage, extras);
+    if (seat === undefined) {
+      await this.#publish(markdown, redact, commentExtra);
+      return;
+    }
+    writeStepSummary(markdown);
+    this.#takeSeat(seat, redact, {
+      verdict: tripped
+        ? "failed"
+        : assessment.findings.length === 0
+        ? "passed"
+        : "minor",
+      score: assessment.score,
+      severity: assessment.severity,
+      findings: assessment.findings,
+      report: reportBody(assessment, usage, extras),
+      ...(commentExtra !== undefined ? { state: commentExtra } : {}),
+    });
+  }
+
+  /**
+   * Hand this reviewer's part to its panel instead of posting it — masked
+   * here, as {@link #publish} masks what it posts, so the panel only ever
+   * holds what may be published.
+   */
+  #takeSeat(
+    seat: PanelSeat,
+    redact: Redact,
+    part: Omit<PanelSection, "name" | "badge">,
+  ): void {
+    seat.panel.sections.set(this.name, {
+      ...part,
+      name: this.name,
+      badge: this.#shownBadge,
+      report: redact(part.report),
+      ...(part.state !== undefined ? { state: redact(part.state) } : {}),
+    });
   }
 
   /**
@@ -653,10 +787,22 @@ export class Reviewer implements Validation {
     target: string,
     reason: string,
     redact: Redact,
+    seat: PanelSeat | undefined,
   ): Promise<void> {
     if (this.#quiet) return;
     console.log(skipConsoleLine(this.name, reason));
-    await this.#publish(skipMarkdown(this.name, target, reason), redact);
+    const markdown = skipMarkdown(this.name, target, reason);
+    if (seat === undefined) {
+      await this.#publish(markdown, redact);
+      return;
+    }
+    writeStepSummary(markdown);
+    this.#takeSeat(seat, redact, {
+      verdict: "skipped",
+      findings: [],
+      skipped: reason,
+      report: skipBody(reason),
+    });
   }
 
   /**
@@ -685,6 +831,28 @@ export class Reviewer implements Validation {
   ): Promise<void> {
     writeStepSummary(markdown);
     if (!this.#comment) return;
+    // Masked here, at the one place this class posts a comment, so a caller
+    // cannot leak by forgetting to. The state block is included: it is built
+    // from the same assessment the markdown is.
+    await this.#post(
+      this.name,
+      redact(
+        commentExtra === undefined ? markdown : `${markdown}\n${commentExtra}`,
+      ),
+      this.#commentMode,
+    );
+  }
+
+  /**
+   * Post `body` as the comment marked `name` — this reviewer's own, or its
+   * panel's — on the active host, best-effort: a missing host, a missing pull
+   * request and a failed post are each a warning, never a failed review.
+   */
+  async #post(
+    name: string,
+    body: string,
+    mode: "update" | "append",
+  ): Promise<void> {
     const host = detectReviewHost(this.#env);
     if (host === undefined) {
       console.warn(
@@ -692,26 +860,166 @@ export class Reviewer implements Validation {
       );
       return;
     }
-    const token = await this.#resolveCommentToken(host);
-    const upsert = host.prepare(token, this.#env);
-    if (upsert === undefined) {
-      console.warn(
-        `[${this.name}] no ${host.label} PR context — skipping comment`,
-      );
-      return;
-    }
-    // Masked here, at the one place this class posts a comment, so a caller
-    // cannot leak by forgetting to. The state block is included: it is built
-    // from the same assessment the markdown is.
-    const body = redact(
-      commentExtra === undefined ? markdown : `${markdown}\n${commentExtra}`,
-    );
     try {
-      await upsert(this.name, body, this.#fetch ?? fetch, this.#commentMode);
+      const token = await this.#resolveCommentToken(host);
+      const upsert = host.prepare(token, this.#env);
+      if (upsert === undefined) {
+        console.warn(
+          `[${this.name}] no ${host.label} PR context — skipping comment`,
+        );
+        return;
+      }
+      await upsert(name, body, this.#fetch ?? fetch, mode);
     } catch (error) {
       // Best-effort: a failed comment must never break the build.
       const message = error instanceof Error ? error.message : String(error);
       console.warn(`[${this.name}] could not post PR comment: ${message}`);
+    }
+  }
+
+  /**
+   * On a comment-started run, answer the command comment: 👍 as the review
+   * starts, 😕 when it cannot run — so the maintainer sees what became of the
+   * command without opening the host's job log. Posts with `token` when given,
+   * the comment token otherwise. Best-effort and quiet by construction:
+   * nothing here can fail the review, and a run no comment started does
+   * nothing.
+   */
+  async #answerCommand(signal: CommandSignal, token?: string): Promise<void> {
+    if (!this.#comment || this.#quiet || !this.#reactions) return;
+    const host = detectReviewHost(this.#env);
+    if (host?.acknowledgeCommand === undefined) return;
+    const answer = host.acknowledgeCommand(this.#env);
+    if (answer === undefined) return;
+    const emoji = signal === "started" ? "👍" : "😕";
+    try {
+      // A refusal answers with the token the lookup used, never the comment
+      // token: a stranger's comment must not make the build mint the App's.
+      token ??= await this.#resolveCommentToken(host);
+      if (await answer(token, signal, this.#fetch ?? fetch)) {
+        console.log(`[${this.name}] answered the review command (${emoji})`);
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      console.warn(
+        `[${this.name}] could not answer the review command: ${message}`,
+      );
+    }
+  }
+
+  /**
+   * Refuse a run started by a comment from someone who may not start a review
+   * — the command's access control, decided by the default branch's build
+   * (see `callers.ts`). Applies whatever the comment and reaction settings,
+   * since it is authorization, not output. Called from {@link preflight},
+   * before any target runs, and again from {@link validate} for a core that
+   * has no preflight phase; the verdict is looked up once per run and
+   * command, so every reviewer of the run shares it. A refusal is answered 😕
+   * — with the lookup's own token, the job's `GITHUB_TOKEN` — posts nothing on
+   * the pull request, and **throws**: returning would let the run go on,
+   * which the commenter was never allowed to start.
+   */
+  async #refuseUnauthorizedCommand(context: ValidationContext): Promise<void> {
+    const host = detectReviewHost(this.#env);
+    const authorize = host?.authorizeCommand?.(this.#env);
+    if (host === undefined || authorize === undefined) return;
+    let token = this.#env(host.defaultTokenEnv) ?? "";
+    if (token === "") {
+      try {
+        token = await this.#resolveCommentToken(host);
+      } catch {
+        token = "";
+      }
+    }
+    const key = `${runOf(context)}\n${this.#env(REVIEW_COMMENT_ENV) ?? ""}`;
+    let verdict = CALLER_VERDICTS.get(key);
+    if (verdict === undefined) {
+      verdict = authorize(token, this.#fetch ?? fetch);
+      CALLER_VERDICTS.set(key, verdict);
+    }
+    const { allowed, reason } = await verdict;
+    if (allowed) {
+      if (!this.#quiet) console.log(`[${this.name}] ${reason}`);
+      return;
+    }
+    await this.#answerCommand("unable", token);
+    throw new AiReviewError(
+      `${this.name} of "${context.target}" was not started: ${reason}`,
+    );
+  }
+
+  /**
+   * The run's preflight: on a comment-started run, refuse a commenter who may
+   * not start a review before any target — a dependency included — has
+   * started (see {@link Validation.preflight}). A no-op on any other run.
+   */
+  async preflight(context: ValidationContext): Promise<void> {
+    await this.#refuseUnauthorizedCommand(context);
+  }
+
+  /**
+   * React 👀 on the pull-request description — through the process-wide
+   * {@link PROGRESS}, which the other reviewers of run `run` share — and return the
+   * function that replaces it with this review's verdict, answering whether
+   * the run reviewed nothing. A no-op function
+   * when the reviewer does not speak on the pull request (`.comment()` unset,
+   * `.quiet()`, `.reactions(false)`), the host has no reactions, or there is
+   * no pull request. Best-effort like the acknowledgement: a token that cannot
+   * be resolved is a warning, never a failed review.
+   */
+  async #startProgress(
+    run: string,
+  ): Promise<(outcome: ReviewOutcome) => Promise<boolean>> {
+    // Without the shared record a reviewer knows only its own outcome.
+    const none = (outcome: ReviewOutcome) =>
+      Promise.resolve(outcome === "skipped");
+    if (!this.#comment || this.#quiet || !this.#reactions) return none;
+    const host = detectReviewHost(this.#env);
+    if (host?.reactions === undefined) return none;
+    let token: string;
+    try {
+      token = await this.#resolveCommentToken(host);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      console.warn(`[${this.name}] could not react on the PR: ${message}`);
+      return none;
+    }
+    const reactions = host.reactions(token, this.#env);
+    if (reactions === undefined) return none;
+    return PROGRESS.start(run, reactions, this.#fetch ?? fetch);
+  }
+
+  /**
+   * Answer the maintainers' replies with a reaction — 👀 on each one read,
+   * ❤️ on each one that decided a finding — so a maintainer sees their reply
+   * was read before the assessment lands. Under the same switches as the
+   * progress reactions, best-effort like them, and once per comment.
+   */
+  async #reactOnReplies(replies: ReplyNotice): Promise<void> {
+    if (!this.#comment || this.#quiet || !this.#reactions) return;
+    if (replies.read.length + replies.accepted.length === 0) return;
+    const host = detectReviewHost(this.#env);
+    if (host?.replyReactions === undefined) return;
+    let token: string;
+    try {
+      token = await this.#resolveCommentToken(host);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      console.warn(`[${this.name}] could not react on the replies: ${message}`);
+      return;
+    }
+    const reactions = host.replyReactions(token, this.#env);
+    if (reactions === undefined) return;
+    const doFetch = this.#fetch ?? fetch;
+    const signals: readonly ReplySignal[] = ["read", "accepted"];
+    for (const signal of signals) {
+      const seen = new Set<string>();
+      for (const comment of replies[signal]) {
+        const key = `${comment.kind ?? "issue"}:${comment.id}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        await reactions.react(comment, signal, doFetch);
+      }
     }
   }
 
@@ -723,10 +1031,16 @@ export class Reviewer implements Validation {
    * host attributes to a bot account — a state block pasted into a human's
    * comment is never trusted (an Actions token's own comments are bot-authored;
    * a PAT-driven local run simply starts fresh).
+   *
+   * `shared` is what the **other** reviewers on the pull request have decided
+   * with the maintainers — their dismissed and accepted findings, read from
+   * their newest state block under the same authorship rule. A concern one
+   * reviewer's thread settled is offered to this one as a prior, so it is not
+   * raised afresh under another reviewer's name.
    */
-  async #prepareDiscussion(): Promise<
-    { comments: HostComment[]; priorState?: ReviewState } | undefined
-  > {
+  async #prepareDiscussion(
+    seat: PanelSeat | undefined,
+  ): Promise<Discussion | undefined> {
     if (this.#discussion === undefined) return undefined;
     const warn = (reason: string) => {
       if (!this.#quiet) {
@@ -756,17 +1070,63 @@ export class Reviewer implements Validation {
       // OPEN the body — the reviewer's own comments always lead with it, so a
       // bot that merely quotes another comment (prefixing its own text) can
       // never be adopted as the state carrier.
-      let own: HostComment | undefined;
+      //
+      // A panel's comment — the one the reviewers of a target share — carries
+      // each member's state as a block tagged with its name, so the newest
+      // comment holding this reviewer's block is its state whichever kind it
+      // is, and every other name's block is that reviewer's. A reviewer moving
+      // into a panel thereby keeps the state its own old comment holds.
+      let own: { state: ReviewState | undefined } | undefined;
+      const others = new Map<string, ReviewState | undefined>();
       for (let i = comments.length - 1; i >= 0; i--) {
         const c = comments[i];
-        if (c.bot && c.body.startsWith(marker)) {
-          own = c;
-          break;
+        if (!c.bot) continue;
+        if (own === undefined && c.body.startsWith(marker)) {
+          own = { state: decodeState(c.body) };
+          continue;
+        }
+        const name = parseCommentMarker(c.body);
+        if (name === undefined) continue;
+        // This reviewer's panel speaks for it: a member that skipped has no
+        // block there, which is no state — as a reviewer alone that skipped
+        // has overwritten its own — not a reason to reach back to an older
+        // comment whose state later runs had moved past.
+        if (own === undefined && panelHas(name, this.name)) {
+          own = { state: decodeState(c.body, this.name) };
+        }
+        const tagged = stateNames(c.body);
+        if (tagged.length === 0) {
+          if (name !== this.name && !others.has(name)) {
+            others.set(name, decodeState(c.body));
+          }
+          continue;
+        }
+        for (const member of tagged) {
+          if (member !== this.name) {
+            if (!others.has(member)) {
+              others.set(member, decodeState(c.body, member));
+            }
+          } else if (own === undefined) {
+            own = { state: decodeState(c.body, member) };
+          }
         }
       }
-      const priorState = own !== undefined ? decodeState(own.body) : undefined;
+      // A panel posts once, after its last member: what the members before
+      // this one decided this run is in their sections, not yet on the pull
+      // request, and it outranks their state from the run before — as their
+      // own fresh comments did when each reviewer posted alone.
+      for (const [member, section] of seat?.panel.sections ?? []) {
+        if (member === this.name || section.state === undefined) continue;
+        others.set(member, decodeState(section.state, member));
+      }
+      const priorState = own?.state;
+      const shared: StoredFinding[] = [];
+      for (const other of others.values()) {
+        shared.push(...dismissedOf(other).values());
+      }
       return {
         comments,
+        shared,
         ...(priorState !== undefined ? { priorState } : {}),
       };
     } catch (error) {
@@ -823,6 +1183,8 @@ export class Reviewer implements Validation {
   async #resolveRewordings(
     findings: AssessmentFinding[],
     priorState: ReviewState | undefined,
+    shared: readonly StoredFinding[],
+    contested: ReadonlySet<string>,
     call: {
       provider: Provider;
       key: string;
@@ -835,7 +1197,7 @@ export class Reviewer implements Validation {
       newAliases: new Map(),
       notes: [],
     };
-    if (priorState === undefined) return result;
+    if (priorState === undefined && shared.length === 0) return result;
     const record = (adoptions: Adoption[]): void => {
       for (const adoption of adoptions) {
         result.rewordedFrom.set(adoption.prior.id, adoption.prior.title);
@@ -859,7 +1221,7 @@ export class Reviewer implements Validation {
         // Through the same gate the paid path uses: a fingerprint does not
         // encode severity, so an alias alone cannot show that this round's
         // finding is no worse than the decision it would inherit.
-        if (prior !== undefined && eligible(finding, prior)) {
+        if (prior !== undefined && eligible(finding, prior, contested)) {
           known.set(finding.id ?? "", prior);
         }
       }
@@ -871,21 +1233,37 @@ export class Reviewer implements Validation {
     // recognised too: left unmatched, its old id goes unreported this round and
     // the progress pass records it as fixed, so the report claims a resolution
     // that never happened and lists the same concern twice.
-    const ids = new Set(priorState.findings.map((finding) => finding.id));
+    const own = priorState?.findings ?? [];
+    const ids = new Set(own.map((finding) => finding.id));
+    // The other reviewers' decisions join the priors after this reviewer's
+    // own, and only where this reviewer holds no record of the id itself.
+    const priors = [...own, ...shared.filter((f) => !ids.has(f.id))];
+    for (const prior of shared) ids.add(prior.id);
     const candidates = findings.filter((finding) =>
       finding.id !== undefined && !ids.has(finding.id)
     );
-    const priors = [...priorState.findings];
-    // Fixed first, then dismissed, then the still-open ones. Fixed before
-    // dismissed keeps a candidate matching both reopening (which reports)
-    // rather than inheriting a dismissal (which silences); decided entries
-    // before open ones keeps the newcomers from crowding a sticky dismissal out
-    // of the per-candidate comparison cap.
+    // A maintainer's decisions first — a dismissal, an acceptance, a still-open
+    // finding a maintainer has contested — then fixed, then the model's own
+    // refutations, then the still-open ones. A maintainer's decision ahead of
+    // everything is the point of the pass: it is the identity a restatement
+    // must land on for the loop to end. Fixed ahead of refuted keeps a
+    // candidate matching both reopening (which reports) rather than
+    // inheriting the model's refutation (which silences); decided entries
+    // before open ones keeps the newcomers from crowding a sticky decision out
+    // of the per-candidate comparison cap. The sort is stable, so within a
+    // tier this reviewer's own entries stay ahead of the shared ones.
     const order = (finding: StoredFinding): number =>
-      finding.status === "fixed" ? 0 : finding.status === "dismissed" ? 1 : 2;
+      finding.status === "dismissed" || finding.status === "accepted" ||
+        contested.has(finding.id)
+        ? 0
+        : finding.status === "fixed"
+        ? 1
+        : finding.status === "refuted"
+        ? 2
+        : 3;
     priors.sort((a, b) => order(a) - order(b));
     if (candidates.length === 0 || priors.length === 0) return result;
-    const plan = planDedup(candidates, priors);
+    const plan = planDedup(candidates, priors, contested);
     if (plan.pairs.length === 0) return result;
     if (this.#budget?.exhausted_() ?? false) {
       result.notes.push(
@@ -923,10 +1301,76 @@ export class Reviewer implements Validation {
     return result;
   }
 
+  /**
+   * The trusted, budgeted rebuttals for `ids`, keyed by finding id: comments
+   * quoting an id, merged with the replies in the reviewer's own threads.
+   * Thread replies join the same trust gate and the same one token budget as
+   * the id-quoting channel, appended last so the budget's newest-first walk
+   * keeps them — enabling threads cannot double the untrusted text a prompt
+   * sees. A reply's finding comes from its thread's marker, never its text.
+   */
+  #collectRebuttals(
+    comments: HostComment[],
+    threadCtx: ThreadContext | undefined,
+    settings: DiscussionSettings,
+    ids: string[],
+  ): Map<string, HostComment[]> {
+    const trusted = budgetComments(
+      this.#trustedDiscussion(comments, threadCtx, settings),
+      settings,
+    );
+    const quoted = rebuttalsFor(trusted, ids);
+    return threadCtx === undefined
+      ? quoted
+      : withThreadRebuttals(quoted, trusted, threadCtx.threads, ids);
+  }
+
+  /**
+   * The `accept` commands trusted maintainers gave for `ids`, from the
+   * pull-request comments and the replies in the reviewer's own threads.
+   * Parsed from the trusted comments **before** the token budget: a command
+   * is read by code, not by a prompt, so the budget that bounds what a model
+   * sees has no bearing on it, and an acceptance must not vanish because a
+   * long discussion pushed its comment out of the model's window.
+   */
+  #collectAcceptances(
+    comments: HostComment[],
+    threadCtx: ThreadContext | undefined,
+    settings: DiscussionSettings,
+    mention: string,
+    ids: string[],
+  ): Map<string, Acceptance> {
+    return acceptances(
+      this.#trustedDiscussion(comments, threadCtx, settings),
+      mention,
+      ids,
+      threadCtx?.threads ?? new Map(),
+    );
+  }
+
+  /**
+   * The comments the reviewer listens to — the pull request's plus the
+   * replies in its own threads — after the trust gate, in listing order with
+   * the replies last.
+   */
+  #trustedDiscussion(
+    comments: HostComment[],
+    threadCtx: ThreadContext | undefined,
+    settings: DiscussionSettings,
+  ): HostComment[] {
+    const replies = threadCtx === undefined
+      ? []
+      : allReplies(threadCtx.threads);
+    return trustedComments([...comments, ...replies], settings);
+  }
+
   /** What the review-thread phase in `threads_phase.ts` needs from this reviewer. */
   #threadSettings(redact: Redact): ThreadPhaseSettings {
+    const mention = this.#discussion?.mention_();
     return {
       name: this.name,
+      label: `${this.#shownBadge} ${this.name}`,
+      ...(mention !== undefined ? { mention } : {}),
       quiet: this.#quiet,
       env: this.#env,
       doFetch: this.#fetch ?? fetch,
@@ -940,15 +1384,145 @@ export class Reviewer implements Validation {
    * gate trips (or on a configuration/API error with `onError: "fail"`).
    */
   async validate(context: ValidationContext): Promise<void> {
+    const seat = this.#seatIn(context);
+    if (seat === undefined) return await this.#validate(context, undefined);
+    const { panel } = seat;
+    panel.append ||= this.#commentMode === "append";
+    try {
+      await this.#validate(context, seat);
+    } catch (error) {
+      // Held back for the last member to raise, so the reviewers after this
+      // one still run and the comment carries every verdict.
+      panel.errors.push({ name: this.name, error });
+    }
+    await this.#carryState(seat, context.redact);
+    if (!seat.last) return;
+    closePanel(panel);
+    let posting: { error: unknown } | undefined;
+    try {
+      if (panel.sections.size > 0) {
+        await this.#post(
+          panel.name,
+          context.redact(renderPanel(panel, context.target)),
+          panel.append ? "append" : "update",
+        );
+      }
+    } catch (error) {
+      posting = { error };
+    }
+    // The members' failures outrank anything posting raised: a gate that
+    // tripped fails the target with its own reason.
+    const failure = panel.failure();
+    if (failure !== undefined) throw failure;
+    if (posting !== undefined) throw posting.error;
+  }
+
+  /**
+   * Carry this reviewer's state forward into its panel's comment when it
+   * reported without reviewing — skipped for a missing key, an exhausted
+   * budget or a provider failure under `onError("warn")`, or handed an empty
+   * diff — so a round it sat out does not cost it the decisions maintainers
+   * made with it. The panel's comment is the one place its state is read
+   * from, and it is rewritten every run.
+   *
+   * Only for a member that reported: one that raised before reporting fails
+   * the run, and is given nothing that would spend its comment token on a
+   * run a stranger's command may have started. Best-effort: state that
+   * cannot be read is a fresh start, never a failed review.
+   */
+  async #carryState(seat: PanelSeat, redact: Redact): Promise<void> {
+    const section = seat.panel.sections.get(this.name);
+    if (this.#discussion === undefined || section === undefined) return;
+    if (section.state !== undefined) return;
+    let prior: ReviewState | undefined;
+    try {
+      prior = (await this.#prepareDiscussion(seat))?.priorState;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      console.warn(`[${this.name}] could not carry its state: ${message}`);
+      return;
+    }
+    if (prior === undefined) return;
+    section.state = redact(encodeState(prior, this.name));
+  }
+
+  /**
+   * This reviewer's seat in the panel of the reviewers attached beside it
+   * (see {@link comment}), or `undefined` when it posts alone: no comment, a
+   * quiet reviewer, or no peer that posts one either. Read through `in`, like
+   * {@link runOf}, so this compiles against a core whose context predates
+   * `peers` — where every reviewer posts alone.
+   */
+  #seatIn(context: ValidationContext): PanelSeat | undefined {
+    if (!this.#speaks) return undefined;
+    if (!("peers" in context) || !Array.isArray(context.peers)) {
+      return undefined;
+    }
+    return seatOf(
+      this,
+      context.peers,
+      (peer): peer is Reviewer => peer instanceof Reviewer && peer.#speaks,
+      runOf(context),
+      context.target,
+    );
+  }
+
+  /** Whether this reviewer posts a comment: `.comment()` set, not quiet. */
+  get #speaks(): boolean {
+    return this.#comment && !this.#quiet;
+  }
+
+  /** {@link validate}, for a reviewer alone or in its seat. */
+  async #validate(
+    context: ValidationContext,
+    seat: PanelSeat | undefined,
+  ): Promise<void> {
     const provider = this.#provider;
     if (provider === undefined) {
       throw new AiReviewError("a provider is required; call .provider(...)");
     }
+    // A comment command from someone who may not start a review ends here,
+    // before a key is spent or a reaction goes on the pull request.
+    await this.#refuseUnauthorizedCommand(context);
+    // Started before anything can skip, so a skipped review still withdraws
+    // the verdict an earlier run left rather than letting it stand for this
+    // commit.
+    const finish = await this.#startProgress(runOf(context));
+    // Anything that escapes the review — the gate tripping, an error under
+    // `onError("fail")` — is a failed review.
+    let outcome: ReviewOutcome = "failed";
+    let unreviewed = false;
+    try {
+      outcome = await this.#review(context, provider, seat);
+    } finally {
+      unreviewed = await finish(outcome);
+    }
+    // A command whose run then reviewed nothing is owed a 😕, not silence.
+    // Decided for the run, not this reviewer: one reviewer skipping while
+    // another reviewed is not a command that could not run.
+    if (unreviewed) await this.#answerCommand("unable");
+  }
+
+  /**
+   * The review proper, once a provider is set: key, diff, call, the
+   * discussion and thread phases, the report, the gate. Answers how it ended
+   * for the progress reactions, or throws when the gate trips.
+   */
+  async #review(
+    context: ValidationContext,
+    provider: Provider,
+    seat: PanelSeat | undefined,
+  ): Promise<ReviewOutcome> {
     const key = resolveKey(this.#apiKey);
     if (key === "") {
       if (this.#skipIfKeyMissing) {
-        await this.#reportSkip(context.target, "no API key", context.redact);
-        return;
+        await this.#reportSkip(
+          context.target,
+          "no API key",
+          context.redact,
+          seat,
+        );
+        return "skipped";
       }
       throw new AiReviewError("an API key is required; call .apiKey(...)");
     }
@@ -963,6 +1537,7 @@ export class Reviewer implements Validation {
       }));
     }
 
+    await this.#answerCommand("started");
     const resolved = await this.#resolveDiff();
     let diff = filterDiff(
       resolved.diff,
@@ -978,15 +1553,21 @@ export class Reviewer implements Validation {
       if (resolved.fetchFailure !== undefined) {
         const reason = resolved.fetchFailure;
         if (this.#onError === "warn") {
-          await this.#reportSkip(context.target, reason, context.redact);
-          return;
+          await this.#reportSkip(context.target, reason, context.redact, seat);
+          return "skipped";
         }
+        await this.#answerCommand("unable");
         throw new AiReviewError(
           `${this.name} of "${context.target}" ${reason}; refusing to pass on an empty fallback diff`,
         );
       }
-      await this.#report(emptyAssessment(), context.target, context.redact);
-      return;
+      await this.#report(
+        emptyAssessment(),
+        context.target,
+        context.redact,
+        seat,
+      );
+      return "passed";
     }
     if (this.#maxDiffTokens !== undefined) {
       diff = truncate(diff, this.#maxDiffTokens);
@@ -1026,7 +1607,7 @@ export class Reviewer implements Validation {
       );
       files = built === "" ? undefined : built;
     }
-    const discussion = await this.#prepareDiscussion();
+    const discussion = await this.#prepareDiscussion(seat);
     const threadCtx =
       discussion === undefined || this.#discussion?.threads_() !== true
         ? undefined
@@ -1034,20 +1615,51 @@ export class Reviewer implements Validation {
     const dismissedPrior = dismissedOf(discussion?.priorState);
     const openPrior = openOf(discussion?.priorState);
     const fixedPrior = fixedOf(discussion?.priorState);
-    const dismissedLines = [...dismissedPrior.values()].map((f) =>
-      `${f.id} — ${f.title}${f.file !== undefined ? ` (${f.file})` : ""}${
-        f.rationale !== undefined ? `: ${f.rationale}` : ""
-      }`
+    const refutedPrior = refutedOf(discussion?.priorState);
+    // Everything a maintainer has decided on this pull request, by any
+    // reviewer: the other reviewers' decisions first, this reviewer's own
+    // written over them, so an id both hold keeps this reviewer's record.
+    // Shown to the model, sticky in code, and offered as priors a restatement
+    // inherits — but persisted into this reviewer's state only once a finding
+    // of its own adopts one, so the blocks do not mirror each other.
+    const dismissedKnown = new Map<string, StoredFinding>();
+    for (const prior of discussion?.shared ?? []) {
+      dismissedKnown.set(prior.id, prior);
+    }
+    for (const [id, prior] of dismissedPrior) dismissedKnown.set(id, prior);
+    const dismissedLines = [...dismissedKnown.values()].map((f) =>
+      stateLine(f, true)
+    );
+    // The still-open findings a maintainer has contested — gathered before the
+    // identities are resolved, since the reword pass needs to know them: a
+    // restatement of a contested finding must adopt the identity the rebuttal
+    // is attached to, whatever file or severity it comes back under, so the
+    // rebuttal is weighed this round instead of the restatement starting a
+    // fresh id the rebuttal does not name.
+    const contestedPrior: ReadonlySet<string> =
+      discussion === undefined || this.#discussion === undefined
+        ? new Set()
+        : new Set(
+          this.#collectRebuttals(
+            discussion.comments,
+            threadCtx,
+            this.#discussion,
+            [...openPrior.keys()],
+          ).keys(),
+        );
+    // Earlier rounds' refutations ride in with their evidence, so the model is
+    // not left to rediscover a concern already disproved against this code.
+    const refutedLines = [...refutedPrior.values()].map((f) =>
+      stateLine(f, true)
     );
     // The previous round's still-open findings, for the model to re-assess:
     // re-reported → still open; omitted → recorded as fixed below.
-    const priorLines = [...openPrior.values()].map((f) =>
-      `${f.id} — ${f.title}${f.file !== undefined ? ` (${f.file})` : ""}`
-    );
+    const priorLines = [...openPrior.values()].map((f) => stateLine(f, false));
     const extras: PromptExtras = {
       ...(conventions !== undefined ? { conventions } : {}),
       ...(files !== undefined ? { files } : {}),
       ...(dismissedLines.length > 0 ? { dismissed: dismissedLines } : {}),
+      ...(refutedLines.length > 0 ? { refuted: refutedLines } : {}),
       ...(priorLines.length > 0 ? { prior: priorLines } : {}),
     };
 
@@ -1085,7 +1697,17 @@ export class Reviewer implements Validation {
       const message = error instanceof Error ? error.message : String(error);
       if (this.#onError === "warn") {
         console.warn(`[${this.name}] skipped: ${message}`);
-        return;
+        // Alone, a reviewer that could not review says so on the console;
+        // in a panel its row says so too, rather than going missing.
+        if (seat !== undefined) {
+          this.#takeSeat(seat, context.redact, {
+            verdict: "skipped",
+            findings: [],
+            skipped: `the review failed: ${message}`,
+            report: skipBody(`the review failed: ${message}`),
+          });
+        }
+        return "skipped";
       }
       throw error instanceof AiReviewError ? error : new AiReviewError(message);
     }
@@ -1094,8 +1716,9 @@ export class Reviewer implements Validation {
         context.target,
         `AI budget exhausted — ${call.exhausted}`,
         context.redact,
+        seat,
       );
-      return;
+      return "skipped";
     }
     const assessment = call.value;
     const usage = call.usage;
@@ -1117,6 +1740,8 @@ export class Reviewer implements Validation {
       : await this.#resolveRewordings(
         assessment.findings,
         discussion.priorState,
+        discussion.shared,
+        contestedPrior,
         { provider, key, model, retry },
       );
 
@@ -1125,11 +1750,11 @@ export class Reviewer implements Validation {
     // re-report rewordings; this catches an identical resurfacing without
     // spending a model call on it). Recorded in the report, never silent.
     const dismissed: DismissedFinding[] = [];
-    if (dismissedPrior.size > 0) {
+    if (dismissedKnown.size > 0) {
       const kept: AssessmentFinding[] = [];
       for (const finding of assessment.findings) {
         const prior = finding.id !== undefined
-          ? dismissedPrior.get(finding.id)
+          ? dismissedKnown.get(finding.id)
           : undefined;
         if (prior !== undefined) {
           const earlier = finding.id !== undefined
@@ -1142,8 +1767,142 @@ export class Reviewer implements Validation {
               ? { reason: prior.rationale }
               : {}),
             ...(earlier !== undefined ? { rewordedFrom: earlier } : {}),
+            ...(prior.status === "accepted" ? { accepted: true } : {}),
           });
         } else kept.push(finding);
+      }
+      assessment.findings = kept;
+    }
+
+    // Rebuttals, gathered once the ids are canonical and before any decision a
+    // trusted reply may change, for every finding of interest: reported this
+    // round, still open from the last one, or refuted before.
+    // A finding decided above — a sticky dismissal, this reviewer's or one
+    // shared by another — is not of interest any more, even when this
+    // reviewer still holds it open: a rebuttal on it must not send it to the
+    // adjudicator a second time, which would post a second answer for a
+    // finding already answered.
+    const decidedAbove = new Set(dismissed.map((d) => d.finding.id));
+    const ofInterest = [
+      ...assessment.findings
+        .map((f) => f.id)
+        .filter((id): id is string => id !== undefined),
+      ...openPrior.keys(),
+      ...refutedPrior.keys(),
+    ].filter((id) => !decidedAbove.has(id));
+    const rebuttals = discussion === undefined || this.#discussion === undefined
+      ? new Map<string, HostComment[]>()
+      : this.#collectRebuttals(
+        discussion.comments,
+        threadCtx,
+        this.#discussion,
+        ofInterest,
+      );
+
+    // The maintainers' replies the reviewer answers with a reaction: 👀 on
+    // every rebuttal it read this round — weighed, or set aside because the
+    // budget is spent or an accept command decided it first — ❤️ on the one
+    // that decided a finding. Only comments that passed the trust gate are ever here.
+    const replies: ReplyNotice = { read: [], accepted: [] };
+    for (const comments of rebuttals.values()) replies.read.push(...comments);
+
+    // Acceptances: a maintainer's `accept` command decides a finding outright.
+    // Applied before the verifier and the adjudicator see it — nothing is
+    // weighed, so nothing is spent — and taken off the rebuttal list, so a
+    // reply that both argued and accepted is not adjudicated behind the
+    // maintainer's back. An accepted finding the model did not re-report is
+    // decided all the same, like a contested one the adjudicator dismisses.
+    const mention = this.#discussion?.mention_();
+    const accepted = discussion === undefined ||
+        this.#discussion === undefined || mention === undefined
+      ? new Map<string, Acceptance>()
+      : this.#collectAcceptances(
+        discussion.comments,
+        threadCtx,
+        this.#discussion,
+        mention,
+        ofInterest,
+      );
+    if (accepted.size > 0) {
+      const acceptedFinding = (
+        finding: AssessmentFinding,
+        acceptance: Acceptance,
+      ): DismissedFinding => ({
+        finding,
+        author: acceptance.displayName ?? acceptance.author,
+        reason: acceptance.reason,
+        accepted: true,
+      });
+      const kept: AssessmentFinding[] = [];
+      for (const finding of assessment.findings) {
+        const acceptance = finding.id !== undefined
+          ? accepted.get(finding.id)
+          : undefined;
+        if (acceptance === undefined) kept.push(finding);
+        else dismissed.push(acceptedFinding(finding, acceptance));
+      }
+      assessment.findings = kept;
+      // Not re-reported this round — still open from the last one, or
+      // refuted by the verifier — the maintainer's decision is recorded all
+      // the same, and outranks the verifier's: a maintainer who accepts a
+      // finding the model had already talked itself out of is owed the
+      // acknowledgement, not silence.
+      const decided = new Set(dismissed.map((d) => d.finding.id));
+      for (const prior of [...openPrior.values(), ...refutedPrior.values()]) {
+        const acceptance = accepted.get(prior.id);
+        if (acceptance === undefined || decided.has(prior.id)) continue;
+        decided.add(prior.id);
+        dismissed.push(acceptedFinding({
+          id: prior.id,
+          title: prior.title,
+          severity: prior.severity,
+          ...(prior.file !== undefined ? { file: prior.file } : {}),
+        }, acceptance));
+      }
+      for (const id of accepted.keys()) rebuttals.delete(id);
+      for (const acceptance of accepted.values()) {
+        replies.accepted.push(acceptance.comment);
+      }
+    }
+
+    // Sticky refutations: a finding the verify pass disproved in an earlier
+    // round is dropped deterministically — but only while everything that
+    // verifier saw is byte-identical, which is when the evidence it cited
+    // cannot have changed, and only while no maintainer has contested it.
+    // Either sends the finding back to the verifier below carrying the earlier
+    // refutation, so the model alone never silences a finding for good: the
+    // drop is bounded by evidence, re-asked as soon as the code moves, and a
+    // trusted human can always demand the re-check by replying in its thread.
+    const refuted: RefutedFinding[] = [];
+    const runNotes: string[] = [];
+    const evidence = await sha256Hex(`${diff}\n${files ?? ""}`);
+    if (refutedPrior.size > 0) {
+      const kept: AssessmentFinding[] = [];
+      for (const finding of assessment.findings) {
+        const id = finding.id ?? "";
+        const prior = refutedPrior.get(id);
+        if (prior === undefined) {
+          kept.push(finding);
+          continue;
+        }
+        const contested = rebuttals.has(id);
+        if (prior.evidence === evidence && !contested) {
+          refuted.push({
+            finding,
+            earlier: true,
+            ...(prior.rationale !== undefined
+              ? { reason: prior.rationale }
+              : {}),
+          });
+          continue;
+        }
+        if (contested) {
+          runNotes.push(
+            `"${finding.title}" was refuted in an earlier round and a ` +
+              `maintainer replied in its thread — sent back to the verifier`,
+          );
+        }
+        kept.push(finding);
       }
       assessment.findings = kept;
     }
@@ -1156,8 +1915,10 @@ export class Reviewer implements Validation {
     // confirmed or uncertain candidate stays reported and gating, carrying the
     // verdict so the report shows how far verification got. A missing verdict
     // and a failed pass both keep the finding unmarked — fail toward
-    // reporting, never toward silence.
-    const refuted: RefutedFinding[] = [];
+    // reporting, never toward silence. A candidate refuted in an earlier round
+    // (whose diff section has since changed) carries that refutation in, so
+    // the verifier re-checks the evidence instead of starting from nothing.
+    const verified = new Set<string>();
     if (this.#verify && assessment.findings.length > 0) {
       if (this.#budget?.exhausted_()) {
         if (!this.#quiet) {
@@ -1167,13 +1928,19 @@ export class Reviewer implements Validation {
         }
       } else {
         try {
-          const candidates = assessment.findings.map((f) => ({
-            id: f.id ?? "",
-            title: f.title,
-            ...(f.file !== undefined ? { file: f.file } : {}),
-            ...(f.line !== undefined ? { line: f.line } : {}),
-            ...(f.detail !== undefined ? { detail: f.detail } : {}),
-          }));
+          const candidates = assessment.findings.map((f) => {
+            const earlier = f.id !== undefined
+              ? refutedPrior.get(f.id)?.rationale
+              : undefined;
+            return {
+              id: f.id ?? "",
+              title: f.title,
+              ...(f.file !== undefined ? { file: f.file } : {}),
+              ...(f.line !== undefined ? { line: f.line } : {}),
+              ...(f.detail !== undefined ? { detail: f.detail } : {}),
+              ...(earlier !== undefined ? { refutedBefore: earlier } : {}),
+            };
+          });
           const verdicts = await this.#verdictCall(
             provider,
             key,
@@ -1187,6 +1954,7 @@ export class Reviewer implements Validation {
             const verdict = finding.id !== undefined
               ? verdicts.get(finding.id)
               : undefined;
+            if (verdict !== undefined) verified.add(finding.id ?? "");
             // The evidence requirement is enforced here, not just asked for in
             // the prompt: a refutation that states no reason cited nothing, so
             // it demotes to uncertain — the finding stays visible — rather
@@ -1222,41 +1990,58 @@ export class Reviewer implements Validation {
         }
       }
     }
+    // A finding refuted in an earlier round that is reported this round is
+    // back for one of two reasons, and the report says which: the verifier
+    // re-checked it against the changed code and it stands (confirmed or
+    // uncertain), or no verifier could be consulted — the pass is off, was
+    // skipped for budget, or failed — and the earlier decision is not trusted
+    // blind. Both fail toward reporting.
+    for (const finding of assessment.findings) {
+      const id = finding.id ?? "";
+      if (!refutedPrior.has(id)) continue;
+      runNotes.push(
+        verified.has(id)
+          ? `"${finding.title}" was refuted in an earlier round but stands ` +
+            `against the changed code — reported again under ${id}`
+          : `"${finding.title}" was refuted in an earlier round and could ` +
+            `not be re-verified this round — reported again under ${id}`,
+      );
+    }
 
     // Adjudication: when a trusted maintainer contested a finding by quoting
     // its id, weigh the rebuttal. Both keys are required for a dismissal — a
     // trusted rebuttal (checked in code) AND the model accepting it on merit —
     // so neither an insistent comment nor the model alone can mute a finding.
     const upheldReasons = new Map<string, string>();
-    if (discussion !== undefined && this.#discussion !== undefined) {
-      // Thread replies join the same trust gate and the same one token budget
-      // as the id-quoting channel, appended last so the budget's newest-first
-      // walk keeps them. Enabling threads therefore cannot double the untrusted
-      // text the adjudicator sees.
-      const replies = threadCtx === undefined
-        ? []
-        : allReplies(threadCtx.threads);
-      const trusted = budgetComments(
-        trustedComments([...discussion.comments, ...replies], this.#discussion),
-        this.#discussion,
-      );
-      const ids = assessment.findings
+    if (discussion !== undefined) {
+      const reported = assessment.findings
         .map((f) => f.id)
         .filter((id): id is string => id !== undefined);
-      const quoted = rebuttalsFor(trusted, ids);
-      const rebuttals = threadCtx === undefined
-        ? quoted
-        : withThreadRebuttals(quoted, trusted, threadCtx.threads, ids);
-      if (rebuttals.size > 0 && !(this.#budget?.exhausted_() ?? false)) {
+      // Contested findings the model did not re-report this round — or that
+      // the verify pass refuted — are adjudicated too, rather than recorded as
+      // fixed by default: a maintainer who argued a finding away is owed the
+      // answer "dismissed", which is sticky and said so in the thread, where a
+      // "fixed" that fixed nothing reopens on the next rewording.
+      const unreported = [...openPrior.values()].filter((prior) =>
+        !reported.includes(prior.id)
+      );
+      // A reply on a finding refuted before asks for a re-check, not a
+      // dismissal: it was sent back to the verifier above, whose answer is the
+      // reply. Everything else contested is adjudicated.
+      const contested = new Map(
+        [...rebuttals].filter(([id]) => !refutedPrior.has(id)),
+      );
+      if (contested.size > 0 && !(this.#budget?.exhausted_() ?? false)) {
         try {
           const notes: RebuttalNote[] = [];
-          for (const [id, comments] of rebuttals) {
+          for (const [id, comments] of contested) {
             const finding = assessment.findings.find((f) => f.id === id);
-            if (finding === undefined) continue;
+            const subject = finding ?? openPrior.get(id);
+            if (subject === undefined) continue;
             notes.push({
               id,
-              title: finding.title,
-              ...(finding.detail !== undefined
+              title: subject.title,
+              ...(finding?.detail !== undefined
                 ? { detail: finding.detail }
                 : {}),
               comments: comments.map((c) =>
@@ -1288,24 +2073,29 @@ export class Reviewer implements Validation {
                 `${unanswered.join(", ")} — contested findings stay open`,
             );
           }
+          // A "dismissed" verdict only counts for a finding that actually had
+          // a trusted rebuttal — the model cannot dismiss on its own.
+          const accepted = (id: string, verdict: Verdict) =>
+            verdict.verdict === "dismissed" && contested.has(id);
+          const accept = (finding: AssessmentFinding, verdict: Verdict) => {
+            replies.accepted.push(...(contested.get(verdict.id) ?? []));
+            const rebutter = contested.get(verdict.id)?.[0];
+            dismissed.push({
+              finding,
+              author: rebutter?.displayName ?? rebutter?.author,
+              ...(verdict.reason !== undefined
+                ? { reason: verdict.reason }
+                : {}),
+            });
+          };
           const kept: AssessmentFinding[] = [];
           for (const finding of assessment.findings) {
             const id = finding.id;
             const verdict = id !== undefined ? verdicts.get(id) : undefined;
-            // A "dismissed" verdict only counts for a finding that actually
-            // had a trusted rebuttal — the model cannot dismiss on its own.
             if (
-              id !== undefined && verdict?.verdict === "dismissed" &&
-              rebuttals.has(id)
+              id !== undefined && verdict !== undefined && accepted(id, verdict)
             ) {
-              const rebutter = rebuttals.get(id)?.[0];
-              dismissed.push({
-                finding,
-                author: rebutter?.displayName ?? rebutter?.author,
-                ...(verdict.reason !== undefined
-                  ? { reason: verdict.reason }
-                  : {}),
-              });
+              accept(finding, verdict);
             } else {
               if (id !== undefined && verdict?.verdict === "upheld") {
                 upheldReasons.set(id, verdict.reason ?? "");
@@ -1314,6 +2104,39 @@ export class Reviewer implements Validation {
             }
           }
           assessment.findings = kept;
+          // The contested findings that were not re-reported: an accepted
+          // rebuttal dismisses (and outranks this round's refutation of the
+          // same finding — two keys beat one); one that does not hold changes
+          // nothing, since the finding is not reported either way, but the
+          // report says so rather than letting the argument vanish.
+          for (const prior of unreported) {
+            const verdict = verdicts.get(prior.id);
+            if (verdict === undefined || !contested.has(prior.id)) continue;
+            if (accepted(prior.id, verdict)) {
+              accept({
+                id: prior.id,
+                title: prior.title,
+                severity: prior.severity,
+                ...(prior.file !== undefined ? { file: prior.file } : {}),
+              }, verdict);
+              const index = refuted.findIndex((r) => r.finding.id === prior.id);
+              if (index >= 0) refuted.splice(index, 1);
+            } else {
+              const because = verdict.reason !== undefined &&
+                  verdict.reason !== ""
+                ? ` (${verdict.reason})`
+                : "";
+              runNotes.push(
+                `the rebuttal for "${prior.title}" (${prior.id}) did not ` +
+                  `hold on its own${because}, but the finding no longer ` +
+                  `reproduces — recorded as ${
+                    refuted.some((r) => r.finding.id === prior.id)
+                      ? "refuted"
+                      : "fixed"
+                  }`,
+              );
+            }
+          }
         } catch (error) {
           const message = error instanceof Error
             ? error.message
@@ -1341,6 +2164,12 @@ export class Reviewer implements Validation {
       }
       for (const d of dismissed) {
         if (d.finding.id !== undefined) still.add(d.finding.id);
+      }
+      // Refuted is a decision about a live finding, not the absence of one: a
+      // prior open finding the verifier disproved is recorded refuted below,
+      // never as fixed.
+      for (const r of refuted) {
+        if (r.finding.id !== undefined) still.add(r.finding.id);
       }
       for (const prior of fixedPrior.values()) {
         if (!still.has(prior.id)) fixed.push(prior);
@@ -1389,6 +2218,32 @@ export class Reviewer implements Validation {
         stored.set(prior.id, withAliases(prior));
       }
       for (const entry of fixed) stored.set(entry.id, withAliases(entry));
+      // Refutations: earlier rounds' carried forward as they stand, this
+      // round's written with the verifier's reason and the digest of what it
+      // saw — the two things the next round compares. A finding re-refuted
+      // after its input changed refreshes both; one an accepted rebuttal
+      // dismissed was removed from this list above.
+      for (const prior of refutedPrior.values()) {
+        stored.set(prior.id, withAliases(prior));
+      }
+      for (const r of refuted) {
+        const id = r.finding.id ?? "";
+        if (id === "" || r.earlier === true) continue;
+        const prior = refutedPrior.get(id) ?? openPrior.get(id) ??
+          fixedPrior.get(id);
+        stored.set(
+          id,
+          withAliases({
+            id,
+            title: prior?.title ?? r.finding.title,
+            severity: r.finding.severity,
+            status: "refuted",
+            ...(r.finding.file !== undefined ? { file: r.finding.file } : {}),
+            ...(r.reason !== undefined ? { rationale: r.reason } : {}),
+            evidence,
+          }),
+        );
+      }
       for (const d of dismissed) {
         const id = d.finding.id ?? "";
         if (id === "") continue;
@@ -1396,7 +2251,10 @@ export class Reviewer implements Validation {
         // the maintainer actually argued about. Re-stamping it with this
         // round's rewording would churn the state block and, over rounds, bury
         // the real reason under a succession of titles.
-        const prior = dismissedPrior.get(id);
+        // Known to another reviewer: its record — wording, author, reason —
+        // is adopted into this reviewer's state as it stands, so the next
+        // round is free even if the other reviewer's comment is gone.
+        const prior = dismissedKnown.get(id);
         stored.set(
           id,
           withAliases(
@@ -1404,7 +2262,7 @@ export class Reviewer implements Validation {
               id,
               title: d.finding.title,
               severity: d.finding.severity,
-              status: "dismissed",
+              status: d.accepted === true ? "accepted" : "dismissed",
               ...(d.finding.file !== undefined ? { file: d.finding.file } : {}),
               ...(d.reason !== undefined ? { rationale: d.reason } : {}),
               ...(d.author !== undefined ? { author: d.author } : {}),
@@ -1430,7 +2288,12 @@ export class Reviewer implements Validation {
           }),
         );
       }
-      commentExtra = encodeState({ findings: [...stored.values()] });
+      // Tagged with this reviewer's name in a panel, whose one comment
+      // carries every member's state.
+      commentExtra = encodeState(
+        { findings: [...stored.values()] },
+        seat === undefined ? undefined : this.name,
+      );
     }
 
     // Posted after suppression and after the state block, so no thread is ever
@@ -1451,8 +2314,14 @@ export class Reviewer implements Validation {
           dismissed: dismissed.map((d) => ({
             id: d.finding.id ?? "",
             ...(d.reason !== undefined ? { reason: d.reason } : {}),
+            ...(d.accepted === true ? { accepted: true } : {}),
           })),
           dismissedPrior: new Set(dismissedPrior.keys()),
+          refuted: refuted.map((r) => ({
+            id: r.finding.id ?? "",
+            ...(r.reason !== undefined ? { reason: r.reason } : {}),
+            ...(r.earlier === true ? { earlier: true } : {}),
+          })),
           fixed: fixed.map((entry) => entry.id),
           fixedPrior: new Set(fixedPrior.keys()),
           upheld: upheldReasons,
@@ -1460,26 +2329,88 @@ export class Reviewer implements Validation {
           anchors: anchorableLines(diff),
         },
       );
-    await this.#report(assessment, context.target, context.redact, usage, {
-      suppressed: suppressed.length,
-      suppressedFindings: suppressed,
-      fromCache,
-      budget: this.#budget?.describe_(),
-      ...(refuted.length > 0 ? { refuted } : {}),
-      ...(dismissed.length > 0 ? { dismissed } : {}),
-      ...(fixed.length > 0 ? { fixed } : {}),
-      ...(reword.notes.length + threadNotes.length > 0
-        ? { notes: [...reword.notes, ...threadNotes] }
-        : {}),
-      discussion: discussion !== undefined,
-    }, commentExtra);
+    await this.#reactOnReplies(replies);
     const gate = gateTrips(assessment, this.#gate);
+    await this.#report(
+      assessment,
+      context.target,
+      context.redact,
+      seat,
+      usage,
+      {
+        suppressed: suppressed.length,
+        suppressedFindings: suppressed,
+        fromCache,
+        budget: this.#budget?.describe_(),
+        ...(refuted.length > 0 ? { refuted } : {}),
+        ...(dismissed.length > 0 ? { dismissed } : {}),
+        ...(fixed.length > 0 ? { fixed } : {}),
+        ...(reword.notes.length + runNotes.length + threadNotes.length > 0
+          ? { notes: [...reword.notes, ...runNotes, ...threadNotes] }
+          : {}),
+        discussion: discussion !== undefined,
+        ...(discussion !== undefined && mention !== undefined
+          ? {
+            commands: {
+              mention,
+              onDemand: detectReviewHost(this.#env)?.acknowledgeCommand !==
+                undefined,
+            },
+          }
+          : {}),
+      },
+      commentExtra,
+      gate.tripped,
+    );
     if (gate.tripped) {
       throw new AiReviewError(
         `${this.name} of "${context.target}" failed: ${gate.reason}. ${assessment.summary}`,
       );
     }
+    return assessment.findings.length === 0 ? "passed" : "minor";
   }
+}
+
+/**
+ * The build run `context` belongs to, or `""` — this process — when the caller
+ * drove `validate(...)` directly. Read through `in` rather than as a field so
+ * this compiles against a `@zuke/core` floor whose context predates `runId`.
+ */
+function runOf(context: ValidationContext): string {
+  return "runId" in context && typeof context.runId === "string"
+    ? context.runId
+    : "";
+}
+
+/** The maintainers' replies to react on, by the reaction they get. */
+interface ReplyNotice {
+  /** The rebuttals the reviewer read this round — 👀. */
+  read: Array<Pick<HostComment, "id" | "kind">>;
+  /** The replies that decided a finding — ❤️. */
+  accepted: Array<Pick<HostComment, "id" | "kind">>;
+}
+
+/** What one run's discussion round starts from. */
+interface Discussion {
+  /** Every comment on the pull request, in listing order — untrusted. */
+  comments: HostComment[];
+  /** This reviewer's state from its newest own comment, when one exists. */
+  priorState?: ReviewState;
+  /** The other reviewers' dismissed and accepted findings on this pull request. */
+  shared: StoredFinding[];
+}
+
+/**
+ * One stored finding as a prompt line: `id — title (file)`, plus `: rationale`
+ * when the block carries the decision's evidence (a dismissal, a refutation)
+ * rather than a still-open finding to re-assess.
+ */
+function stateLine(finding: StoredFinding, withRationale: boolean): string {
+  const file = finding.file !== undefined ? ` (${finding.file})` : "";
+  const why = withRationale && finding.rationale !== undefined
+    ? `: ${finding.rationale}`
+    : "";
+  return `${finding.id} — ${finding.title}${file}${why}`;
 }
 
 /**

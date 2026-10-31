@@ -13,7 +13,8 @@
           "type": "json",
           "path": "deno.json",
           "jsonpath": "$.version"
-        }
+        },
+        "src/version.ts"
       ]
     },
     "packages/deno": {
@@ -29,6 +30,17 @@
     },
     "packages/docs": {
       "component": "docs",
+      "changelog-path": "CHANGELOG.md",
+      "extra-files": [
+        {
+          "type": "json",
+          "path": "deno.json",
+          "jsonpath": "$.version"
+        }
+      ]
+    },
+    "packages/engine": {
+      "component": "engine",
       "changelog-path": "CHANGELOG.md",
       "extra-files": [
         {
@@ -118,6 +130,7 @@
     "packages/cli": {
       "component": "cli",
       "changelog-path": "CHANGELOG.md",
+      "draft": true,
       "extra-files": [
         {
           "type": "json",
@@ -173,6 +186,39 @@
     },
     "packages/kustomize": {
       "component": "kustomize",
+      "changelog-path": "CHANGELOG.md",
+      "extra-files": [
+        {
+          "type": "json",
+          "path": "deno.json",
+          "jsonpath": "$.version"
+        }
+      ]
+    },
+    "packages/argo-rollouts": {
+      "component": "argo-rollouts",
+      "changelog-path": "CHANGELOG.md",
+      "extra-files": [
+        {
+          "type": "json",
+          "path": "deno.json",
+          "jsonpath": "$.version"
+        }
+      ]
+    },
+    "packages/prometheus": {
+      "component": "prometheus",
+      "changelog-path": "CHANGELOG.md",
+      "extra-files": [
+        {
+          "type": "json",
+          "path": "deno.json",
+          "jsonpath": "$.version"
+        }
+      ]
+    },
+    "packages/canary": {
+      "component": "canary",
       "changelog-path": "CHANGELOG.md",
       "extra-files": [
         {
@@ -512,6 +558,28 @@
         }
       ]
     },
+    "packages/aws": {
+      "component": "aws",
+      "changelog-path": "CHANGELOG.md",
+      "extra-files": [
+        {
+          "type": "json",
+          "path": "deno.json",
+          "jsonpath": "$.version"
+        }
+      ]
+    },
+    "packages/az": {
+      "component": "az",
+      "changelog-path": "CHANGELOG.md",
+      "extra-files": [
+        {
+          "type": "json",
+          "path": "deno.json",
+          "jsonpath": "$.version"
+        }
+      ]
+    },
     "packages/git": {
       "component": "git",
       "changelog-path": "CHANGELOG.md",
@@ -635,6 +703,94 @@
     },
     "packages/otel": {
       "component": "otel",
+      "changelog-path": "CHANGELOG.md",
+      "extra-files": [
+        {
+          "type": "json",
+          "path": "deno.json",
+          "jsonpath": "$.version"
+        }
+      ]
+    },
+    "packages/homebrew": {
+      "component": "homebrew",
+      "changelog-path": "CHANGELOG.md",
+      "extra-files": [
+        {
+          "type": "json",
+          "path": "deno.json",
+          "jsonpath": "$.version"
+        }
+      ]
+    },
+    "packages/chocolatey": {
+      "component": "chocolatey",
+      "changelog-path": "CHANGELOG.md",
+      "extra-files": [
+        {
+          "type": "json",
+          "path": "deno.json",
+          "jsonpath": "$.version"
+        }
+      ]
+    },
+    "packages/qr": {
+      "component": "qr",
+      "changelog-path": "CHANGELOG.md",
+      "extra-files": [
+        {
+          "type": "json",
+          "path": "deno.json",
+          "jsonpath": "$.version"
+        }
+      ]
+    },
+    "packages/apple": {
+      "component": "apple",
+      "changelog-path": "CHANGELOG.md",
+      "extra-files": [
+        {
+          "type": "json",
+          "path": "deno.json",
+          "jsonpath": "$.version"
+        }
+      ]
+    },
+    "packages/google": {
+      "component": "google",
+      "changelog-path": "CHANGELOG.md",
+      "extra-files": [
+        {
+          "type": "json",
+          "path": "deno.json",
+          "jsonpath": "$.version"
+        }
+      ]
+    },
+    "packages/signpath": {
+      "component": "signpath",
+      "changelog-path": "CHANGELOG.md",
+      "extra-files": [
+        {
+          "type": "json",
+          "path": "deno.json",
+          "jsonpath": "$.version"
+        }
+      ]
+    },
+    "packages/flutter": {
+      "component": "flutter",
+      "changelog-path": "CHANGELOG.md",
+      "extra-files": [
+        {
+          "type": "json",
+          "path": "deno.json",
+          "jsonpath": "$.version"
+        }
+      ]
+    },
+    "packages/dart": {
+      "component": "dart",
       "changelog-path": "CHANGELOG.md",
       "extra-files": [
         {

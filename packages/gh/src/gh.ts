@@ -12,7 +12,7 @@
  * escape hatch.
  *
  * ```ts
- * import { GhTasks } from "jsr:@zuke/gh";
+ * import { GhTasks } from "@zuke/gh";
  * await GhTasks.run((s) =>
  *   s.command("release", "create", "v1.2.3")
  *     .repo("acme/app").flag("title", "v1.2.3").flag("generate-notes")
@@ -34,6 +34,25 @@ import {
   type GhAppTokenSettings,
   mintAppToken,
 } from "./app_token.ts";
+import {
+  appTokenSource,
+  type GhAppTokenSource,
+  type GhAppTokenSourceSettings,
+} from "./app_token_source.ts";
+import {
+  collaboratorPermission,
+  type GhCollaboratorApi,
+  type GhCollaboratorPermission,
+  type GhCollaboratorSettings,
+} from "./collaborator.ts";
+import {
+  deleteReaction,
+  type GhReaction,
+  type GhReactionApi,
+  type GhReactionSettings,
+  listReactions,
+  react,
+} from "./reaction.ts";
 import {
   type GhCheckRunApi,
   type GhCheckRunResult,
@@ -79,6 +98,12 @@ import {
   type GhReleaseEnsureResult,
   type GhReleaseEnsureSettings,
 } from "./release_ensure.ts";
+import {
+  createOrUpdateFile,
+  type GhContentsApi,
+  type GhContentsResult,
+  type GhContentsSettings,
+} from "./contents.ts";
 import { callApi, type GhApiSettings } from "./api_command.ts";
 export { GhSettings };
 import {
@@ -110,8 +135,11 @@ export interface GhTasksApi
     GhReleaseLatestApi,
     GhReleaseEnsureApi,
     GhCommitApi,
+    GhContentsApi,
     GhPullRequestApi,
     GhCheckRunApi,
+    GhReactionApi,
+    GhCollaboratorApi,
     GhPrApi,
     GhIssueApi,
     GhReleaseApi,
@@ -157,6 +185,11 @@ export const GhTasks: GhTasksApi = {
   tag(configure?: (s: GhTagSettings) => GhTagSettings): Promise<void> {
     return tagCommit(configure);
   },
+  createOrUpdateFile(
+    configure?: Configure<GhContentsSettings>,
+  ): Promise<GhContentsResult> {
+    return createOrUpdateFile(configure);
+  },
   pullRequest(
     configure?: (s: GhPullRequestSettings) => GhPullRequestSettings,
   ): Promise<GhPullRequestResult> {
@@ -172,10 +205,35 @@ export const GhTasks: GhTasksApi = {
   ): Promise<GhCheckRunResult> {
     return postCheckRun(configure);
   },
+  react(
+    configure?: (s: GhReactionSettings) => GhReactionSettings,
+  ): Promise<GhReaction> {
+    return react(configure);
+  },
+  listReactions(
+    configure?: (s: GhReactionSettings) => GhReactionSettings,
+  ): Promise<GhReaction[]> {
+    return listReactions(configure);
+  },
+  deleteReaction(
+    configure?: (s: GhReactionSettings) => GhReactionSettings,
+  ): Promise<void> {
+    return deleteReaction(configure);
+  },
+  collaboratorPermission(
+    configure?: (s: GhCollaboratorSettings) => GhCollaboratorSettings,
+  ): Promise<GhCollaboratorPermission> {
+    return collaboratorPermission(configure);
+  },
   appToken(
     configure?: Configure<GhAppTokenSettings>,
   ): Promise<GhAppTokenResult> {
     return mintAppToken(configure);
+  },
+  appTokenSource(
+    configure?: Configure<GhAppTokenSourceSettings>,
+  ): GhAppTokenSource {
+    return appTokenSource(configure);
   },
   uploadSarif(
     configure?: Configure<GhSarifSettings>,

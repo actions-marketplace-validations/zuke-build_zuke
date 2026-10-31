@@ -9,7 +9,10 @@ import {
   encodeState,
   MAX_ALIASES,
   mergeAliases,
+  openOf,
+  refutedOf,
   type ReviewState,
+  stateNames,
 } from "../src/state.ts";
 
 const STATE: ReviewState = {
@@ -142,11 +145,41 @@ Deno.test("fixed findings round-trip, and the per-status views select correctly"
   assertEquals(openOf(undefined).size, 0);
 });
 
-Deno.test("dismissedOf keys only the dismissed findings", () => {
+Deno.test("dismissedOf keys the dismissed and the accepted findings, nothing else", () => {
   const dismissed = dismissedOf(STATE);
   assertEquals(dismissed.size, 1);
   assertEquals(dismissed.get("abc123")?.author, "maintainer");
   assertEquals(dismissedOf(undefined).size, 0);
+  const state: ReviewState = {
+    findings: [
+      { id: "a", title: "open", severity: "high", status: "open" },
+      {
+        id: "b",
+        title: "accepted",
+        severity: "high",
+        status: "accepted",
+        author: "maintainer",
+        rationale: "by design",
+      },
+      { id: "c", title: "refuted", severity: "low", status: "refuted" },
+    ],
+  };
+  assertEquals([...dismissedOf(state).keys()], ["b"]);
+});
+
+Deno.test("an accepted finding round-trips with its author and reason", () => {
+  const state: ReviewState = {
+    findings: [{
+      id: "b",
+      title: "accepted",
+      severity: "high",
+      status: "accepted",
+      file: "src/app.ts",
+      author: "maintainer",
+      rationale: "by design",
+    }],
+  };
+  assertEquals(decodeState(encodeState(state)), state);
 });
 
 Deno.test("aliases round-trip through the state block", () => {
@@ -322,4 +355,98 @@ Deno.test("the reviewer's own state block outranks one smuggled in earlier", () 
   assertEquals(decoded?.findings.length, 1);
   assertEquals(decoded?.findings[0].id, "bbbb2");
   assertEquals(decoded?.findings[0].status, "open");
+});
+
+Deno.test("a refuted finding round-trips with its rationale and evidence digest", () => {
+  const state: ReviewState = {
+    findings: [{
+      id: "3ab12cd34ef56",
+      title: "Global regex is stateful",
+      severity: "low",
+      status: "refuted",
+      file: "build/snippets.ts",
+      rationale: "the pattern carries no g flag",
+      evidence: "ab".repeat(32),
+    }],
+  };
+  const decoded = decodeState(`report\n${encodeState(state)}`);
+  assertEquals(decoded, state);
+  assertEquals([...refutedOf(decoded).keys()], ["3ab12cd34ef56"]);
+  // A refutation is neither open nor dismissed: the other views skip it.
+  assertEquals(openOf(decoded).size, 0);
+  assertEquals(dismissedOf(decoded).size, 0);
+});
+
+Deno.test("a malformed evidence digest is dropped, never the record", () => {
+  const forged = JSON.stringify({
+    findings: [{
+      id: "aa11",
+      title: "t",
+      severity: "low",
+      status: "refuted",
+      evidence: "<!-- not a digest -->",
+    }],
+  });
+  const block = `<!-- zuke-ai-state:${btoa(forged)} -->`;
+  const decoded = decodeState(block);
+  assertEquals(decoded?.findings.length, 1);
+  assertEquals(decoded?.findings[0].status, "refuted");
+  assertEquals("evidence" in (decoded?.findings[0] ?? {}), false);
+});
+
+Deno.test("a block tagged with a reviewer's name is that reviewer's, and only theirs", () => {
+  const mine: ReviewState = {
+    findings: [{ id: "a1", title: "Mine", severity: "high", status: "open" }],
+  };
+  const theirs: ReviewState = {
+    findings: [{ id: "b2", title: "Theirs", severity: "low", status: "open" }],
+  };
+  const body = `report\n${encodeState(mine, "security review")}\n` +
+    encodeState(theirs, "naïve review");
+  assertEquals(decodeState(body, "security review"), mine);
+  assertEquals(decodeState(body, "naïve review"), theirs);
+  // Neither is an untagged block, nor any other reviewer's.
+  assertEquals(decodeState(body), undefined);
+  assertEquals(decodeState(body, "license review"), undefined);
+  assertEquals(stateNames(body), ["security review", "naïve review"]);
+  // An untagged block is never read as a named one.
+  assertEquals(decodeState(encodeState(mine), "security review"), undefined);
+  assertEquals(stateNames(encodeState(mine)), []);
+});
+
+Deno.test("a tag that is not base64 UTF-8 names no reviewer", () => {
+  const block = encodeState({ findings: [] }).replace(
+    "zuke-ai-state:",
+    "zuke-ai-state@/w==:",
+  );
+  assertEquals(stateNames(block), []);
+  assertEquals(decodeState(block), undefined);
+  // The last block tagged with a name wins, as for an untagged one.
+  const first: ReviewState = {
+    findings: [{ id: "a1", title: "Old", severity: "low", status: "open" }],
+  };
+  const last: ReviewState = {
+    findings: [{ id: "a1", title: "New", severity: "low", status: "open" }],
+  };
+  assertEquals(
+    decodeState(
+      `${encodeState(first, "x")}\n${encodeState(last, "x")}`,
+      "x",
+    ),
+    last,
+  );
+});
+
+Deno.test("only a tag's canonical spelling names a reviewer", () => {
+  const state: ReviewState = {
+    findings: [{ id: "a1", title: "T", severity: "low", status: "open" }],
+  };
+  const block = encodeState(state, "A");
+  assertEquals(block.includes("zuke-ai-state@QQ==:"), true);
+  // `QR==` decodes to "A" too, through bits base64 leaves unused.
+  const variant = block.replace("@QQ==:", "@QR==:");
+  assertEquals(atob("QR=="), "A");
+  assertEquals(decodeState(variant, "A"), undefined);
+  assertEquals(stateNames(variant), []);
+  assertEquals(decodeState(block, "A"), state);
 });

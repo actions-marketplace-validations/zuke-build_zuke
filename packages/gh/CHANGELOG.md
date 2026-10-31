@@ -1,5 +1,33 @@
 # Changelog
 
+## [1.15.0](https://github.com/zuke-build/zuke/compare/gh-v1.14.0...gh-v1.15.0) (2026-10-12)
+
+
+### Features
+
+* **homebrew:** add @zuke/homebrew with BrewTasks, formula rendering and tap publishing ([#790](https://github.com/zuke-build/zuke/issues/790)) ([bcb3512](https://github.com/zuke-build/zuke/commit/bcb3512c7aa01d79b02a8af318710860aa53ba3f))
+
+## [1.14.0](https://github.com/zuke-build/zuke/compare/gh-v1.13.0...gh-v1.14.0) (2026-10-07)
+
+
+### Features
+
+* **prometheus:** typed Prometheus HTTP API client with built-in cloud auth ([#731](https://github.com/zuke-build/zuke/issues/731)) ([bb7fafb](https://github.com/zuke-build/zuke/commit/bb7fafba3b40f058ca9b26098663d5ce93a7b953))
+
+## [1.13.0](https://github.com/zuke-build/zuke/compare/gh-v1.12.0...gh-v1.13.0) (2026-10-05)
+
+
+### Features
+
+* **ai:** add progress reactions on pull requests ([#693](https://github.com/zuke-build/zuke/issues/693)) ([949cb79](https://github.com/zuke-build/zuke/commit/949cb7970a73f56e3d1ba0d30c204ec88c9eddee))
+
+## [1.12.0](https://github.com/zuke-build/zuke/compare/gh-v1.11.0...gh-v1.12.0) (2026-09-21)
+
+
+### Features
+
+* **ai,gh:** wire the review with parameters and a token task, derive the command from the reviewers, choose its callers ([#651](https://github.com/zuke-build/zuke/issues/651)) ([9393c2e](https://github.com/zuke-build/zuke/commit/9393c2e4938a2baf602a9ea4fe2d7cc8a4683e13))
+
 ## [1.11.0](https://github.com/zuke-build/zuke/compare/gh-v1.10.0...gh-v1.11.0) (2026-09-16)
 
 

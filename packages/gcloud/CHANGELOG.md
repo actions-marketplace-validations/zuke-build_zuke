@@ -1,5 +1,41 @@
 # Changelog
 
+## [1.4.2](https://github.com/zuke-build/zuke/compare/gcloud-v1.4.1...gcloud-v1.4.2) (2026-10-20)
+
+
+### Bug Fixes
+
+* **gcloud,aws,az,homebrew:** quote recovery commands with the core shell quoter ([#851](https://github.com/zuke-build/zuke/issues/851)) ([62d1623](https://github.com/zuke-build/zuke/commit/62d162367dff7a02b2ac8f639a6644ab61d2c0a4))
+
+## [1.4.1](https://github.com/zuke-build/zuke/compare/gcloud-v1.4.0...gcloud-v1.4.1) (2026-10-19)
+
+
+### Bug Fixes
+
+* **canary:** tell abort whether it is a rollback or a hand run ([#846](https://github.com/zuke-build/zuke/issues/846)) ([6186b80](https://github.com/zuke-build/zuke/commit/6186b8015dba2c06d0591152c2ebbf3ae1e98377))
+
+## [1.4.0](https://github.com/zuke-build/zuke/compare/gcloud-v1.3.1...gcloud-v1.4.0) (2026-10-08)
+
+
+### Features
+
+* **gcloud:** Cloud Logging and Cloud Monitoring tasks, time-series reads and a cloudMonitoring canary analysis ([#755](https://github.com/zuke-build/zuke/issues/755)) ([a708a86](https://github.com/zuke-build/zuke/commit/a708a8641da27c1b21231edb17a2dced6e15c49d))
+
+## [1.3.1](https://github.com/zuke-build/zuke/compare/gcloud-v1.3.0...gcloud-v1.3.1) (2026-10-06)
+
+
+### Bug Fixes
+
+* **gcloud:** refuse a Cloud Run canary call when the service is not the one staged ([#723](https://github.com/zuke-build/zuke/issues/723)) ([2d7c999](https://github.com/zuke-build/zuke/commit/2d7c999a757764a5731fe993a0dedda514fb080d))
+* **gcloud:** roll nothing back when the Cloud Run stage fails on its own settings ([#713](https://github.com/zuke-build/zuke/issues/713)) ([9cfaf14](https://github.com/zuke-build/zuke/commit/9cfaf148741b2805edd7e65ac2f25e1506bf3e8a))
+
+## [1.3.0](https://github.com/zuke-build/zuke/compare/gcloud-v1.2.0...gcloud-v1.3.0) (2026-10-06)
+
+
+### Features
+
+* **gcloud:** Cloud Run platform for @zuke/canary ([#701](https://github.com/zuke-build/zuke/issues/701)) ([a7bb884](https://github.com/zuke-build/zuke/commit/a7bb88482e64d42199b27731dec1abffcfa5237d))
+
 ## [1.2.0](https://github.com/zuke-build/zuke/compare/gcloud-v1.1.0...gcloud-v1.2.0) (2026-09-01)
 
 

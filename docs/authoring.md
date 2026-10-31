@@ -5,40 +5,40 @@
 `target()` returns a chainable `TargetBuilder`. Everything is optional except a
 body, which is required before the target can run.
 
-| Method                      | Signature                                             | Purpose                                                                                            |
-| --------------------------- | ----------------------------------------------------- | -------------------------------------------------------------------------------------------------- |
-| `.description(text)`        | `(s: string) => this`                                 | Summary shown in `--list`.                                                                         |
-| `.dependsOn(...targets)`    | `(...t: Target[]) => this`                            | Hard prerequisites; run first, transitively.                                                       |
-| `.executes(fn)`             | `(fn: (ctx) => unknown \| Promise<unknown>) => this`  | The body. May be async; its return is ignored, so `() => DenoTasks.lint()` needs no async wrapper. |
-| `.effect(name, fn)`         | `(name: string, fn: (ctx) => unknown \| Promise<unknown>) => this` | A crash-durable side effect: its intent is recorded before it runs, and it is re-driven after an unclean exit. |
-| `.before(...targets)`       | `(...t: Target[]) => this`                            | Soft ordering: run before these _if both are planned_.                                             |
-| `.after(...targets)`        | `(...t: Target[]) => this`                            | Soft ordering: run after these _if both are planned_.                                              |
-| `.triggers(...targets)`     | `(...t: Target[]) => this`                            | Pull these into the plan and run them _after_ this.                                                |
-| `.dependentFor(...targets)` | `(...t: Target[]) => this`                            | Reverse of `dependsOn`: run this _before_ those.                                                   |
-| `.inputs(...paths)`         | `(...p: PathLike[]) => this`                          | Cache inputs: skip the target when these are unchanged.                                            |
-| `.outputs(...paths)`        | `(...p: PathLike[]) => this`                          | Cache outputs: a hit also requires these to still exist.                                           |
-| `.onlyWhen(condition)`      | `(c: (ctx?) => boolean \| Promise<boolean>) => this`  | Run only when the condition holds, else skip. The condition may read `ctx.plan()`.                  |
-| `.requires(...params)`      | `(...p: Parameter[]) => this`                         | Fail the target unless these parameters are set.                                                   |
-| `.proceedAfterFailure()`    | `() => this`                                          | Keep the build going if this target fails.                                                         |
-| `.always()`                 | `() => this`                                          | Run even after the build has failed; waits for dependencies to settle, not succeed.                |
-| `.unlisted()`               | `() => this`                                          | Hide the target from `--list`/`--help`.                                                            |
-| `.readOnly()`               | `() => this`                                          | Advertise the target as query-only over [MCP](./mcp.md) (`readOnlyHint`).                          |
-| `.cacheKey(fn)`             | `(fn: () => string \| Promise<string>) => this`       | Extra (non-file) input to the cache fingerprint.                                                   |
-| `.produces(...paths)`       | `(...p: PathLike[]) => this`                          | Declare artifact paths this target produces.                                                       |
-| `.consumes(...targets)`     | `(...t: Target[]) => this`                            | Depend on targets and use their `produces` artifacts.                                              |
-| `.whenSkipped(behavior)`    | `("run-dependencies" \| "skip-dependencies") => this` | On skip, also skip exclusive deps.                                                                 |
-| `.timeout(ms)`              | `(ms: number) => this`                                | Fail the body if it runs longer than `ms` (per attempt).                                           |
-| `.retry(times, delayMs?)`   | `(times: number, delayMs?: number) => this`           | Retry the body on failure, optionally pausing between.                                             |
-| `.validateBefore(...v)`     | `(...v: Validation[]) => this`                        | Run checks before the body; a throw skips it and fails.                                            |
-| `.validateAfter(...v)`      | `(...v: Validation[]) => this`                        | Run checks after a successful body; a throw fails it.                                              |
-| `.recoverWith(...r)`        | `(...r: Remediation[]) => this`                       | On failure, hand it to a remediation that can re-run the body ([self-healing](./self-healing.md)). |
-| `.recoverAttempts(n)`       | `(n: number) => this`                                 | Bound how many fix-then-rerun cycles are tried (default 1).                                        |
-| `.partOf(group)`            | `(g: Group) => this`                                  | Join a [parallel batch](#group-and-partof).                                                  |
-| `.dryRunnable()`            | `() => this`                                          | Run this body under `--dry-run`, with `$` in echo mode (others stay skipped).                        |
-| `.lock(configure)`          | `(c: (s: LockSettings) => LockSettings) => this`      | Hold a [cross-run lock](./locks.md) while it runs; a second run wanting the key fails or waits.      |
-| `.waitsFor(configure)`      | `(c: (s: WaitSettings) => WaitSettings) => this`      | A gate with no body: [suspend the run](./orchestration.md) until an external event, then resume.     |
-| `.onCancel(target)`         | `(t: Target \| (() => Target)) => this`               | [Compensation](./orchestration.md#cancellation--compensation--oncancel) run if this target succeeded and the run is later cancelled. |
-| `.forEach(items, stages, c?)` | `(items, (item) => Record<string, Target>, c?) => this` | [Fan out](./orchestration.md#fan-out-over-a-list--foreach) a pipeline over a runtime list.                            |
+| Method                        | Signature                                                          | Purpose                                                                                                                              |
+| ----------------------------- | ------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------ |
+| `.description(text)`          | `(s: string) => this`                                              | Summary shown in `--list`.                                                                                                           |
+| `.dependsOn(...targets)`      | `(...t: Target[]) => this`                                         | Hard prerequisites; run first, transitively.                                                                                         |
+| `.executes(fn)`               | `(fn: (ctx) => unknown \| Promise<unknown>) => this`               | The body. May be async; its return is ignored, so `() => DenoTasks.lint()` needs no async wrapper.                                   |
+| `.effect(name, fn)`           | `(name: string, fn: (ctx) => unknown \| Promise<unknown>) => this` | A crash-durable side effect: its intent is recorded before it runs, and it is re-driven after an unclean exit.                       |
+| `.before(...targets)`         | `(...t: Target[]) => this`                                         | Soft ordering: run before these _if both are planned_.                                                                               |
+| `.after(...targets)`          | `(...t: Target[]) => this`                                         | Soft ordering: run after these _if both are planned_.                                                                                |
+| `.triggers(...targets)`       | `(...t: Target[]) => this`                                         | Pull these into the plan and run them _after_ this.                                                                                  |
+| `.dependentFor(...targets)`   | `(...t: Target[]) => this`                                         | Reverse of `dependsOn`: run this _before_ those.                                                                                     |
+| `.inputs(...paths)`           | `(...p: PathLike[]) => this`                                       | Cache inputs: skip the target when these are unchanged.                                                                              |
+| `.outputs(...paths)`          | `(...p: PathLike[]) => this`                                       | Cache outputs: a hit also requires these to still exist.                                                                             |
+| `.onlyWhen(condition)`        | `(c: (ctx?) => boolean \| Promise<boolean>) => this`               | Run only when the condition holds, else skip. The condition may read `ctx.plan()`.                                                   |
+| `.requires(...params)`        | `(...p: Parameter[]) => this`                                      | Fail the target unless these parameters are set.                                                                                     |
+| `.proceedAfterFailure()`      | `() => this`                                                       | Keep the build going if this target fails.                                                                                           |
+| `.always()`                   | `() => this`                                                       | Run even after the build has failed; waits for dependencies to settle, not succeed.                                                  |
+| `.unlisted()`                 | `() => this`                                                       | Hide the target from `--list`/`--help`.                                                                                              |
+| `.readOnly()`                 | `() => this`                                                       | Advertise the target as query-only over [MCP](./mcp.md) (`readOnlyHint`).                                                            |
+| `.cacheKey(fn)`               | `(fn: () => string \| Promise<string>) => this`                    | Extra (non-file) input to the cache fingerprint.                                                                                     |
+| `.produces(...paths)`         | `(...p: PathLike[]) => this`                                       | Declare artifact paths this target produces.                                                                                         |
+| `.consumes(...targets)`       | `(...t: Target[]) => this`                                         | Depend on targets and use their `produces` artifacts.                                                                                |
+| `.whenSkipped(behavior)`      | `("run-dependencies" \| "skip-dependencies") => this`              | On skip, also skip exclusive deps.                                                                                                   |
+| `.timeout(ms)`                | `(ms: number) => this`                                             | Fail the body if it runs longer than `ms` (per attempt).                                                                             |
+| `.retry(times, delayMs?)`     | `(times: number, delayMs?: number) => this`                        | Retry the body on failure, optionally pausing between.                                                                               |
+| `.validateBefore(...v)`       | `(...v: Validation[]) => this`                                     | Run checks before the body; a throw skips it and fails.                                                                              |
+| `.validateAfter(...v)`        | `(...v: Validation[]) => this`                                     | Run checks after a successful body; a throw fails it.                                                                                |
+| `.recoverWith(...r)`          | `(...r: Remediation[]) => this`                                    | On failure, hand it to a remediation that can re-run the body ([self-healing](./self-healing.md)).                                   |
+| `.recoverAttempts(n)`         | `(n: number) => this`                                              | Bound how many fix-then-rerun cycles are tried (default 1).                                                                          |
+| `.partOf(group)`              | `(g: Group) => this`                                               | Join a [parallel batch](#group-and-partof).                                                                                          |
+| `.dryRunnable()`              | `() => this`                                                       | Run this body under `--dry-run`, with `$` in echo mode (others stay skipped).                                                        |
+| `.lock(configure)`            | `(c: (s: LockSettings) => LockSettings) => this`                   | Hold a [cross-run lock](./locks.md) while it runs; a second run wanting the key fails or waits.                                      |
+| `.waitsFor(configure)`        | `(c: (s: WaitSettings) => WaitSettings) => this`                   | A gate with no body: [suspend the run](./orchestration.md) until an external event, then resume.                                     |
+| `.onCancel(target)`           | `(t: Target \| (() => Target)) => this`                            | [Compensation](./orchestration.md#cancellation--compensation--oncancel) run if this target succeeded and the run is later cancelled. |
+| `.forEach(items, stages, c?)` | `(items, (item) => Record<string, Target>, c?) => this`            | [Fan out](./orchestration.md#fan-out-over-a-list--foreach) a pipeline over a runtime list.                                           |
 
 `dependsOn` pulls targets into the plan; `before`/`after` only reorder targets
 that are _already_ in the plan — they never pull new targets in.
@@ -76,6 +76,54 @@ deploy = target()
 [`@zuke/ai`](https://jsr.io/@zuke/ai) ships AI reviewers
 (`securityReviewer(...)`, …) that implement `Validation` — define one fluently
 and attach it the same way to gate the build on a model-assessed security score.
+
+A validation may also have a **`preflight(ctx)`**: the check that decides
+whether the run may happen at all. The executor calls it once per run, for every
+validation in the plan, **before any target starts** — a dependency included —
+and before the run record exists; a throw refuses the run and nothing executes.
+Most validations have nothing to decide that early; it is the seam for gates
+such as who may start a comment-triggered run. `zuke <target> --preflight` runs
+only this phase and executes no target, so a workflow can ask "may this run?" in
+a step that holds no secrets — missing parameters do not fail it — before the
+step that does. A dry run skips it.
+
+A before or after validation also gets **`ctx.peers`**: the whole list it was
+attached in, in the order it runs, itself included. Validations that publish
+together use it to find each other without the build wiring them up — the
+`@zuke/ai` reviewers side by side in one list post a single combined comment,
+posted by the last of them. A `.validateDuring(...)` check gets no peers.
+
+#### Checks while the body runs — `.validateDuring()`
+
+A long body — a canary bake, a soak test — can be watched while it runs, so a
+check that goes red stops it at once instead of reporting at the end:
+
+```ts
+bake = target()
+  .executes((ctx) => soak(ctx.signal))
+  .validateDuring((s) => s.every("1m").check(errorRate, healthProbe));
+```
+
+- **Rounds.** Every interval the checks run in order, with the context the other
+  validations get — the target's name and the run's redactor — plus a signal.
+  The first round runs one interval after the body starts; a slow round delays
+  the next rather than overlapping it.
+- **A failure stops the body.** The first check to throw fails the target with
+  its error. The body's `ctx.signal` fires and its `$` commands are stopped, and
+  the target does not wait for a body that ignores the signal. The run itself is
+  not cancelled, so `.onFailure(...)` decides what the failure means, and
+  `.retry(...)` does not re-run a body a check stopped.
+- **A verdict at the finish still counts.** Once the body settles no new check
+  starts. If it succeeded, a check still running is awaited, and if it goes red
+  the target fails; if the body failed, the check is abandoned.
+- **Checks get a signal.** The context's `signal` in a `.validateDuring` check
+  aborts when the target ends or the run is cancelled — pass it to `fetch` — and
+  a `$` command the check runs is stopped with it. A check that ignores it never
+  holds a cancelled run.
+- **Scope.** The checks never run under a dry run, and are resolved when the
+  target starts, so the lambda can read `this.<param>.value`. A missing interval
+  or check list, or an interval longer than the longest timer (about 24 days),
+  fails the target with guidance before the body runs.
 
 ### `group()` and `.partOf()`
 
@@ -200,13 +248,14 @@ deploy = target()
   A dependency parked at a wait is the exception — it has not settled, so the
   target waits for the resume.
 - **`.onCancel(target | () => target)`** — register a **compensation** that
-  undoes this target when the run is [cancelled](./orchestration.md#cancellation--compensation--oncancel).
-  It runs only if this target **succeeded** — or, on a
+  undoes this target when the run is
+  [cancelled](./orchestration.md#cancellation--compensation--oncancel). It runs
+  only if this target **succeeded** — or, on a
   [degraded record](./state.md#degraded-records), if its success cannot be ruled
   out; on cancel, compensations run in reverse order. The compensation body's
-  `ctx.state` exposes _this_ target's
-  persisted metadata (so a rollback reads what the deploy recorded). Use the
-  thunk form to reference a compensation declared below. Needs a state store.
+  `ctx.state` exposes _this_ target's persisted metadata (so a rollback reads
+  what the deploy recorded). Use the thunk form to reference a compensation
+  declared below. Needs a state store.
 - **`.unlisted()`** — hide a helper target from `--list`/`--help`; it can still
   be run by name or depended on.
 - **`.readOnly()`** — mark a target query-only for [MCP](./mcp.md): its run tool
@@ -247,7 +296,7 @@ static prefix, and does not follow symlinked directories. Supported syntax: `*`
 brace alternation `{a,b}`.
 
 ```ts
-import { glob } from "jsr:@zuke/core";
+import { glob } from "@zuke/core";
 
 format = target().executes(async () => {
   const sources = await glob("src/**/*.ts");
@@ -268,8 +317,8 @@ plan before committing to it.
 
 **Deep dry-run — `.dryRunnable()`.** A target marked `.dryRunnable()` has its
 **body run** under `--dry-run` (instead of being skipped), with the `$` shell in
-**echo mode**: each command prints its resolved argv and returns an empty success
-**without spawning a process**. Use it to preview the exact commands a
+**echo mode**: each command prints its resolved argv and returns an empty
+success **without spawning a process**. Use it to preview the exact commands a
 shell-orchestration target would execute:
 
 ```ts
@@ -294,7 +343,7 @@ async `assertFileExists(path)` / `assertDirectoryExists(path)` check the
 filesystem. All throw an `AssertionError`.
 
 ```ts
-import { assert, assertExists, assertFileExists } from "jsr:@zuke/core";
+import { assert, assertExists, assertFileExists } from "@zuke/core";
 
 const token = assertExists(Deno.env.get("TOKEN"), "TOKEN is required");
 assert(this.environment.value !== "", "environment must be set");
@@ -313,35 +362,35 @@ an `absolutePath(...)` or a plain string both work.
 <!-- check -->
 
 ```ts
-import { FileTasks } from "jsr:@zuke/core";
+import { FileTasks } from "@zuke/core";
 
 await FileTasks.cleanDirectory("dist"); // empty it if it exists
 await FileTasks.createDirectory("dist/assets"); // mkdir -p
 await FileTasks.copy("static", "dist/static"); // recursive
 ```
 
-| Method                                  | Purpose                                                                                                                                                                                     |
-| --------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `exists(path)`                          | Whether `path` exists.                                                                                                                                                                      |
-| `createDirectory(path, { recursive? })` | Create a directory; parents by default (`recursive: true`). A recursive create over an existing directory is a no-op.                                                                       |
-| `cleanDirectory(path)`                  | Empty a directory, leaving it in place. A no-op if `path` is missing (it is _not_ created).                                                                                                 |
-| `remove(path, { recursive? })`          | Delete `path`, tolerating a missing target like `rm -f`. Returns `true` if something was removed, `false` if it was already absent. Pass `recursive: true` to remove a non-empty directory. |
-| `copy(source, dest, { overwrite? })`    | Copy a file or directory tree (recursive). `overwrite` defaults to `true`.                                                                                                                  |
-| `move(source, dest)`                    | Move (rename) a path.                                                                                                                                                                       |
-| `readText(path)`                        | Read a file's UTF-8 content.                                                                                                                                                                |
-| `writeText(path, content)`              | Write a file, creating or truncating it.                                                                                                                                                    |
-| `readJson<T>(path)`                     | Read and `JSON.parse` a file, typed as `T`.                                                                                                                                                 |
+| Method                                     | Purpose                                                                                                                                                                                                                                                                                                                                                                         |
+| ------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `exists(path)`                             | Whether `path` exists.                                                                                                                                                                                                                                                                                                                                                          |
+| `createDirectory(path, { recursive? })`    | Create a directory; parents by default (`recursive: true`). A recursive create over an existing directory is a no-op.                                                                                                                                                                                                                                                           |
+| `cleanDirectory(path)`                     | Empty a directory, leaving it in place. A no-op if `path` is missing (it is _not_ created).                                                                                                                                                                                                                                                                                     |
+| `remove(path, { recursive? })`             | Delete `path`, tolerating a missing target like `rm -f`. Returns `true` if something was removed, `false` if it was already absent. Pass `recursive: true` to remove a non-empty directory.                                                                                                                                                                                     |
+| `copy(source, dest, { overwrite? })`       | Copy a file or directory tree (recursive). `overwrite` defaults to `true`.                                                                                                                                                                                                                                                                                                      |
+| `move(source, dest)`                       | Move (rename) a path.                                                                                                                                                                                                                                                                                                                                                           |
+| `readText(path)`                           | Read a file's UTF-8 content.                                                                                                                                                                                                                                                                                                                                                    |
+| `writeText(path, content)`                 | Write a file, creating or truncating it.                                                                                                                                                                                                                                                                                                                                        |
+| `readJson<T>(path)`                        | Read and `JSON.parse` a file, typed as `T`.                                                                                                                                                                                                                                                                                                                                     |
 | `symlink(target, path, { force?, type? })` | Create a symbolic link at `path` pointing to `target`, which is stored verbatim (a relative target resolves against the link's own directory). `force: true` replaces an entry already there atomically (link at a temp name, rename over the path), the `ln -sfn` case — a directory at the path is never replaced; `type: "dir"` is required for a directory link on Windows. |
-| `readLink(path)`                        | The target stored in the symbolic link at `path`. Throws if `path` is not a link.                                                                                                          |
-| `homeDirectory()`                       | The current user's home directory (`$HOME`, or `$USERPROFILE` on Windows); throws a clear error if neither is set.                                                                          |
+| `readLink(path)`                           | The target stored in the symbolic link at `path`. Throws if `path` is not a link.                                                                                                                                                                                                                                                                                               |
+| `homeDirectory()`                          | The current user's home directory (`$HOME`, or `$USERPROFILE` on Windows); throws a clear error if neither is set.                                                                                                                                                                                                                                                              |
 
 The mutating operations are deliberately **missing-target-tolerant**, so the
 common `clean`/`package` sequence stays idempotent: `cleanDirectory` and
 `remove` no-op on an absent path instead of throwing, and a recursive
-`createDirectory` is safe to call repeatedly. `symlink` joins that set only
-with `force: true` — without it, linking onto an occupied path throws, which is
-what `Deno.symlink` does and what a caller who did not expect an existing entry
-wants to hear about.
+`createDirectory` is safe to call repeatedly. `symlink` joins that set only with
+`force: true` — without it, linking onto an occupied path throws, which is what
+`Deno.symlink` does and what a caller who did not expect an existing entry wants
+to hear about.
 
 ```ts
 clean = target().executes(async () => {
@@ -350,18 +399,34 @@ clean = target().executes(async () => {
 });
 ```
 
-### HTTP — `httpDownload()` / `httpText()` / `httpJson()`
+### HTTP — `httpDownload()` / `httpText()` / `httpJson()` / `redactUrl()` / `redactUrls()`
 
 Fetch over HTTP from a build script, built on the platform `fetch`.
 `httpDownload(url, dest)` streams a URL to a file; `httpText(url)` and
 `httpJson(url)` return the body. All accept `{ headers, fetch }` (the `fetch`
 seam makes them unit-testable) and throw an `HttpError` (carrying `.status`) on
-a non-2xx response.
+a non-2xx response. The `HttpError`'s message and `.url` pass the URL through
+`redactUrl`, which is exported for your own messages too, along with
+`redactUrls` for the URLs inside a whole message, such as a failed request's
+error:
+
+- **What gets removed:** `user:password@` is stripped. Credential-looking
+  parameters (`token`, `key`, `secret`, `pass`, `sig`, `code`, …) are masked in
+  the query and in the fragment. A parameter whose value hides a credential of
+  its own — a `redirect_uri` carrying userinfo or a token, even encoded, or any
+  value with an `@` — is masked whole.
+- **It fails closed:** text the URL parser rejects is scrubbed by the same rules
+  rather than returned as it came. Neither function throws, and both run in time
+  linear in their input.
+- **What it cannot see:** a secret in the URL _path_ looks like any other path
+  segment, so declare such a value as a secret parameter instead.
+- **Order matters:** run the build's secret redactor first. These functions
+  re-serialise the URL, which can change how a secret is spelled.
 
 <!-- check -->
 
 ```ts
-import { httpDownload, httpJson } from "jsr:@zuke/core";
+import { httpDownload, httpJson } from "@zuke/core";
 
 await httpDownload("https://example.com/tool.tar.gz", ".zuke/tool.tar.gz");
 const release = await httpJson<{ tag_name: string }>(
@@ -391,7 +456,7 @@ with `.from(...)` (see [Secrets](./secrets.md)).
 <!-- check -->
 
 ```ts
-import { AnnounceTasks, Build, parameter, target } from "jsr:@zuke/core";
+import { AnnounceTasks, Build, parameter, target } from "@zuke/core";
 
 class MyBuild extends Build {
   slack = parameter("Slack incoming-webhook URL").secret().required();
@@ -467,13 +532,14 @@ Pack build artifacts without any dependency. `gzip(bytes)`/`gunzip(bytes)` wrap
 the platform `CompressionStream`; `tar(entries)`/`untar(archive)` read and write
 the POSIX `ustar` format in memory; and the file helpers
 `createTarGzip(files, dest, { cwd })` / `extractTarGzip(src, destDir)` produce
-and unpack `.tar.gz` archives. Entry names are limited to 100 bytes and archives
-use a fixed mtime, so output is reproducible.
+and unpack `.tar.gz` archives, and `extractTarXz(src, destDir)` unpacks a
+`.tar.xz` with a built-in LZMA2 decoder. Entry names are limited to 100 bytes
+and archives use a fixed mtime, so output is reproducible.
 
 <!-- check -->
 
 ```ts
-import { createTarGzip } from "jsr:@zuke/core";
+import { createTarGzip } from "@zuke/core";
 
 await createTarGzip(["dist/app.js", "README.md"], "artifact.tar.gz");
 ```
@@ -526,7 +592,7 @@ what else you need:
 <!-- check -->
 
 ```ts
-import { Build, cicd, target } from "jsr:@zuke/core";
+import { Build, cicd, target } from "@zuke/core";
 
 class MyBuild extends Build {
   ci = cicd({ provider: "github" }); // runs ./zuke on push/PR to main
@@ -587,18 +653,98 @@ runs only its own target (`./zuke <target>`); its dependencies run in their own
 jobs, so pair fan-out with the [remote cache](./cli.md#remote-cache) (configured
 here via `env`) to restore their outputs instead of rebuilding them. Pass
 `fanOut: true` for the defaults, or `FanOutOptions` to set the per-job
-`command`, `setupSteps` (default: none — the prelude action already checks
-out), `runsOn`, `env`, or
-`includeUnlisted`. The `pipeline` field still supplies the workflow-level
-`name`, `triggers`, `permissions`, and `concurrency`. Targets with no body, and
-`unlisted` ones, are omitted. `fanOutPipeline(targets, base, options)` exposes
-the same expansion directly.
+`command`, `setupSteps` (default: none — the prelude action already checks out),
+`runsOn`, `env`, or `includeUnlisted`. The `pipeline` field still supplies the
+workflow-level `name`, `triggers`, `permissions`, and `concurrency`. Targets
+with no body, and `unlisted` ones, are omitted.
+`fanOutPipeline(targets, base, options)` exposes the same expansion directly.
 
 The model is a portable subset: a `run` step (a shell command) maps to every
 provider; a `uses` step (a GitHub Action) renders only for GitHub and is skipped
 elsewhere, since GitLab and Azure check out the repo automatically. `runsOn` is
 interpreted per provider (a runner label, a Docker image, or a `vmImage`); when
-a matrix defines `os`, GitHub runs on it automatically.
+every matrix combination sets `os`, GitHub runs on it automatically.
+
+#### Deployments, job outputs, sparse matrices, and path filters
+
+A deploy pipeline needs a few things beyond steps, and each is a typed field on
+a job (`pipeline.jobs`) or an invocation (`invokes`), so the deployment YAML
+lives in the build with everything else:
+
+```ts
+ci = cicd({
+  provider: "github",
+  pipeline: {
+    triggers: {
+      push: ["main"],
+      pushPaths: { paths: ["website/**"] }, // or { pathsIgnore: [...] }
+      pullRequest: ["main"],
+      pullRequestPaths: { paths: ["website/**"] },
+    },
+  },
+  invokes: [
+    {
+      target: this.test,
+      failFast: false,
+      // Exactly these combinations — not every Node × OS pairing.
+      matrixInclude: [
+        { node: "24", os: "ubuntu-latest" },
+        { node: "26", os: "ubuntu-latest" },
+        { node: "26", os: "macos-latest" },
+      ],
+    },
+    {
+      target: this.deploy,
+      permissions: { pages: "write", "id-token": "write" },
+      environment: {
+        name: "github-pages",
+        url: "${{ steps.deployment.outputs.page_url }}",
+      },
+      outputs: { "page-url": "${{ steps.deployment.outputs.page_url }}" },
+    },
+    {
+      target: this.smoke, // dependsOn(this.deploy), so it needs the deploy job
+      env: { DEPLOYMENT_URL: "${{ needs.deploy.outputs.page-url }}" },
+    },
+  ],
+});
+```
+
+- **`environment`** — a name, or `{ name, url }` — is the deployment environment
+  the job runs in: what protection rules, required reviewers and
+  environment-scoped secrets attach to (not `env`, which is variables). It
+  grants nothing by itself; the provider still enforces the environment's rules.
+- **`outputs`** hands values to the jobs that `need` this one, read as
+  `${{ needs.<job>.outputs.<name> }}`. Expressions render verbatim.
+- **`matrixInclude` / `matrixExclude`** make a matrix sparse, with GitHub's
+  semantics: `exclude` rows (partial matches over the `matrix` axes) are removed
+  first, then each `include` row extends every combination it agrees with on the
+  original axes, or becomes a combination of its own. With no `matrix` axes the
+  include rows _are_ the matrix. An exclude key that is not an axis, a matrix
+  that leaves nothing to run, and `os` set in only some rows are errors.
+- **`pushPaths` / `pullRequestPaths`** narrow one trigger each to changes under
+  the given paths (`paths`) or outside them (`pathsIgnore` — one or the other,
+  never both). Each requires the trigger it narrows. A workflow the filter skips
+  never reports, so a **required** status check it would have produced stays
+  pending and blocks the merge — filter only workflows whose checks are not
+  required, or decide inside the run (e.g. `--affected`) instead.
+
+Provider support follows what each platform can actually express, and a field a
+provider cannot carry is an **error**, never silently dropped — losing an
+environment would lose its approval gate, and losing a path filter would run on
+every change:
+
+| Field                   | GitHub         | GitLab                | Azure                  | Bitbucket           |
+| ----------------------- | -------------- | --------------------- | ---------------------- | ------------------- |
+| `environment`           | `environment`  | `environment`         | error                  | error               |
+| `outputs`               | `outputs`      | error                 | error                  | error               |
+| `matrixInclude/Exclude` | native         | expanded combinations | named configurations   | ignored (no matrix) |
+| `paths`                 | `paths`        | `rules: changes:`     | `trigger`/`pr` `paths` | error               |
+| `pathsIgnore`           | `paths-ignore` | error                 | `paths: exclude`       | error               |
+
+GitLab and Azure receive a sparse matrix already expanded into exactly the
+combinations GitHub would run, so one declaration means the same jobs on every
+provider. Path patterns pass through in each provider's own glob syntax.
 
 For one-off rendering without the build wiring, `generateCi(pipeline, provider)`
 returns the YAML string directly (pass an empty pipeline,
@@ -626,25 +772,25 @@ ci = cicd({
 ```
 
 GitHub (and Azure) cron is **UTC-only**, so a `tz` entry is compiled to the UTC
-cron(s) that fire at the intended wall-clock. A daylight-saving zone uses two UTC
-offsets across the year, so it compiles to **two** crons (one per offset) plus a
-generated **guard job** (`zuke-schedule-guard`) that every other job waits on and
-runs only when the current wall-clock in the zone matches — so the "wrong"
-offset's firing is skipped half the year. A fixed-offset zone (or plain UTC, when
-`tz` is omitted) is a single cron with no guard.
+cron(s) that fire at the intended wall-clock. A daylight-saving zone uses two
+UTC offsets across the year, so it compiles to **two** crons (one per offset)
+plus a generated **guard job** (`zuke-schedule-guard`) that every other job
+waits on and runs only when the current wall-clock in the zone matches — so the
+"wrong" offset's firing is skipped half the year. A fixed-offset zone (or plain
+UTC, when `tz` is omitted) is a single cron with no guard.
 
 The grammar is a deliberate subset: numeric minute/hour/day fields (single
 values, comma lists, `a-b` ranges, slash steps), and the timezone must have a
 whole-hour UTC offset. Anything outside that — a named field, a fractional-hour
 zone, or a day-constrained schedule that would cross midnight once shifted to
-UTC — is a friendly error telling you to write the UTC cron directly. Offsets are
-sampled from a pinned reference year, so `generate-ci --check` output never churns
-with the calendar.
+UTC — is a friendly error telling you to write the UTC cron directly. Offsets
+are sampled from a pinned reference year, so `generate-ci --check` output never
+churns with the calendar.
 
 Provider support mirrors each platform's capability: **GitHub** gets the full
-treatment (UTC crons + DST guard); **Azure** emits native `schedules:` for UTC or
-fixed-offset zones (a DST zone errors — the guard is GitHub-only); **GitLab** and
-**Bitbucket** configure schedules in their web UI rather than in-file, so a
+treatment (UTC crons + DST guard); **Azure** emits native `schedules:` for UTC
+or fixed-offset zones (a DST zone errors — the guard is GitHub-only); **GitLab**
+and **Bitbucket** configure schedules in their web UI rather than in-file, so a
 `schedule` trigger is ignored for them.
 
 ### Host detection — `isCI()` / `ciHost()` / `operatingSystem()`
@@ -666,7 +812,7 @@ on `"macos"` rather than the raw `"darwin"` (other Unixes report as `"linux"`).
 [tool download URLs](./installing-tools.md#cross-platform-url-resolution).
 
 ```ts
-import { hostPlatform, operatingSystem } from "jsr:@zuke/core";
+import { hostPlatform, operatingSystem } from "@zuke/core";
 
 publish = target().onlyWhen(() => operatingSystem() === "linux").executes(
   /* … */
@@ -684,7 +830,7 @@ case resolves the bare name on `PATH` instead. Prefer
 rare spawn it does not cover.
 
 ```ts
-import { denoExecutable } from "jsr:@zuke/core";
+import { denoExecutable } from "@zuke/core";
 
 const deno = new Deno.Command(denoExecutable(), { args: ["doc", "./mod.ts"] });
 ```
@@ -726,9 +872,9 @@ settles, with its final status. For exporting rather than observing, prefer a
 `suspended` distinguishes a run parked at a [gate](./orchestration.md) from one
 that finished.
 
-**The other overridable methods.** Beyond the hooks and the ordering seams below,
-`Build` exposes one override per subsystem, each documented on its own page:
-[`stateStore()`](./state.md), [`deadline()`](./state.md),
+**The other overridable methods.** Beyond the hooks and the ordering seams
+below, `Build` exposes one override per subsystem, each documented on its own
+page: [`stateStore()`](./state.md), [`deadline()`](./state.md),
 [`remoteCache()`](./caching.md), [`recoverWith()`](./self-healing.md),
 [`registry()`](./registry.md), [`mcpAuth()`](./mcp.md),
 [`mcpIdentity()`](./mcp.md), [`mcpAuthorize()`](./mcp.md#roles) and
@@ -754,13 +900,14 @@ class Monorepo extends Build {
 ```
 
 **Lazy ordering — `override orderWith(targets)`.** Same edges, but **async and
-resolved per run**: use it when the ordering must be *loaded* at run time — read
+resolved per run**: use it when the ordering must be _loaded_ at run time — read
 the monorepo's `dependency-graph.json`, hit an API — rather than declared
 statically. Return the same `[before, after]` pairs; they merge with
 `extraEdges`, and share its rules (endpoints outside the run's set are ignored,
-cycles reported). Both are honoured by a run and by `zuke cancel`'s reverse-order
-compensation walk, but — being resolved only when a run plans — neither shows in
-the static `graph` / `--list` views nor in `cicd()`-generated CI.
+cycles reported). Both are honoured by a run and by `zuke cancel`'s
+reverse-order compensation walk, but — being resolved only when a run plans —
+neither shows in the static `graph` / `--list` views nor in `cicd()`-generated
+CI.
 
 ```ts
 override async orderWith(t: Map<string, Target>): Promise<OrderingEdge[]> {
@@ -774,8 +921,8 @@ override async orderWith(t: Map<string, Target>): Promise<OrderingEdge[]> {
 
 The `targets` map holds only **class-field targets**. A
 [`.forEach()`](./orchestration.md#fan-out-over-a-list--foreach) fan-out's
-per-item sub-targets are materialised only while a run executes, so
-they are never in `targets` and **per-item ordering across a fan-out cannot be
+per-item sub-targets are materialised only while a run executes, so they are
+never in `targets` and **per-item ordering across a fan-out cannot be
 expressed** with `orderWith`/`extraEdges` (`t.get("parent[item].stage")` is
 `undefined`). Order whole fan-out **waves** instead — one `.forEach()` per wave,
 the waves chained with `.dependsOn` — so ordering lives between class-field
@@ -798,9 +945,9 @@ run(
 Instantiates the build, discovers targets, validates the graph, parses CLI
 arguments (`options.args`, defaulting to `Deno.args`), dispatches to the
 executor with any registered `options.plugins` and `options.renderer` (see
-[Console output](./console.md)), and calls `Deno.exit` with `0`
-on success or `1` on failure. This is the standard entry point at the bottom of
-`zuke.ts`. See [Extending Zuke](./extending.md) for the plugin contract.
+[Console output](./console.md)), and calls `Deno.exit` with `0` on success or
+`1` on failure. This is the standard entry point at the bottom of `zuke.ts`. See
+[Extending Zuke](./extending.md) for the plugin contract.
 
 ## Gotchas
 

@@ -9,8 +9,8 @@
  * Only the provider and API key are required; everything else is defaulted.
  *
  * ```ts
- * import { Build, parameter, target } from "jsr:@zuke/core";
- * import { securityReviewer } from "jsr:@zuke/ai";
+ * import { Build, parameter, target } from "@zuke/core";
+ * import { securityReviewer } from "@zuke/ai";
  *
  * class Pipeline extends Build {
  *   key = parameter("Anthropic API key").secret().required();
@@ -69,4 +69,6 @@ export {
   aiReviewWorkflow,
   type AiReviewWorkflowSpec,
   ReviewCommandSettings,
+  type ReviewSecret,
 } from "./src/workflow.ts";
+export type { CommandRole } from "./src/callers.ts";

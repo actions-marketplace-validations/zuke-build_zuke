@@ -45,12 +45,17 @@ export interface CorePackage {
 export const TOOL_GROUPS: ToolGroup[] = [
   {
     category: "Runtimes & package managers",
-    blurb: "Install, run, and publish across every major JS toolchain.",
+    blurb: "Install, run, and publish across every major toolchain.",
     tools: [
       {
         name: "Deno",
         pkg: "@zuke/deno",
-        desc: "run, test, check, fmt, lint, coverage",
+        desc: "run, test, check, fmt, lint, coverage, Deno Deploy",
+      },
+      {
+        name: "Dart",
+        pkg: "@zuke/dart",
+        desc: "analyze, format, test, compile, pub",
       },
       {
         name: "Node",
@@ -123,6 +128,11 @@ export const TOOL_GROUPS: ToolGroup[] = [
     category: "Frameworks & code generation",
     blurb: "Scaffold app frameworks and generate typed clients from a schema.",
     tools: [
+      {
+        name: "Flutter",
+        pkg: "@zuke/flutter",
+        desc: "analyze, test, build apps, pub",
+      },
       {
         name: "Nest",
         pkg: "@zuke/nest",
@@ -256,6 +266,11 @@ export const TOOL_GROUPS: ToolGroup[] = [
         pkg: "@zuke/kustomize",
         desc: "build, editSetImage",
       },
+      {
+        name: "Argo Rollouts",
+        pkg: "@zuke/argo-rollouts",
+        desc: "setImage, promote, abort, status",
+      },
     ],
   },
   {
@@ -266,6 +281,16 @@ export const TOOL_GROUPS: ToolGroup[] = [
         name: "gcloud",
         pkg: "@zuke/gcloud",
         desc: "auth, builds, Cloud Run, Artifact Registry, GKE, storage",
+      },
+      {
+        name: "AWS CLI",
+        pkg: "@zuke/aws",
+        desc: "S3, ECR, ECS, Lambda, CloudFormation, CloudWatch, secrets",
+      },
+      {
+        name: "Azure CLI",
+        pkg: "@zuke/az",
+        desc: "ACR, AKS, Container Apps, App Service, Key Vault, Monitor",
       },
       {
         name: "Terraform",
@@ -280,17 +305,49 @@ export const TOOL_GROUPS: ToolGroup[] = [
     blurb: "Script Git, GitHub, and publishing straight from your build.",
     tools: [
       {
+        name: "Chocolatey",
+        pkg: "@zuke/chocolatey",
+        desc: "choco, package rendering, publishing",
+      },
+      {
         name: "Git",
         pkg: "@zuke/git",
         desc: "commit, tag, push, merge-base, blame, gitInfo()",
       },
       { name: "GitHub CLI", pkg: "@zuke/gh", desc: "releases, PRs, workflows" },
+      {
+        name: "Homebrew",
+        pkg: "@zuke/homebrew",
+        desc: "brew, formula rendering, tap publishing",
+      },
       { name: "Husky", pkg: "@zuke/husky", desc: "install & manage git hooks" },
       { name: "JSR", pkg: "@zuke/jsr", desc: "publish, add, remove" },
       {
         name: "release-please",
         pkg: "@zuke/release-please",
         desc: "release PRs & GitHub releases",
+      },
+    ],
+  },
+  {
+    category: "Code signing & notarization",
+    blurb: "Sign and notarize macOS apps and Windows binaries from CI.",
+    tools: [
+      {
+        name: "Apple",
+        pkg: "@zuke/apple",
+        desc:
+          "xcodebuild, TestFlight, profiles, codesign, notarytool, keychains",
+      },
+      {
+        name: "Google Play",
+        pkg: "@zuke/google",
+        desc: "upload an app bundle to a Play track",
+      },
+      {
+        name: "SignPath",
+        pkg: "@zuke/signpath",
+        desc: "Authenticode signing, signtool verify",
       },
     ],
   },
@@ -319,6 +376,11 @@ export const CORE_PACKAGES: CorePackage[] = [
       "the global zuke command: setup, run targets, --list, graph, generate-ci",
   },
   {
+    name: "@zuke/engine",
+    desc:
+      "the engine for builds another SDK hosts — runs a zuke.json's sdk worker on core",
+  },
+  {
     name: "@zuke/cmd",
     desc: "the typed process layer the wrappers are built on",
   },
@@ -331,6 +393,21 @@ export const CORE_PACKAGES: CorePackage[] = [
     name: "@zuke/otel",
     desc:
       "OpenTelemetry export plugin — run & target spans over OTLP, joined across resume",
+  },
+  {
+    name: "@zuke/prometheus",
+    desc:
+      "typed Prometheus HTTP API client — queries, metadata, rules, probes, pluggable auth",
+  },
+  {
+    name: "@zuke/canary",
+    desc:
+      "canary releases — stage, step up, bake under analysis, promote, one rollback",
+  },
+  {
+    name: "@zuke/qr",
+    desc:
+      "QR codes for any data — a dependency-free encoder, terminal renderer & raw matrix",
   },
 ];
 

@@ -1,6 +1,7 @@
 {
   "workspace": [
     "packages/core",
+    "packages/engine",
     "packages/cmd",
     "packages/console",
     "packages/deno",
@@ -16,6 +17,9 @@
     "packages/kubectl",
     "packages/helm",
     "packages/kustomize",
+    "packages/argo-rollouts",
+    "packages/prometheus",
+    "packages/canary",
     "packages/oxlint",
     "packages/eslint",
     "packages/cspell",
@@ -46,8 +50,12 @@
     "packages/node",
     "packages/dprint",
     "packages/gcloud",
+    "packages/aws",
+    "packages/az",
     "packages/git",
     "packages/gh",
+    "packages/homebrew",
+    "packages/chocolatey",
     "packages/codecov",
     "packages/claude",
     "packages/codex",
@@ -57,7 +65,13 @@
     "packages/release-please",
     "packages/security",
     "packages/ai",
-    "packages/otel"
+    "packages/otel",
+    "packages/qr",
+    "packages/apple",
+    "packages/google",
+    "packages/signpath",
+    "packages/flutter",
+    "packages/dart"
   ],
   "imports": {
     "@std/yaml": "jsr:@std/yaml@^1.2.0"
@@ -67,7 +81,7 @@
     "test": "GITHUB_STEP_SUMMARY= deno test -A --frozen",
     "cov": "deno run -A --frozen zuke.ts coverage",
     "cov:report": "deno coverage cov_profile '--exclude=tests/'",
-    "check": "deno check --frozen zuke.ts build/*.ts tests/**/*.ts packages/*/mod.ts packages/*/src/**/*.ts packages/*/tests/**/*.ts",
+    "check": "deno check --frozen zuke.ts build tests packages examples",
     "fmt": "deno fmt",
     "fmt:check": "deno fmt --check",
     "lint": "deno lint",
@@ -81,9 +95,14 @@
       "build/",
       "tests/",
       "packages/",
-      "examples/"
+      "examples/",
+      "docs/",
+      "skills/",
+      ".github/",
+      "*.md"
     ],
     "exclude": [
+      "CHANGELOG.md",
       "packages/*/CHANGELOG.md",
       "examples/*/.github/",
       "examples/*/*.yml",

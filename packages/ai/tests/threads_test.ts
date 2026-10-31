@@ -80,6 +80,7 @@ function inputs(overrides: Partial<ThreadInputs> = {}): ThreadInputs {
     open: [],
     dismissed: [],
     dismissedPrior: new Set(),
+    refuted: [],
     fixed: [],
     fixedPrior: new Set(),
     upheld: new Map(),
@@ -131,6 +132,10 @@ Deno.test("an outcome marker parses its kind, and only a known kind", () => {
   assertEquals(
     parseOutcomeMarker(NAME, `${outcomeMarker(NAME, "aa11", "fixed")}\nx`),
     { id: "aa11", kind: "fixed" },
+  );
+  assertEquals(
+    parseOutcomeMarker(NAME, `${outcomeMarker(NAME, "aa11", "refuted")}\nx`),
+    { id: "aa11", kind: "refuted" },
   );
   assertEquals(
     parseOutcomeMarker(NAME, "<!-- zuke-ai-outcome:abc123:aa11:deleted -->"),
@@ -488,6 +493,84 @@ Deno.test("a fixed → reopened → fixed sequence still posts the third answer"
   assertEquals(plan.actions[0].outcome, "fixed");
 });
 
+Deno.test("a prior open finding refuted this round is answered and its thread resolved", () => {
+  const plan = planThreads(inputs({
+    refuted: [{ id: "aa11", reason: "the guard on line 9 blocks it" }],
+    threads: new Map([["aa11", thread("aa11", 501)]]),
+  }));
+  assertEquals(plan.actions, [{
+    id: "aa11",
+    kind: "reply",
+    outcome: "refuted",
+    rootId: 501,
+    reason: "the guard on line 9 blocks it",
+  }]);
+  assertEquals(plan.resolve, [{ id: "aa11", rootId: 501 }]);
+  assertEquals(plan.unresolve, []);
+});
+
+Deno.test("a finding refuted in an earlier round is left alone", () => {
+  // Sticky, like a dismissal from an earlier round: answered and resolved
+  // when it was decided, so re-answering every push would reopen nothing.
+  const plan = planThreads(inputs({
+    refuted: [{ id: "aa11", reason: "still holds", earlier: true }],
+    threads: new Map([[
+      "aa11",
+      thread("aa11", 501, {
+        outcomes: ["refuted"],
+      }),
+    ]]),
+  }));
+  assertEquals(plan.actions, []);
+  assertEquals(plan.resolve, []);
+});
+
+Deno.test("a finding refuted again with new evidence is answered again", () => {
+  // Not marked earlier: the input changed and the verifier refuted it afresh,
+  // so the thread hears the new reason rather than keeping a stale one.
+  const plan = planThreads(inputs({
+    refuted: [{ id: "aa11", reason: "the new guard on line 3" }],
+    threads: new Map([["aa11", thread("aa11", 501)]]),
+  }));
+  assertEquals(plan.actions.map((a) => a.reason), ["the new guard on line 3"]);
+  assertEquals(plan.resolve, [{ id: "aa11", rootId: 501 }]);
+});
+
+Deno.test("a refutation with no thread to answer in is skipped", () => {
+  const plan = planThreads(inputs({
+    refuted: [{ id: "aa11", reason: "never posted" }],
+  }));
+  assertEquals(plan.actions, []);
+  assertEquals(plan.resolve, []);
+});
+
+Deno.test("a refutation reason cannot launder markup into the thread body", () => {
+  const body = threadOutcomeBody(
+    "refuted",
+    "x --> <!-- zuke-ai-state:AAAA -->",
+  );
+  assertEquals(body.includes("<!--"), false);
+  assertEquals(body.includes("-->"), false);
+  assertEquals(body.includes("&lt;!-- zuke-ai-state:AAAA --&gt;"), true);
+});
+
+Deno.test("a refuted finding that comes back is reopened", () => {
+  // The thread was closed by a refutation; the finding is live again (the
+  // verifier confirmed it against the changed code), so the thread must say
+  // so and reopen rather than hide it behind a resolved thread.
+  const plan = planThreads(inputs({
+    open: [finding("aa11")],
+    threads: new Map([[
+      "aa11",
+      thread("aa11", 501, {
+        outcomes: ["refuted"],
+      }),
+    ]]),
+  }));
+  assertEquals(plan.actions.map((a) => a.outcome), ["reopened"]);
+  assertEquals(plan.unresolve, [{ id: "aa11", rootId: 501 }]);
+});
+
 Deno.test("a finding refuted by verify gets no thread activity", () => {
   // It is in neither `open` nor `dismissed` nor `fixed`, so nothing is
   // asserted about it — the reviewer declines to claim it was fixed.
@@ -542,7 +625,7 @@ Deno.test("a thread body cannot launder a state block past the reviewer's author
     id: "aa11",
     kind: "open",
     finding: finding("aa11", { title: payload, detail: payload }),
-  });
+  }, `🛡️ ${payload}`);
   assertEquals(body.includes("<!-- zuke-ai-state:"), false);
   assertEquals(body.includes("&lt;!--"), true);
   const outcome = threadOutcomeBody("dismissed", payload);
@@ -550,7 +633,14 @@ Deno.test("a thread body cannot launder a state block past the reviewer's author
 });
 
 Deno.test("every outcome renders a distinct human sentence", () => {
-  const kinds = ["fixed", "dismissed", "upheld", "reopened"] as const;
+  const kinds = [
+    "fixed",
+    "dismissed",
+    "accepted",
+    "upheld",
+    "reopened",
+    "refuted",
+  ] as const;
   const bodies = kinds.map((kind) => threadOutcomeBody(kind, "because"));
   assertEquals(new Set(bodies).size, kinds.length);
 });
@@ -618,9 +708,12 @@ Deno.test("a thread body renders with or without a detail", () => {
     id: "aa11",
     kind: "open",
     finding: finding("aa11", { detail: "the detail" }),
-  });
+  }, "🛡️ security review");
   assertEquals(withDetail.includes("the detail"), true);
-  const without = threadRootBody({ id: "aa11", kind: "open" });
+  const without = threadRootBody(
+    { id: "aa11", kind: "open" },
+    "🛡️ security review",
+  );
   assertEquals(without.includes("aa11"), true);
   assertEquals(without.includes("undefined"), false);
 });
@@ -743,4 +836,66 @@ Deno.test("the reviewer never argues with itself across mixed tokens", async () 
   );
   assertEquals(threads.get("aa11")?.outcomes, ["dismissed"]);
   assertEquals(threads.get("aa11")?.replies, []);
+});
+
+Deno.test("an acceptance this round is answered as accepted and resolved", () => {
+  const plan = planThreads(inputs({
+    dismissed: [{ id: "aa11", reason: "by design", accepted: true }],
+    threads: new Map([["aa11", thread("aa11", 7)]]),
+  }));
+  assertEquals(plan.actions[0].outcome, "accepted");
+  assertEquals(plan.actions[0].reason, "by design");
+  assertEquals(plan.resolve.map((t) => t.rootId), [7]);
+  // Already answered as accepted: not repeated, still resolved.
+  const again = planThreads(inputs({
+    dismissed: [{ id: "aa11", accepted: true }],
+    threads: new Map([["aa11", thread("aa11", 7, { outcomes: ["accepted"] })]]),
+  }));
+  assertEquals(again.actions, []);
+  assertEquals(again.resolve.map((t) => t.rootId), [7]);
+});
+
+Deno.test("an accepted outcome marker round-trips, and its body leads with ✅", () => {
+  const marker = outcomeMarker(NAME, "aa11", "accepted");
+  assertEquals(parseOutcomeMarker(NAME, marker), {
+    id: "aa11",
+    kind: "accepted",
+  });
+  assertEquals(
+    threadOutcomeBody("accepted", "by design"),
+    "✅ **Accepted by a maintainer** — by design",
+  );
+});
+
+Deno.test("a thread root names the accept command only when the reviewer takes commands", () => {
+  const action = {
+    id: "aa11",
+    kind: "open" as const,
+    finding: finding("aa11"),
+  };
+  const plain = threadRootBody(action, "🧹 generic review");
+  assertEquals(
+    plain.startsWith(
+      "🤖 **[Zuke](https://zuke.build) AI review** · 🧹 generic review — " +
+        "**high**",
+    ),
+    true,
+  );
+  assertEquals(plain.includes("accept"), false);
+  assertEquals(
+    plain.endsWith("Reply in this thread to contest it. `aa11`"),
+    true,
+  );
+  const withCommands = threadRootBody(
+    action,
+    "🧹 generic review",
+    "@zuke-build",
+  );
+  assertEquals(
+    withCommands.endsWith(
+      "Reply in this thread to contest it, or `@zuke-build accept <reason>` " +
+        "to accept it as intended. `aa11`",
+    ),
+    true,
+  );
 });

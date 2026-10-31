@@ -21,6 +21,19 @@ export interface ReservedCommand {
   readonly name: string;
   /** One-line summary, surfaced in help and completion. */
   readonly description: string;
+  /**
+   * Usage lines for the command, without the program name, e.g.
+   * `["graph [--output=html] [--no-open]"]`. Shown in the command's own help.
+   */
+  readonly usage?: readonly string[];
+  /**
+   * The full explanation, shown by `<command> --help` and nowhere else.
+   *
+   * Kept here beside the one-liner rather than in the help template, so the
+   * two cannot drift and the short form stays the only thing the main help
+   * has to print.
+   */
+  readonly detail?: string;
 }
 
 /** The `graph` command: render the dependency graph. */
@@ -58,44 +71,97 @@ export const OUTDATED_COMMAND = "outdated";
 
 /** Every reserved command, in help and completion order. */
 export const RESERVED_COMMANDS: readonly ReservedCommand[] = [
-  { name: GRAPH_COMMAND, description: "Show the dependency graph" },
+  {
+    name: GRAPH_COMMAND,
+    description: "Show the dependency graph",
+    usage: ["graph [--output=html] [--no-open]"],
+    detail:
+      "The default output is the terminal adjacency listing. --output=html writes an interactive page to .zuke/ and opens it in a browser.",
+  },
   {
     name: GENERATE_CI_COMMAND,
     description: "Write declared CI configuration files",
+    usage: ["generate-ci [--check]"],
+    detail:
+      "The files are the ones the build declares through cicd(). Running any target regenerates them too, so this command is for writing them on their own; --check verifies they are current instead.",
   },
-  { name: COMPLETIONS_COMMAND, description: "Print a shell-completion script" },
+  {
+    name: COMPLETIONS_COMMAND,
+    description: "Print a shell-completion script",
+    usage: ["completions <install|print> <bash|zsh|fish>"],
+    detail:
+      "Completes target names, commands and flags, for bash, zsh or fish.\n\n'print <shell>' writes the script to stdout for you to source, e.g. source <(./zuke completions print bash). 'install <shell>' writes it and wires it into your shell's startup automatically.",
+  },
   {
     name: MCP_COMMAND,
     description: "Run an MCP server over the build (for AI agents)",
+    usage: [
+      "mcp [--allow-run[=<globs>]] [--protect <globs>] [--confirm-destructive]",
+      "mcp --http <host:port> [--allowed-origin <origin>]",
+      "mcp --registry [--max-concurrent-runs <n>]",
+    ],
+    detail:
+      "Serves on stdio, exposing the build's targets as typed tools.\n\nRead-only by default: an agent may inspect the targets, parameters and graph, but not execute anything. The options below open that up in tiers, and they have deliberately different reach — --allow-run decides which targets may be invoked, and invoking one runs its dependencies, so allow-listing a target allows everything it does. See docs/mcp.md.",
   },
   {
     name: RESUME_COMMAND,
     description: "Resume a suspended run (or --check all suspended runs)",
+    usage: [
+      "resume <run-id> [--signal <name>] [--data <json>]",
+      "resume --check [<run-id>]",
+    ],
+    detail:
+      "A suspended run is one stopped at a .waitsFor() gate.\n\nExactly one resumer wins; the rest report that it was already resumed, so it is safe to wire to a webhook that may deliver twice. --check re-checks suspended runs instead, evaluating predicate waits and timeouts, which is the entry point for a cron schedule.",
   },
   {
     name: RUNS_COMMAND,
     description: "List, show, or prune persisted run records",
+    usage: [
+      "runs list [--status <s>] [--target <t>] [--since <iso>] " +
+      "[--initiator <n>] [--limit <n>] [--counts] [--json]",
+      "runs show <run-id> [--json]",
+      "runs prune [--keep <age>] [--keep-last <n>] [--dry-run]",
+    ],
+    detail:
+      "Reads the records the state store persisted.\n\n'list' prints one row per run, newest first. 'show <run-id>' reconstructs a run's full per-target status and metadata. 'prune' deletes old terminal records. All accept --json for tools. See docs/state.md.",
   },
   {
     name: CANCEL_COMMAND,
     description: "Cancel a run and run its compensations",
+    usage: ["cancel <run-id> [--actor <name>]"],
+    detail:
+      "A live run aborts; then the compensations of every target that had succeeded run in reverse order, and the record is marked cancelled.\n\nIdempotent: cancelling a finished run is a no-op. See docs/orchestration.md.",
   },
   {
     name: FORCE_COMMAND,
     description: "Force a target of a run to skipped or succeeded",
+    usage: [
+      "force <run-id> <target> --outcome skipped|succeeded [--reason <why>]",
+    ],
+    detail:
+      "Settles the target without running it, so a stuck run can move on.\n\n--outcome skipped takes the step off the plan; --outcome succeeded records that someone did it by hand, and a later cancel compensates it.",
   },
   {
     name: REGISTER_COMMAND,
     description: "Register this build in the build registry",
+    usage: ["register [--actor <name>] [--json]"],
+    detail:
+      "Records the build's targets, parameters and launch location, so a registry-backed MCP server can discover it.\n\nIdempotent, and excludes secrets. Writes to .zuke/builds unless ZUKE_REGISTRY_URL, ZUKE_REGISTRY_DIR or the build's registry() configures a store. See docs/registry.md.",
   },
   {
     name: DOC_COMMAND,
     description:
       "Print a package's API docs (deno doc), isolated from the repo",
+    usage: ["doc <spec>"],
+    detail:
+      "Runs 'deno doc <spec>' from an isolated empty directory, e.g. doc jsr:@zuke/deno.\n\nThe empty directory is the point. Run in a Node repo, deno doc otherwise resolves node_modules/@types and buries the API under type-resolution warnings; an empty cwd has nothing to resolve. A relative path such as ./mod.ts is resolved against the real working directory first.",
   },
   {
     name: OUTDATED_COMMAND,
     description: "Report JSR packages the lock resolves behind their latest",
+    usage: ["outdated [--update [<package>...]] [--exit-code]"],
+    detail:
+      "Compares what the lock resolves against each package's latest release, and with --update moves them up.\n\nIt needs the network, which is why it is a command rather than a line in --list: those stay offline and instant. It exists because a build whose specifiers are written inline, such as jsr:@zuke/git@^1, gets no signal from deno outdated at all — that reads manifests, and an inline specifier is in no manifest.",
   },
 ];
 
@@ -105,143 +171,368 @@ export interface BuiltinFlag {
   readonly name: string;
   /** One-line summary. */
   readonly description: string;
+  /**
+   * The reserved command this flag belongs to, when it only means something
+   * there — `--allow-run` is `mcp`'s, `--keep` is `runs`'s.
+   *
+   * This is what lets the main help list the handful of flags that apply to
+   * any run, and leave the rest to the command they qualify. Undefined means
+   * the flag is general.
+   */
+  readonly command?: string;
+  /** The full explanation, shown by the owning command's help. */
+  readonly detail?: string;
+  /**
+   * What the flag takes, as the help shows it after the name: ` <dep>` for a
+   * separate value, `[=N]` for an optional attached one. Undefined for a
+   * switch that takes nothing.
+   */
+  readonly value?: string;
+  /**
+   * Where the main help groups a general flag. Set on every flag without a
+   * {@link BuiltinFlag.command}; a command's own flags are listed by that
+   * command's help instead.
+   */
+  readonly section?: FlagSection;
 }
+
+/**
+ * The groups the main help sorts the general flags into: what changes how a
+ * run executes, what it records, how it prints, and what reports about the
+ * build instead of running it.
+ */
+export type FlagSection = "run" | "record" | "output" | "info";
+
+/** Each {@link FlagSection}'s heading, in the order the main help prints them. */
+export const FLAG_SECTIONS: ReadonlyArray<readonly [FlagSection, string]> = [
+  ["run", "Run options:"],
+  ["record", "Run record:"],
+  ["output", "Output:"],
+  ["info", "Info:"],
+];
 
 /** Every built-in option flag, in completion order. */
 export const BUILTIN_FLAGS: readonly BuiltinFlag[] = [
-  { name: "--list", description: "List all targets with descriptions" },
+  {
+    name: "--list",
+    section: "info",
+    description: "List all targets with descriptions",
+  },
   {
     name: "--json",
+    section: "info",
     description: "Print the build surface (commands, flags, targets) as JSON",
+    detail:
+      "With --list, print the build surface — commands, flags, targets and parameters — as JSON for tools and agents.",
   },
-  { name: "--skip", description: "Skip the named dependency" },
-  { name: "--parallel", description: "Run independent targets concurrently" },
-  { name: "--no-cache", description: "Ignore the incremental cache" },
+  {
+    name: "--skip",
+    value: " <dep>",
+    section: "run",
+    description: "Skip the named dependency",
+  },
+  {
+    name: "--parallel",
+    value: "[=N]",
+    section: "run",
+    description: "Run independent targets concurrently",
+    detail:
+      "Run independent targets concurrently. =N caps how many are in flight at once; the default is the CPU count.",
+  },
+  {
+    name: "--no-cache",
+    section: "run",
+    description: "Ignore the incremental cache",
+  },
+  {
+    name: "--no-banner",
+    section: "output",
+    description: "Do not print the opening banner (also ZUKE_NO_BANNER)",
+    detail:
+      "Do not print the opening banner — the Zuke wordmark, the framework and runtime versions with the platform, and the run id. ZUKE_NO_BANNER=1 does the same from the environment; the wordmark is already omitted on CI.",
+  },
+  {
+    name: "--plain",
+    section: "output",
+    description: "Plain output: no banner or colour (also ZUKE_PLAIN)",
+    detail:
+      "Plain output: no opening banner and no colour, and informational commands (--version, --help, --list, graph) print exactly what they print into a pipe, so --version is a bare number. A run keeps its target rules and summary table. ZUKE_PLAIN=1 does the same from the environment. It implies --no-banner. Decoration is already dropped on CI and when stdout is not a terminal.",
+  },
   {
     name: "--no-remote-cache",
+    section: "run",
     description: "Use the local cache only; skip the remote cache store",
+    detail:
+      "Use the local cache only; do not restore from or upload to the configured remote cache store.",
   },
   {
     name: "--affected",
+    value: "[=<base>]",
+    section: "run",
     description: "Run only targets affected by changes since a git base",
+    detail:
+      "Run only targets affected by files changed since <base>, a git revision defaulting to HEAD. A target is affected when a changed file is under its declared inputs or when a dependency is affected; targets with no declared inputs always run.",
   },
-  { name: "--dry-run", description: "Print the plan without running targets" },
+  {
+    name: "--dry-run",
+    section: "run",
+    description: "Print the plan without running targets",
+  },
+  {
+    name: "--preflight",
+    section: "run",
+    description: "Run only the validations' preflight checks, then stop",
+    detail:
+      "Run every planned validation's preflight — the checks that decide whether the run may happen at all, such as who may start a comment-triggered review — and stop without running any target. Exits non-zero when a preflight refuses. A normal run performs the same phase before its first target.",
+  },
   {
     name: "--state",
+    section: "record",
     description: "Persist durable run state to .zuke/runs",
+    detail:
+      "Persist durable run state under .zuke/runs — a run record with per-target status and metadata — unless a store is already configured via ZUKE_STATE_URL, ZUKE_STATE_DIR or the build's stateStore(). See docs/state.md.",
   },
   {
     name: "--actor",
+    value: " <name>",
+    section: "record",
     description: "Attribute the run to <name> in its state record",
+    detail:
+      'Attribute the run to <name> in its state record, else ZUKE_ACTOR, the CI actor, or "anonymous". Every resume rewrites it with whoever picked the run up.',
   },
   {
     name: "--actor-kind",
+    value: " <kind>",
+    section: "record",
     description: "Who asked for the run: human (default) or service",
+    detail:
+      "Whether a person or a machine asked: human (the default) or service, else ZUKE_ACTOR_KIND. Recorded on the run's initiator which, unlike --actor, is stamped once at creation and never rewritten.",
   },
-  { name: "--output", description: "Graph output format: text or html" },
+  {
+    name: "--output",
+    value: " <fmt>",
+    description: "Graph output format: text or html",
+    command: "graph",
+    detail:
+      "Graph output format: text (the default terminal adjacency listing) or html.",
+  },
   {
     name: "--no-open",
     description: "With --output=html, do not open a browser",
+    command: "graph",
+    detail: "With --output=html, write the page but do not open a browser.",
   },
   {
     name: "--check",
     description:
       "With generate-ci verify files; with resume re-check suspended runs",
+    command: "generate-ci",
+    detail:
+      "Verify the declared CI files are current instead of writing them, failing if any has drifted. Use this on CI.",
   },
   {
     name: "--signal",
+    value: " <name>",
     description: "With resume, deliver a named external signal",
+    command: "resume",
+    detail: "Deliver a named external signal to the run.",
   },
   {
     name: "--data",
+    value: " <json>",
     description: "With resume --signal, the signal's JSON payload",
+    command: "resume",
+    detail: "With --signal, the signal's JSON payload (default {}).",
   },
   {
     name: "--force-graph",
     description: "With resume, continue even if the build graph changed",
+    command: "resume",
+    detail:
+      "Continue even if the build graph changed since the run was suspended.",
   },
   {
     name: "--resume-degraded",
     description: "With resume, continue even if a state write was dropped",
+    command: "resume",
+    detail:
+      "Continue even though the record is degraded — a state write was permanently lost while the run executed, so a target that succeeded may still be recorded running. Such a target is re-run, so use this only once you know it is safe to repeat.",
+  },
+  {
+    name: "--update",
+    description: "With outdated, bump the lock's resolved versions",
+    command: "outdated",
+    detail:
+      "Move the lock's resolved versions up to the registry's latest instead of only reporting them. Takes optional package names to narrow it. Touches the lock and nothing else: a specifier that forbids the newer release is reported as holding its package back, never rewritten.",
+  },
+  {
+    name: "--min-dep-age",
+    value: " <age>",
+    description: "With outdated, the release age to honour (0 ignores it)",
+    command: "outdated",
+    detail:
+      "How old a release must be to count as the latest, in any form Deno's own --min-dep-age takes: minutes (120, or 0 to ignore release age), an ISO-8601 duration (P2D, PT12H) or a date (2025-09-16). Defaults to Deno's 24 hours. With --update it is passed on to deno install, so the lock can move to a release younger than Deno would otherwise accept.",
+  },
+  {
+    name: "--entrypoint",
+    value: " <file>",
+    description:
+      "With outdated --update, another module graph sharing the lock",
+    command: "outdated",
+    detail:
+      "Re-resolve this file's module graph too, alongside the build's own; repeat it for each. A lock that also serves other entrypoints (a workspace member's own zuke.ts, say) is only fully rewritten when every graph is re-resolved, so name them all. Without it, an update that would leave another graph's records short is refused and the lock restored.",
   },
   {
     name: "--exit-code",
     description:
       "With outdated, exit non-zero when a package is behind or unchecked",
+    command: "outdated",
+    detail:
+      "Exit non-zero when a package is behind or could not be checked, so a gate can fail on either — a run that reached nothing has not answered the question.",
   },
   {
     name: "--status",
+    value: " <status>",
     description: "With runs list, keep only runs with this status",
+    command: "runs",
+    detail:
+      "With runs list, keep only runs with this status: running, suspended, succeeded, failed, or cancelled.",
   },
   {
     name: "--target",
+    value: " <target>",
     description: "With runs list, keep only runs whose graph has this target",
+    command: "runs",
+    detail: "With runs list, keep only runs whose graph contains this target.",
   },
   {
     name: "--since",
+    value: " <iso>",
     description: "With runs list, keep only runs created at/after this time",
+    command: "runs",
+    detail:
+      "With runs list, keep only runs created at or after this ISO-8601 timestamp.",
   },
   {
     name: "--limit",
+    value: " <n>",
     description: "With runs list, return at most this many runs (newest)",
+    command: "runs",
+    detail: "With runs list, return at most this many runs (the newest).",
   },
   {
     name: "--initiator",
+    value: " <name>",
     description: "With runs list, keep only runs this actor started",
+    command: "runs",
+    detail:
+      "With runs list, keep only runs this initiator started. Falls back to the actor on a run recorded before initiators existed.",
   },
   {
     name: "--outcome",
+    value: " <outcome>",
     description: "With force, what the target settles to: skipped or succeeded",
+    command: "force",
+    detail:
+      "What the target settles to without running: skipped takes the step off the plan, succeeded records that a person did it by hand, and a later cancel compensates it.",
   },
   {
     name: "--reason",
+    value: " <text>",
     description: "With force, why the target was forced (recorded on the run)",
+    command: "force",
+    detail:
+      "Why it was forced — recorded on the run beside who forced it, and shown by runs show.",
   },
   {
     name: "--counts",
     description: "With runs list, print aggregate counts (total + per status)",
+    command: "runs",
+    detail:
+      "With runs list, print aggregate counts: the total and one per status.",
   },
   {
     name: "--keep",
+    value: " <age>",
     description: "With runs prune, keep runs newer than this age (e.g. 90d)",
+    command: "runs",
+    detail:
+      "With runs prune, keep runs newer than this age, e.g. 90d; older terminal runs become eligible for deletion.",
   },
   {
     name: "--keep-last",
+    value: " <n>",
     description: "With runs prune, always keep the newest N terminal runs",
+    command: "runs",
+    detail:
+      "With runs prune, always keep the newest N terminal runs. Non-terminal runs, suspended or running, are never pruned.",
   },
   {
     name: "--allow-run",
+    value: "[=<globs>]",
     description:
       "With mcp, let agents run targets (optional =<glob-list> allow-list)",
+    command: "mcp",
+    detail:
+      "Allow agents to execute targets, not just inspect them. An optional =<comma,globs> allow-list exposes only the matching targets as run tools; the others are invisible. Invoking a target runs its dependencies, so allow-listing one allows everything it does — scope this to entry points.",
   },
   {
     name: "--protect",
+    value: " <globs>",
     description: "With mcp, require an operator token to run these targets",
+    command: "mcp",
+    detail:
+      "Require an operator token, ZUKE_OPERATOR_TOKEN, as a tool-call argument before the matching targets may be run.",
   },
   {
     name: "--allowed-origin",
+    value: " <origin>",
     description:
       "With mcp --http, an extra allowed Origin (repeatable; loopback-only otherwise)",
+    command: "mcp",
+    detail:
+      "With --http, permit this browser Origin (repeatable). By default a loopback bind accepts only loopback origins, which is the drive-by and DNS-rebinding guard; a request with no Origin, such as a CLI client, is always allowed.",
   },
   {
     name: "--confirm-destructive",
     description: "With mcp, require confirm:true before a destructive run",
+    command: "mcp",
+    detail:
+      "Make a destructive run tool return its plan instead of executing, unless it is called with confirm:true. A .readOnly() target is exempt.",
   },
   {
     name: "--registry",
     description:
       "With mcp, serve the build registry (dynamic pipeline discovery)",
+    command: "mcp",
+    detail:
+      "Serve the build registry instead of this one build: expose every registered pipeline's targets as tools, re-read live so a newly-registered build appears with no restart. A run tool spawns the registered build's launch command, behind --allow-run and the same authorization. See docs/registry.md.",
   },
   {
     name: "--max-concurrent-runs",
+    value: " <n>",
     description:
       "With mcp --registry, cap concurrent run-tool spawns (default 4)",
+    command: "mcp",
+    detail:
+      "With --registry, the most run-tool spawns allowed at once (default 4). A call past the cap gets an immediate busy error; read tools are never blocked or counted.",
   },
   {
     name: "--http",
+    value: " <host:port>",
     description: "With mcp, serve over HTTP on <host:port> instead of stdio",
+    command: "mcp",
+    detail:
+      "Serve the streamable-HTTP transport on the given address instead of stdio. A bare <port> binds 127.0.0.1. A non-loopback host must authenticate its callers, with a bearer token (ZUKE_MCP_TOKEN) or an mcpAuth() authenticator on the build. Put real TLS in front for production. See docs/mcp.md.",
   },
-  { name: "--help", description: "Show usage" },
+  { name: "--help", section: "info", description: "Show usage" },
+  {
+    name: "--version",
+    section: "info",
+    description: "Print the Zuke version this build runs on",
+    detail:
+      "Prints the @zuke/core version the build resolved, and nothing else, so a script can read it directly.\n\nThis is the build's own version rather than the installed CLI's: the two are separate packages on separate release cadences, and a project pins core through its own import map and lock. Asking the installed zuke prints both, each labelled, so it is never ambiguous which one answered.",
+  },
 ];
 
 /**

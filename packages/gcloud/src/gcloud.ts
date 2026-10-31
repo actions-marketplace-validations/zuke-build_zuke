@@ -11,7 +11,7 @@
  * the `.args(...)` escape hatch.
  *
  * ```ts
- * import { GcloudTasks } from "jsr:@zuke/gcloud";
+ * import { GcloudTasks } from "@zuke/gcloud";
  * await GcloudTasks.run((s) =>
  *   s.command("run", "deploy", "api")
  *     .project("my-proj").flag("region", "us-central1").quiet()
@@ -77,6 +77,20 @@ import {
   GcloudFunctionsDescribeSettings,
   GcloudSecretsVersionsAccessSettings,
 } from "./functions.ts";
+import {
+  GcloudLoggingLogsListSettings,
+  GcloudLoggingReadSettings,
+} from "./logging.ts";
+import {
+  countEntries,
+  GcloudLoggingEntryCountSettings,
+} from "./log_entry_count.ts";
+import {
+  GcloudMonitoringDashboardsListSettings,
+  GcloudMonitoringPoliciesDescribeSettings,
+  GcloudMonitoringPoliciesListSettings,
+  GcloudMonitoringUptimeListConfigsSettings,
+} from "./monitoring.ts";
 import { readScalar } from "./scalar_output.ts";
 
 export { GcloudSettings };
@@ -285,6 +299,52 @@ export interface GcloudTasksApi {
   secretValue(
     configure?: Configure<GcloudSecretsVersionsAccessSettings>,
   ): Promise<string>;
+
+  /**
+   * Read log entries: `gcloud logging read`. What it reads is printed, as
+   * gcloud prints it — into the build log unless `.quiet()` is set, and log
+   * entries can carry secrets.
+   */
+  loggingRead(
+    configure?: Configure<GcloudLoggingReadSettings>,
+  ): Promise<CommandOutput>;
+
+  /**
+   * How many log entries a `gcloud logging read` filter matches, counting at
+   * most `.limit(n)` (default 1000) and failing when more match. Reads only
+   * each entry's id, quietly, so no payload reaches the build.
+   */
+  logEntryCount(
+    configure?: Configure<GcloudLoggingEntryCountSettings>,
+  ): Promise<number>;
+
+  /** List the logs that hold entries: `gcloud logging logs list`. */
+  loggingLogsList(
+    configure?: Configure<GcloudLoggingLogsListSettings>,
+  ): Promise<CommandOutput>;
+
+  /** List alerting policies: `gcloud monitoring policies list`. */
+  monitoringPoliciesList(
+    configure?: Configure<GcloudMonitoringPoliciesListSettings>,
+  ): Promise<CommandOutput>;
+
+  /** Describe an alerting policy: `gcloud monitoring policies describe`. */
+  monitoringPoliciesDescribe(
+    configure?: Configure<GcloudMonitoringPoliciesDescribeSettings>,
+  ): Promise<CommandOutput>;
+
+  /** List dashboards: `gcloud monitoring dashboards list`. */
+  monitoringDashboardsList(
+    configure?: Configure<GcloudMonitoringDashboardsListSettings>,
+  ): Promise<CommandOutput>;
+
+  /**
+   * List uptime checks and synthetic monitors:
+   * `gcloud monitoring uptime list-configs`.
+   */
+  monitoringUptimeListConfigs(
+    configure?: Configure<GcloudMonitoringUptimeListConfigsSettings>,
+  ): Promise<CommandOutput>;
 }
 
 /**
@@ -300,7 +360,11 @@ async function scalarFrom<S extends GcloudSettings>(
   subject: string,
 ): Promise<string> {
   const configured = configure ? configure(settings) : settings;
-  return readScalar(await configured.quiet().run(), task, subject);
+  return readScalar(
+    await configured.quiet().run(),
+    `GcloudTasks.${task}`,
+    subject,
+  );
 }
 
 /** Typed task functions for the `gcloud` CLI. */
@@ -401,4 +465,24 @@ export const GcloudTasks: GcloudTasksApi = {
       "secretValue",
       "secret payload",
     ),
+
+  loggingRead: (c) => runSettings(new GcloudLoggingReadSettings(), c),
+  logEntryCount: (c) => {
+    const settings = new GcloudLoggingEntryCountSettings();
+    return countEntries(
+      c ? c(settings) : settings,
+      "GcloudTasks.logEntryCount",
+      (g) => g,
+    );
+  },
+  loggingLogsList: (c) => runSettings(new GcloudLoggingLogsListSettings(), c),
+
+  monitoringPoliciesList: (c) =>
+    runSettings(new GcloudMonitoringPoliciesListSettings(), c),
+  monitoringPoliciesDescribe: (c) =>
+    runSettings(new GcloudMonitoringPoliciesDescribeSettings(), c),
+  monitoringDashboardsList: (c) =>
+    runSettings(new GcloudMonitoringDashboardsListSettings(), c),
+  monitoringUptimeListConfigs: (c) =>
+    runSettings(new GcloudMonitoringUptimeListConfigsSettings(), c),
 };

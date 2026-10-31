@@ -144,7 +144,13 @@ Deno.test("outdated is a reserved word, and the help and listing say so", async 
   const help = await runCli(OutdatedBuild, ["--help"]);
   assertEquals(help.code, 0);
   assertEquals(help.out.includes("outdated"), true);
-  assertEquals(help.out.includes("--exit-code"), true);
+
+  // The flag lives in the command's own help, which is where the main help
+  // sends a reader for it.
+  const commandHelp = await runCli(OutdatedBuild, ["outdated", "--help"]);
+  assertEquals(commandHelp.code, 0);
+  assertEquals(commandHelp.out.includes("--exit-code"), true);
+  assertEquals(commandHelp.out.includes("--update"), true);
 
   const surface = await runCli(OutdatedBuild, ["--list", "--json"]);
   assertEquals(surface.code, 0);
@@ -158,4 +164,282 @@ Deno.test("outdated is a reserved word, and the help and listing say so", async 
     )
     : [];
   assertEquals(names.includes("outdated"), true);
+});
+
+/**
+ * Run `outdated --update` against a temporary lock, with re-resolution faked
+ * by `resolved`: the versions the next resolution would produce, by specifier.
+ * Returns the CLI result and the lock as it ended up.
+ */
+async function runUpdate(
+  specifiers: Record<string, string>,
+  latest: Record<string, string>,
+  resolved: Record<string, string>,
+  args: string[] = [],
+): Promise<{ code: number; out: string; err: string; lock: string }> {
+  const dir = await Deno.makeTempDir();
+  try {
+    const lockPath = `${dir}/deno.lock`;
+    await Deno.writeTextFile(
+      lockPath,
+      JSON.stringify({ version: "5", specifiers }, null, 2),
+    );
+    const result = await runCli(OutdatedBuild, [
+      "outdated",
+      "--update",
+      ...args,
+    ], {
+      outdatedOptions: {
+        lockPath,
+        registry: "https://registry.test",
+        fetch: registryFetch(latest),
+        resolve: async (path) => {
+          // Models `deno install`: it fills in entries that are missing and
+          // leaves a satisfying one alone, so only dropped specifiers move.
+          const lock = JSON.parse(await Deno.readTextFile(path));
+          for (const [specifier, version] of Object.entries(resolved)) {
+            if (lock.specifiers[specifier] === undefined) {
+              lock.specifiers[specifier] = version;
+            }
+          }
+          await Deno.writeTextFile(path, JSON.stringify(lock, null, 2));
+        },
+      },
+    });
+    return { ...result, lock: await Deno.readTextFile(lockPath) };
+  } finally {
+    await Deno.remove(dir, { recursive: true });
+  }
+}
+
+Deno.test("outdated --update writes the bumped version into the lock", async () => {
+  const { code, out, lock } = await runUpdate(
+    { "jsr:@zuke/git@^1": "1.2.0" },
+    { "@zuke/git": "1.9.0" },
+    { "jsr:@zuke/git@^1": "1.9.0" },
+  );
+  assertEquals(code, 0);
+  assertEquals(out.includes("1.2.0"), true);
+  assertEquals(out.includes("1.9.0"), true);
+  assertEquals(JSON.parse(lock).specifiers["jsr:@zuke/git@^1"], "1.9.0");
+});
+
+Deno.test("outdated --update narrows to the packages it is given", async () => {
+  const { code, lock } = await runUpdate(
+    { "jsr:@zuke/git@^1": "1.2.0", "jsr:@zuke/gh@^2": "2.0.0" },
+    { "@zuke/git": "1.9.0", "@zuke/gh": "2.5.0" },
+    { "jsr:@zuke/git@^1": "1.9.0", "jsr:@zuke/gh@^2": "2.5.0" },
+    ["@zuke/git"],
+  );
+  assertEquals(code, 0);
+  const { specifiers } = JSON.parse(lock);
+  assertEquals(specifiers["jsr:@zuke/git@^1"], "1.9.0");
+  // Behind as well, but not asked for: its entry was never dropped.
+  assertEquals(specifiers["jsr:@zuke/gh@^2"], "2.0.0");
+});
+
+Deno.test("outdated --update reports a pinned package as held, and exits 0", async () => {
+  // An exact specifier resolves to the same version however often you ask, so
+  // there is nothing the lock can do about it. Saying "updated" would be false.
+  const { code, out, lock } = await runUpdate(
+    { "jsr:@std/yaml@1.0.5": "1.0.5" },
+    { "@std/yaml": "1.3.0" },
+    // Re-resolution puts it back at the only version the specifier allows.
+    { "jsr:@std/yaml@1.0.5": "1.0.5" },
+  );
+  assertEquals(code, 0);
+  assertEquals(out.includes("held at 1.3.0"), true);
+  assertEquals(out.includes("widen the range"), true);
+  assertEquals(JSON.parse(lock).specifiers["jsr:@std/yaml@1.0.5"], "1.0.5");
+});
+
+Deno.test("outdated --update --exit-code fails only on what is still actionable", async () => {
+  // A clean update exits 0 even though something *was* behind: after updating,
+  // "was behind" is the expected state and failing on it makes the flag
+  // unusable in the scheduled pipeline this command is meant for.
+  const clean = await runUpdate(
+    { "jsr:@zuke/git@^1": "1.2.0" },
+    { "@zuke/git": "1.9.0" },
+    { "jsr:@zuke/git@^1": "1.9.0" },
+    ["--exit-code"],
+  );
+  assertEquals(clean.code, 0);
+  // A package a specifier holds back is still actionable, so it fails.
+  const stuck = await runUpdate(
+    { "jsr:@std/yaml@1.0.5": "1.0.5" },
+    { "@std/yaml": "1.3.0" },
+    { "jsr:@std/yaml@1.0.5": "1.0.5" },
+    ["--exit-code"],
+  );
+  assertEquals(stuck.code, 1);
+});
+
+Deno.test("outdated rejects package names without --update", async () => {
+  const { code, err } = await runOutdated(
+    { "jsr:@zuke/git@^1": "1.2.0" },
+    { "@zuke/git": "1.9.0" },
+    ["@zuke/git"],
+  );
+  assertEquals(code, 1);
+  assertEquals(err.includes("only apply with --update"), true);
+});
+
+Deno.test("outdated --update names a package the lock does not resolve", async () => {
+  const { code, err } = await runUpdate(
+    { "jsr:@zuke/git@^1": "1.2.0" },
+    { "@zuke/git": "1.9.0" },
+    { "jsr:@zuke/git@^1": "1.9.0" },
+    ["@zuke/nope"],
+  );
+  assertEquals(code, 1);
+  assertEquals(err.includes("@zuke/nope"), true);
+});
+
+Deno.test("outdated lists a package once, however many wrappers pin it", async () => {
+  const { code, out } = await runOutdated(
+    {
+      "jsr:@zuke/console@^1": "1.4.0",
+      "jsr:@zuke/core@^1.31.0": "1.66.0",
+      "jsr:@zuke/core@^1.40.0": "1.66.0",
+      "jsr:@zuke/core@^1.60.0": "1.66.0",
+    },
+    { "@zuke/console": "1.5.0", "@zuke/core": "1.67.0" },
+  );
+  assertEquals(code, 0);
+  const coreLines = out.split("\n").filter((l) => l.startsWith("@zuke/core"));
+  assertEquals(coreLines.length, 1, out);
+  assertEquals(out.includes("2 packages are behind"), true, out);
+});
+
+Deno.test("outdated does not offer a release Deno is still too young to install", async () => {
+  // Deno refuses releases under 24h old by default; offering one sends
+  // `--update` into a resolution that cannot succeed.
+  const dir = await Deno.makeTempDir();
+  try {
+    const lockPath = `${dir}/deno.lock`;
+    await Deno.writeTextFile(
+      lockPath,
+      JSON.stringify({
+        version: "5",
+        specifiers: { "jsr:@zuke/core@^1": "1.66.0" },
+      }),
+    );
+    const hour = 60 * 60 * 1000;
+    const meta = {
+      latest: "1.67.0",
+      versions: {
+        "1.66.0": { createdAt: new Date(Date.now() - 48 * hour).toISOString() },
+        "1.67.0": { createdAt: new Date(Date.now() - hour).toISOString() },
+      },
+    };
+    const { code, out } = await runCli(OutdatedBuild, [
+      "outdated",
+      "--exit-code",
+    ], {
+      outdatedOptions: {
+        lockPath,
+        registry: "https://registry.test",
+        fetch: () => Promise.resolve(new Response(JSON.stringify(meta))),
+      },
+    });
+    assertEquals(code, 0);
+    assertEquals(out.includes("at its latest release"), true);
+  } finally {
+    await Deno.remove(dir, { recursive: true });
+  }
+});
+
+Deno.test("outdated --update --min-dep-age passes the age on to the resolver", async () => {
+  // A release an hour old is offered, and moved to, once the age is waived —
+  // and the resolver is told the same age, or Deno would refuse that version.
+  const dir = await Deno.makeTempDir();
+  try {
+    const lockPath = `${dir}/deno.lock`;
+    await Deno.writeTextFile(
+      lockPath,
+      JSON.stringify({
+        version: "5",
+        specifiers: { "jsr:@zuke/core@^1": "1.66.0" },
+      }),
+    );
+    const meta = {
+      latest: "1.67.0",
+      versions: {
+        "1.67.0": { createdAt: new Date(Date.now() - 3_600_000).toISOString() },
+      },
+    };
+    const requests: unknown[] = [];
+    const { code, out } = await runCli(OutdatedBuild, [
+      "outdated",
+      "--update",
+      "--min-dep-age",
+      "0",
+      "--entrypoint",
+      "/repo/a/zuke.ts",
+      "--entrypoint=b/zuke.ts",
+    ], {
+      outdatedOptions: {
+        lockPath,
+        registry: "https://registry.test",
+        fetch: () => Promise.resolve(new Response(JSON.stringify(meta))),
+        resolve: async (path, request) => {
+          requests.push(request);
+          const lock = JSON.parse(await Deno.readTextFile(path));
+          lock.specifiers["jsr:@zuke/core@^1"] = "1.67.0";
+          await Deno.writeTextFile(path, JSON.stringify(lock));
+        },
+      },
+    });
+    assertEquals(code, 0, out);
+    // Relative entrypoints are resolved against the working directory.
+    assertEquals(requests, [{
+      minDepAge: "0",
+      entrypoints: [
+        "/repo/a/zuke.ts",
+        `${Deno.cwd().replaceAll("\\", "/")}/b/zuke.ts`,
+      ],
+    }]);
+    assertEquals(out.includes("1.66.0  →  1.67.0"), true, out);
+  } finally {
+    await Deno.remove(dir, { recursive: true });
+  }
+});
+
+Deno.test("outdated rejects a --min-dep-age it cannot read, before asking the registry", async () => {
+  let asked = false;
+  const { code, err } = await runCli(OutdatedBuild, [
+    "outdated",
+    "--min-dep-age=soon",
+  ], {
+    outdatedOptions: {
+      lockPath: "/nonexistent/deno.lock",
+      fetch: () => {
+        asked = true;
+        return Promise.resolve(new Response("{}"));
+      },
+    },
+  });
+  assertEquals(code, 1);
+  assertEquals(err.includes('--min-dep-age "soon"'), true, err);
+  assertEquals(asked, false);
+});
+
+Deno.test("outdated rejects --entrypoint without --update", async () => {
+  const { code, err } = await runOutdated(
+    { "jsr:@zuke/git@^1": "1.2.0" },
+    { "@zuke/git": "1.9.0" },
+    ["--entrypoint", "other/zuke.ts"],
+  );
+  assertEquals(code, 1);
+  assertEquals(err.includes("--entrypoint only applies with --update"), true);
+});
+
+Deno.test("outdated refuses an empty --min-dep-age rather than defaulting", async () => {
+  const { code, err } = await runCli(OutdatedBuild, [
+    "outdated",
+    "--min-dep-age",
+    "",
+  ], { outdatedOptions: { lockPath: "/nonexistent/deno.lock" } });
+  assertEquals(code, 1);
+  assertEquals(err.includes('--min-dep-age ""'), true, err);
 });

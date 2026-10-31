@@ -6,7 +6,14 @@ The `zuke` command-line tool — scaffold
 ```sh
 deno install -A -g -n zuke jsr:@zuke/cli
 zuke setup
+zuke upgrade        # later: move the installed CLI to the latest release
 ```
+
+The same CLI also ships as a standalone binary that needs no Deno up front:
+`brew install zuke-build/tap/zuke` on macOS and Linux, and `choco install zuke`
+on Windows (not Authenticode-signed yet). Update those with `brew upgrade zuke`
+or `choco upgrade zuke`. See
+[installing](https://github.com/zuke-build/zuke/blob/master/docs/install.md).
 
 <!-- ZUKE:API:START -->
 
@@ -24,26 +31,23 @@ deno install -A -g -n zuke jsr:@zuke/cli
 
 scaffold Zuke into any project with `zuke setup`, then run its build from
 anywhere inside the project with `zuke <target>`: every command that is not
-the CLI's own (`setup`, `import`, `doc`) is forwarded to the nearest
-`zuke.ts`, exactly as the `./zuke` launcher would run it.
+the CLI's own (`setup`, `import`, `doc`, `upgrade`, and the project
+commands `add`, `remove`, `cache` and `relock`) is forwarded to the
+nearest `zuke.ts`, exactly as the `./zuke` launcher would run it. Update the
+installed CLI itself with `zuke upgrade`, and manage a project's
+dependencies and lock with `zuke add`, `remove`, `cache` and `relock`.
 @module
 
-async function main(args: string[], host: SetupHost, prompter: Prompter, docRunner: DocRunner, starActions: StarActions, buildRunner: BuildRunner, buildProbe: BuildProbe): Promise<number>
+async function main(args: string[], host: SetupHost, prompter: Prompter, docRunner: DocRunner, starActions: StarActions, buildRunner: BuildRunner, buildProbe: BuildProbe, upgradeHost: UpgradeHost, projectHost: ProjectHost): Promise<number>
   The CLI entry point. Returns a process exit code; `host`, `prompter`,
-  `docRunner`, `starActions`, `buildRunner`, and `buildProbe` are injectable
-  for testing.
+  `docRunner`, `starActions`, `buildRunner`, `buildProbe`, `upgradeHost` and
+  `projectHost` are injectable for testing.
 
 function parseImportFlags(args: string[]): ImportFlags
   Parse the argument list following `zuke import`.
 
 function parseSetupFlags(args: string[]): SetupFlags
   Parse the argument list following `zuke setup`.
-
-function resolveDocSpec(pkg: string | undefined): string | undefined
-  Resolve a `zuke doc` argument to a `deno doc` specifier: a bare package name
-  (`core`) becomes `jsr:@zuke/core`, a scoped name (`@scope/pkg`) becomes
-  `jsr:@scope/pkg`, and an explicit `jsr:`/`npm:`/`https:`/`file:`/path
-  specifier is passed through unchanged. Returns `undefined` for no argument.
 
 const defaultPrompter: Prompter
   The real {@link Prompter}, backed by Deno's `prompt`/`confirm`.
@@ -55,6 +59,14 @@ interface BuildLocation
     The absolute repository root: the directory holding `zuke.json`.
   frozen: boolean
     Whether a `deno.lock` sits at the root, so the run passes `--frozen`.
+  launcher: string | null
+    The absolute path of the executable `zuke` launcher at the root, run in
+    place of `deno run` — or `null` when there is none, or the platform
+    reports no file mode to tell (Windows).
+  engine: string | null
+    The `@zuke/engine` release that runs the build when the root has no
+    `zuke.ts`: the `engine` field of its `zuke.json`, which then describes a
+    build another SDK hosts. `null` when the root has its own build file.
 
 interface BuildProbe
   The filesystem questions discovery asks, injectable so the walk and its
@@ -65,14 +77,35 @@ interface BuildProbe
   ownership(path: string): Promise<Ownership | null>
     The owner and mode of what a path resolves to, or `null` when nothing is
     there.
+  realPath(path: string): Promise<string>
+    The path with every link resolved.
+  readLink(path: string): Promise<string | null>
+    The target a symlink names, exactly as written in the link (possibly
+    relative to the link's directory), or `null` when `path` is not a link.
   uid(): number | null
     The current user's numeric id, or `null` where the platform has none.
+  readText(path: string): Promise<string>
+    The text of a file.
 
 interface ImportFlags extends SetupFlags
   Flags accepted by `zuke import` — the setup flags plus `--from`.
 
   from?: ImportSource
     Force a source (`package.json` or `makefile`); auto-detected when unset.
+
+interface InstallHost
+  The process facts {@link installSource} reads, injectable so each install
+  kind is testable from a single process.
+
+  standalone(): boolean
+    Whether this process is a `deno compile` binary (`Deno.build.standalone`).
+  mainModule(): string
+    The running CLI's main module (`Deno.mainModule`). Deno reports a JSR
+    program by its specifier, `jsr:@zuke/cli` or `jsr:@zuke/cli@<version>`.
+  execPath(): string
+    The running executable's path (`Deno.execPath()`).
+  realPath(path: string): Promise<string>
+    `path` with every symbolic link resolved (`Deno.realPath`).
 
 interface Ownership
   What the trust gate needs to know about a filesystem entry.
@@ -81,6 +114,21 @@ interface Ownership
     The numeric owner, or `null` where the platform reports none (Windows).
   mode: number | null
     The permission bits, or `null` where the platform reports none.
+
+interface ProjectHost
+  What the project commands reach outside the process, injectable so they
+  are testable without a real `deno`.
+
+  readText(path: string): Promise<string>
+    Read a text file, rejecting when it cannot be read.
+  writeText(path: string, text: string): Promise<void>
+    Write a text file, replacing what is there.
+  remove(path: string): Promise<void>
+    Remove a file.
+  deno(denoArgs: string[], cwd: string): Promise<number>
+    Run `deno <denoArgs>` in `cwd`, returning its exit code.
+  denoVersion(): string
+    The version of the Deno that runs the command.
 
 interface Prompter
   The interactive surface, injectable so the wizard is testable without a TTY.
@@ -142,6 +190,10 @@ interface SetupHost
     guards.
   readText(path: string): Promise<string>
     Read a file as UTF-8 text.
+  isTerminal?(): boolean
+    Whether stdout is an interactive terminal, which decides whether the
+    CLI's own output is rich. Optional: an implementation without it is
+    asked through Deno, the way every other process decides.
   writeText(path: string, content: string): Promise<void>
     Write UTF-8 text to a file, creating or replacing it.
 
@@ -165,9 +217,33 @@ interface StarActions
   openBrowser(url: string): Promise<boolean>
     Open `url` in the default browser; `false` when it could not launch.
 
-type BuildRunner = (root: string, denoArgs: string[]) => Promise<number>
-  Runs `deno <denoArgs>` from `root` and resolves to its exit code — the
+interface UpgradeHost extends InstallHost
+  What `zuke upgrade` reaches outside the process, injectable so the
+  command is testable without the network or a real reinstall.
+
+  binDir(): string | undefined
+    The directory `deno install -g` installs into (`<root>/bin`):
+    `DENO_INSTALL_ROOT`, else `~/.deno`, as Deno resolves it. `undefined`
+    when the environment names neither as an absolute path.
+  exists(path: string): Promise<boolean>
+    Whether `path` exists.
+  windows(): boolean
+    Whether this is Windows, where the running shim is a `.cmd` file.
+  meta(): Promise<unknown>
+    Fetch and parse `@zuke/cli`'s JSR `meta.json`.
+  install(denoArgs: string[]): Promise<number>
+    Run `deno <denoArgs>` to reinstall, returning its exit code.
+  denoVersion(): string
+    The version of the Deno that runs the reinstall: the one running this
+    CLI, since `zuke upgrade` only ever runs from a JSR install under Deno.
+  readText(path: string): Promise<string>
+    Read a text file, rejecting when it cannot be read.
+
+type BuildRunner = (root: string, args: string[], program?: string, env?: Readonly<Record<string, string>>) => Promise<number>
+  Runs `program <args>` from `root` — Deno when `program` is omitted, else the
+  project's launcher at that path — and resolves to its exit code: the
   injectable subprocess seam, so the forwarding is testable without a build.
+  `env` adds variables to the environment the child inherits.
 
 type DocRunner = (denoArgs: string[]) => Promise<number>
   Runs `deno doc <args>` — the injectable subprocess seam for

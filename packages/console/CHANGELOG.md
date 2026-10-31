@@ -1,5 +1,33 @@
 # Changelog
 
+## [1.5.0](https://github.com/zuke-build/zuke/compare/console-v1.4.0...console-v1.5.0) (2026-10-07)
+
+
+### Features
+
+* **cli:** rich global-CLI output and a lock-based zuke --version ([#741](https://github.com/zuke-build/zuke/issues/741)) ([91f6916](https://github.com/zuke-build/zuke/commit/91f6916fcd5d2729723527a68b7143de441f641d))
+
+## [1.4.0](https://github.com/zuke-build/zuke/compare/console-v1.3.0...console-v1.4.0) (2026-09-21)
+
+
+### Features
+
+* **core:** add `outdated --update` to bump the versions the lock resolves ([#645](https://github.com/zuke-build/zuke/issues/645)) ([56c9d39](https://github.com/zuke-build/zuke/commit/56c9d39a8ff08ace7c8758532c3eda5f251d5516))
+
+## [1.3.0](https://github.com/zuke-build/zuke/compare/console-v1.2.0...console-v1.3.0) (2026-09-21)
+
+
+### Features
+
+* **core:** export the default env reader, and drop console's wordmark copy ([#643](https://github.com/zuke-build/zuke/issues/643)) ([0b67f33](https://github.com/zuke-build/zuke/commit/0b67f335f444fc52291b9abddcd571726d5c7c56)), closes [#639](https://github.com/zuke-build/zuke/issues/639)
+
+## [1.2.0](https://github.com/zuke-build/zuke/compare/console-v1.1.1...console-v1.2.0) (2026-09-21)
+
+
+### Features
+
+* **core:** open every run with a version and platform banner ([#630](https://github.com/zuke-build/zuke/issues/630)) ([5917780](https://github.com/zuke-build/zuke/commit/59177807f1bb5cb3d211622f9987761b6cae6899))
+
 ## [1.1.1](https://github.com/zuke-build/zuke/compare/console-v1.1.0...console-v1.1.1) (2026-09-10)
 
 

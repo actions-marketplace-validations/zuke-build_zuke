@@ -55,7 +55,10 @@ export const defaultDenoHost: DenoHost = {
 };
 
 /** The first of `names` with a non-empty value, or `undefined` if none has one. */
-function firstSet(host: DenoHost, ...names: string[]): string | undefined {
+export function firstSet(
+  host: DenoHost,
+  ...names: string[]
+): string | undefined {
   for (const name of names) {
     const value = host.env(name);
     if (value !== undefined && value !== "") return value;
@@ -127,6 +130,17 @@ export function pathWithDeno(
   };
 }
 
+/**
+ * What every Deno this package spawns runs with on top of its inherited
+ * environment: no update check. Deno's "A new release of Deno is available"
+ * notice otherwise lands in the middle of the CLI's own output — between the
+ * version lines of `zuke --version`, or above a forwarded build's first line —
+ * and it is about Deno, which this command did not ask about.
+ */
+export const QUIET_DENO_ENV: Readonly<Record<string, string>> = {
+  DENO_NO_UPDATE_CHECK: "1",
+};
+
 /** Thrown when no Deno could be found to run a build with. */
 export class DenoNotFoundError extends Error {
   /** The error's name, as reported by `String(error)` and stack traces. */
@@ -149,11 +163,12 @@ export class DenoNotFoundError extends Error {
 }
 
 /**
- * What {@link spawnDeno} accepts: `Deno.Command`'s options without the two it
- * owns. The argv is the caller's `args`, and the environment carries the
- * resolved Deno's directory on `PATH`, which only this function knows.
+ * What {@link spawnDeno} accepts: `Deno.Command`'s options without the argv,
+ * which is the caller's `args`. An `env` is added to the inherited
+ * environment; it can never override {@link QUIET_DENO_ENV}'s update check,
+ * nor the resolved Deno's directory on `PATH`, which only this function knows.
  */
-export type DenoSpawnOptions = Omit<Deno.CommandOptions, "args" | "env">;
+export type DenoSpawnOptions = Omit<Deno.CommandOptions, "args">;
 
 /**
  * Whether `cwd` still names a directory to spawn in — vacuously true when the
@@ -192,7 +207,7 @@ export function spawnDeno(
       return new Deno.Command(command, {
         ...options,
         args,
-        env: pathWithDeno(command),
+        env: { ...options.env, ...QUIET_DENO_ENV, ...pathWithDeno(command) },
       }).spawn();
     } catch (error) {
       // Not installed here; the next candidate may be. Anything else — a
